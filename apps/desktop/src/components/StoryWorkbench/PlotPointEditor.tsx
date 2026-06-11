@@ -9,6 +9,7 @@ import { MentionNode } from '../LexicalEditor/nodes/MentionNode';
 import MentionsPlugin from '../LexicalEditor/plugins/MentionsPlugin';
 import { clsx } from 'clsx';
 import { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { $getRoot, $createParagraphNode, $createTextNode } from 'lexical';
 import LexicalErrorBoundary from '@lexical/react/LexicalErrorBoundary';
 
@@ -68,6 +69,7 @@ export default function PlotPointEditor({
     placeholder,
     className
 }: PlotPointEditorProps) {
+    const { t } = useTranslation();
     const isDark = theme === 'dark';
 
     const initialConfig = {
@@ -100,7 +102,7 @@ export default function PlotPointEditor({
 
                     placeholder={
                         <div className="absolute top-2 left-2 text-sm opacity-40 pointer-events-none select-none">
-                            {placeholder || 'Enter description...'}
+                            {placeholder || t('plot.descriptionPlaceholder')}
                         </div>
                     }
                     ErrorBoundary={LexicalErrorBoundary as any}

@@ -66,7 +66,7 @@ export function AISettingsPanel({ isDark }: Props) {
     const [statusTone, setStatusTone] = useState<StatusTone>('neutral');
     const [isSaving, setIsSaving] = useState(false);
     const [isTesting, setIsTesting] = useState(false);
-    const [testPrompt, setTestPrompt] = useState('请用一句话生成一个玄幻小说章节标题');
+    const [testPrompt, setTestPrompt] = useState(t('settings.ai.defaultTestPrompt'));
     const [creativityLevel, setCreativityLevel] = useState<CreativityLevel>('balanced');
     const [mcpSetup, setMcpSetup] = useState<McpCliSetupPayload | null>(null);
     const [copyStatus, setCopyStatus] = useState('');
@@ -74,6 +74,7 @@ export function AISettingsPanel({ isDark }: Props) {
     const [expandedCards, setExpandedCards] = useState({
         httpAdvanced: false,
         summary: false,
+        embedding: false,
         proxy: false,
     });
 
@@ -94,6 +95,16 @@ export function AISettingsPanel({ isDark }: Props) {
                         summaryFinalizeMinWords: res.summary?.summaryFinalizeMinWords ?? 1200,
                         recentChapterRawCount: res.summary?.recentChapterRawCount ?? 2,
                     },
+                    embedding: {
+                        enabled: res.embedding?.enabled ?? false,
+                        baseUrl: res.embedding?.baseUrl ?? '',
+                        apiKey: res.embedding?.apiKey ?? '',
+                        model: res.embedding?.model ?? 'bge-large-zh-v1.5',
+                        dimensions: res.embedding?.dimensions ?? 1024,
+                        batchSize: res.embedding?.batchSize ?? 8,
+                        timeoutMs: res.embedding?.timeoutMs ?? 60000,
+                        fallbackToHash: res.embedding?.fallbackToHash ?? true,
+                    },
                 } as AISettings;
                 setSettings(merged);
                 setCreativityLevel(temperatureToCreativityLevel(merged.http.temperature));
@@ -102,7 +113,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 console.error('[AISettingsPanel] load failed:', error);
                 if (!mounted) return;
                 setStatusTone('error');
-                setStatus(formatAiErrorFromUnknown(error, t('settings.ai.status.loadFailed')));
+                setStatus(formatAiErrorFromUnknown(error, t, t('settings.ai.status.loadFailed')));
             });
 
         return () => {
@@ -117,6 +128,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 ...prev,
                 httpAdvanced: false,
                 summary: false,
+                embedding: false,
                 proxy: false,
             }));
         }
@@ -240,7 +252,7 @@ export function AISettingsPanel({ isDark }: Props) {
         } catch (error) {
             console.error('[AISettingsPanel] save failed:', error);
             setStatusTone('error');
-            setStatus(formatAiErrorFromUnknown(error, t('settings.ai.status.saveFailed')));
+            setStatus(formatAiErrorFromUnknown(error, t, t('settings.ai.status.saveFailed')));
         } finally {
             setIsSaving(false);
         }
@@ -266,7 +278,7 @@ export function AISettingsPanel({ isDark }: Props) {
         } catch (error) {
             console.error('[AISettingsPanel] test failed:', error);
             setStatusTone('error');
-            setStatus(`${t(`settings.ai.check.${kind}`)}: ${formatAiErrorFromUnknown(error, t('settings.ai.status.error'))}`);
+            setStatus(`${t(`settings.ai.check.${kind}`)}: ${formatAiErrorFromUnknown(error, t, t('settings.ai.status.error'))}`);
         } finally {
             setIsTesting(false);
         }
@@ -284,12 +296,12 @@ export function AISettingsPanel({ isDark }: Props) {
                 setStatus(`${t('settings.ai.check.generate')}: ${t('settings.ai.status.ok')}${result.text ? ` | ${result.text}` : ''}`);
             } else {
                 setStatusTone('error');
-                setStatus(`${t('settings.ai.check.generate')}: ${t('settings.ai.status.failed')} | ${formatAiError(undefined, result.detail || '')}`);
+                setStatus(`${t('settings.ai.check.generate')}: ${t('settings.ai.status.failed')} | ${formatAiError(undefined, t, result.detail || '')}`);
             }
         } catch (error) {
             console.error('[AISettingsPanel] test generate failed:', error);
             setStatusTone('error');
-            setStatus(`${t('settings.ai.check.generate')}: ${formatAiErrorFromUnknown(error, t('settings.ai.status.error'))}`);
+            setStatus(`${t('settings.ai.check.generate')}: ${formatAiErrorFromUnknown(error, t, t('settings.ai.status.error'))}`);
         } finally {
             setIsTesting(false);
         }
@@ -460,6 +472,56 @@ export function AISettingsPanel({ isDark }: Props) {
                                     </SettingField>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+
+                    <div className="md:col-span-2 rounded-xl border border-amber-300/40 bg-amber-50/50 dark:bg-amber-400/5 dark:border-amber-300/20">
+                        <button
+                            type="button"
+                            onClick={() => setExpandedCards((prev) => ({ ...prev, embedding: !prev.embedding }))}
+                            className="w-full flex items-center justify-between px-4 py-3 text-left"
+                        >
+                            <div className={clsx('text-xs font-medium', isDark ? 'text-sky-200' : 'text-sky-800')}>
+                                {t('settings.ai.embedding.title')}
+                            </div>
+                            <span className={clsx('text-xs', isDark ? 'text-sky-200/80' : 'text-sky-700')}>
+                                {expandedCards.embedding ? '▾' : '▸'}
+                            </span>
+                        </button>
+                        <div className={clsx('px-4 pb-4 space-y-3', expandedCards.embedding ? 'block' : 'hidden')}>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                <SettingField label={t('settings.ai.embedding.enabled')}>
+                                    <select value={settings.embedding.enabled ? 'true' : 'false'} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, enabled: e.target.value === 'true' } })} className={inputClass}>
+                                        <option value="false">{t('common.off')}</option>
+                                        <option value="true">{t('common.on')}</option>
+                                    </select>
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.fallbackToHash')}>
+                                    <select value={settings.embedding.fallbackToHash ? 'true' : 'false'} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, fallbackToHash: e.target.value === 'true' } })} className={inputClass}>
+                                        <option value="true">{t('common.on')}</option>
+                                        <option value="false">{t('common.off')}</option>
+                                    </select>
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.baseUrl')} hint={t('settings.ai.embedding.baseUrlHint')} className="md:col-span-2">
+                                    <input value={settings.embedding.baseUrl} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, baseUrl: e.target.value } })} placeholder="http://127.0.0.1:8000" className={inputClass} />
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.apiKey')} className="md:col-span-2">
+                                    <input type="password" value={settings.embedding.apiKey} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, apiKey: e.target.value } })} placeholder={t('settings.ai.embedding.apiKeyPlaceholder')} className={inputClass} />
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.model')}>
+                                    <input value={settings.embedding.model} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, model: e.target.value } })} placeholder="bge-large-zh-v1.5" className={inputClass} />
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.dimensions')}>
+                                    <input type="number" value={settings.embedding.dimensions ?? 1024} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, dimensions: Number(e.target.value) || undefined } })} placeholder="1024" className={inputClass} />
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.batchSize')}>
+                                    <input type="number" min={1} max={64} value={settings.embedding.batchSize} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, batchSize: Math.max(1, Math.min(64, Number(e.target.value) || 8)) } })} placeholder="8" className={inputClass} />
+                                </SettingField>
+                                <SettingField label={t('settings.ai.embedding.timeoutMs')}>
+                                    <input type="number" value={settings.embedding.timeoutMs} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, timeoutMs: Number(e.target.value) || 60000 } })} placeholder="60000" className={inputClass} />
+                                </SettingField>
+                            </div>
+                            <p className={clsx('text-xs leading-5', isDark ? 'text-sky-100/80' : 'text-sky-800')}>{t('settings.ai.embedding.notice')}</p>
                         </div>
                     </div>
 

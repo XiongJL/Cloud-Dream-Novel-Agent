@@ -48,6 +48,16 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         noProxy: '',
     },
     summary: DEFAULT_SUMMARY_SETTINGS,
+    embedding: {
+        enabled: false,
+        baseUrl: '',
+        apiKey: '',
+        model: 'bge-large-zh-v1.5',
+        dimensions: 1024,
+        batchSize: 8,
+        timeoutMs: 60000,
+        fallbackToHash: true,
+    },
 };
 
 const pendingTimers = new Map<string, NodeJS.Timeout>();

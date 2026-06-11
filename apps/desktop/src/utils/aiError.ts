@@ -62,37 +62,36 @@ export function inferAiErrorCode(error: unknown): UiAiErrorCode | undefined {
     return undefined;
 }
 
-export function formatAiError(code?: string, fallback?: string): string {
-    switch (normalizeCode(code)) {
-        case 'INVALID_INPUT':
-            return '参数不完整或格式错误，请检查输入。';
-        case 'NOT_FOUND':
-            return '目标数据不存在，可能已被删除。';
-        case 'CONFLICT':
-            return '当前操作与现有数据冲突，请刷新后重试。';
-        case 'PROVIDER_AUTH':
-            return '模型鉴权失败，请检查 API Key 或权限。';
-        case 'PROVIDER_TIMEOUT':
-            return '模型请求超时，请稍后重试或调大超时。';
-        case 'PROVIDER_UNAVAILABLE':
-            return '模型暂不可用，请稍后重试或切换模型。';
-        case 'PROVIDER_FILTERED':
-            return '请求触发内容策略限制，请调整提示词。';
-        case 'NETWORK_ERROR':
-            return '网络连接失败，请检查代理或网络配置。';
-        case 'PERSISTENCE_ERROR':
-            return '写入失败，数据未成功保存。';
-        default:
-            return fallback || '未知错误，请稍后重试。';
+export function formatAiError(code?: string, t?: (key: string) => string, fallback?: string): string {
+    const normalized = normalizeCode(code);
+    if (t && normalized) {
+        return t('aiError.' + normalized);
+    }
+    if (t) {
+        return t('aiError.UNKNOWN');
+    }
+    // Fallback when t is not provided (e.g. non-React contexts)
+    switch (normalized) {
+        case 'INVALID_INPUT': return 'Input is incomplete or invalid.';
+        case 'NOT_FOUND': return 'Target data not found.';
+        case 'CONFLICT': return 'Operation conflicts with existing data.';
+        case 'PROVIDER_AUTH': return 'Authentication failed.';
+        case 'PROVIDER_TIMEOUT': return 'Request timed out.';
+        case 'PROVIDER_UNAVAILABLE': return 'Model is currently unavailable.';
+        case 'PROVIDER_FILTERED': return 'Request was filtered by content policy.';
+        case 'NETWORK_ERROR': return 'Network connection failed.';
+        case 'PERSISTENCE_ERROR': return 'Write failed.';
+        default: return fallback || 'Unknown error.';
     }
 }
 
-export function formatAiErrorFromUnknown(error: unknown, fallback?: string): string {
+export function formatAiErrorFromUnknown(error: unknown, t?: (key: string) => string, fallback?: string): string {
     const code = inferAiErrorCode(error);
     if (code) {
-        return formatAiError(code, fallback);
+        return formatAiError(code, t, fallback);
     }
     const cleaned = cleanInvokePrefix(toMessage(error));
     if (cleaned) return cleaned;
-    return fallback || '未知错误，请稍后重试。';
+    if (t) return t('aiError.UNKNOWN');
+    return fallback || 'Unknown error.';
 }

@@ -128,7 +128,7 @@ export default function SearchSidebar({
             try {
                 const status = await window.db.checkIndexStatus(novelId);
                 if (status.totalChapters > 0 && status.indexedChapters === 0) {
-                    console.log('[SearchSidebar] Index missing, triggering rebuild...');
+
                     setIsRebuilding(true);
                     await window.db.rebuildSearchIndex(novelId);
                     setIsRebuilding(false);
@@ -455,7 +455,7 @@ export default function SearchSidebar({
             {/* Header */}
             <div className={clsx("p-4 border-b flex items-center justify-between", isDark ? "border-white/5" : "border-gray-200")}>
                 <span className={clsx("text-xs font-bold uppercase tracking-wider", isDark ? "text-neutral-500" : "text-neutral-400")}>
-                    {t('sidebar.search', 'Search')}
+                    {t('sidebar.search')}
                 </span>
                 <div className="flex items-center gap-1">
                     <button
@@ -466,7 +466,7 @@ export default function SearchSidebar({
                             isDark ? "hover:bg-white/10 text-neutral-400" : "hover:bg-black/5 text-neutral-500",
                             isRebuilding && "opacity-50 cursor-not-allowed"
                         )}
-                        title={t('search.rebuildIndex', 'Rebuild Index')}
+                        title={t('search.rebuildIndex')}
                     >
                         <RefreshCw className={clsx("w-4 h-4", isRebuilding && "animate-spin")} />
                     </button>
@@ -491,7 +491,7 @@ export default function SearchSidebar({
                         type="text"
                         value={searchQuery}
                         onChange={(e) => handleInputChange(e.target.value)}
-                        placeholder={t('search.placeholder', 'Search chapters and ideas...')}
+                        placeholder={t('search.placeholder')}
                         className="bg-transparent border-none outline-none w-full text-sm placeholder-opacity-50"
                         autoFocus
                     />
@@ -542,7 +542,7 @@ export default function SearchSidebar({
                 {/* No results */}
                 {searchQuery.trim() && !isLoading && !hasAnyResults && (
                     <div className={clsx("text-center py-8 text-sm", isDark ? "text-neutral-500" : "text-neutral-400")}>
-                        {t('search.noResults', 'No results found')}
+                        {t('search.noResults')}
                     </div>
                 )}
 
@@ -558,15 +558,15 @@ export default function SearchSidebar({
                         >
                             <ChevronDown className={clsx("w-3 h-3 transition-transform opacity-50", collapsedChapterGroup && "-rotate-90")} />
                             <FileText className="w-3.5 h-3.5" />
-                            <span>{t('search.chapters', 'Chapters')} ({totalChaptersFound})</span>
+                            <span>{t('search.chapters')} ({totalChaptersFound})</span>
                         </div>
 
                         {!collapsedChapterGroup && (
                             <div className="space-y-6">
                                 {groupedResults.volumes.map((vol: any) => {
                                     const formatConfig = novelFormatting ? JSON.parse(novelFormatting) : {};
-                                    const volFormat = formatConfig.volume || '第 {n} 卷';
-                                    const chapFormat = formatConfig.chapter || '第 {n} 章';
+                                    const volFormat = formatConfig.volume || t('search.defaultVolumeFormat');
+                                    const chapFormat = formatConfig.chapter || t('search.defaultChapterFormat');
                                     const volId = vol.volumeId || 'default';
                                     const isVolCollapsed = collapsedVolumes.has(volId);
 
@@ -613,7 +613,7 @@ export default function SearchSidebar({
                                                                         {chap.chapterOrder ? formatNumber(chapFormat, chap.chapterOrder) : ''}
                                                                     </span>
                                                                     <span className="truncate flex-1">
-                                                                        {chap.title || t('search.untitled', 'Untitled')}
+                                                                        {chap.title || t('search.untitled')}
                                                                     </span>
                                                                     <span className="text-[10px] opacity-40 font-normal">{chap.matches.length}</span>
                                                                 </div>
@@ -661,7 +661,7 @@ export default function SearchSidebar({
                         >
                             <ChevronDown className={clsx("w-3 h-3 transition-transform opacity-50", collapsedIdeas && "-rotate-90")} />
                             <Lightbulb className="w-3.5 h-3.5" />
-                            <span>{t('search.ideas', 'Ideas')} ({groupedResults.ideas.length})</span>
+                            <span>{t('search.ideas')} ({groupedResults.ideas.length})</span>
                         </div>
 
                         {!collapsedIdeas && (
@@ -700,7 +700,7 @@ export default function SearchSidebar({
                         >
                             <ChevronDown className={clsx("w-3 h-3 transition-transform opacity-50", collapsedCharacters && "-rotate-90")} />
                             <User className="w-3.5 h-3.5" />
-                            <span>{t('search.characters', '角色')} ({frontendGrouped.characters.length})</span>
+                            <span>{t('search.characters')} ({frontendGrouped.characters.length})</span>
                         </div>
 
                         {!collapsedCharacters && (
@@ -744,7 +744,7 @@ export default function SearchSidebar({
                         >
                             <ChevronDown className={clsx("w-3 h-3 transition-transform opacity-50", collapsedItems && "-rotate-90")} />
                             <Package className="w-3.5 h-3.5" />
-                            <span>{t('search.items', '物品')} ({frontendGrouped.items.length})</span>
+                            <span>{t('search.items')} ({frontendGrouped.items.length})</span>
                         </div>
 
                         {!collapsedItems && (
@@ -788,7 +788,7 @@ export default function SearchSidebar({
                         >
                             <ChevronDown className={clsx("w-3 h-3 transition-transform opacity-50", collapsedWorld && "-rotate-90")} />
                             <Globe className="w-3.5 h-3.5" />
-                            <span>{t('search.worldSettings', '世界观')} ({frontendGrouped.world.length})</span>
+                            <span>{t('search.worldSettings')} ({frontendGrouped.world.length})</span>
                         </div>
 
                         {!collapsedWorld && (
@@ -832,7 +832,7 @@ export default function SearchSidebar({
                         >
                             <ChevronDown className={clsx("w-3 h-3 transition-transform opacity-50", collapsedMaps && "-rotate-90")} />
                             <Map className="w-3.5 h-3.5" />
-                            <span>{t('search.maps', '地图')} ({frontendGrouped.maps.length})</span>
+                            <span>{t('search.maps')} ({frontendGrouped.maps.length})</span>
                         </div>
 
                         {!collapsedMaps && (
@@ -874,7 +874,7 @@ export default function SearchSidebar({
                             isDark ? "text-neutral-400 hover:text-white hover:bg-white/5" : "text-neutral-500 hover:text-neutral-900 hover:bg-gray-100"
                         )}
                     >
-                        {isLoading ? t('common.loading', 'Loading...') : t('search.loadMore', 'Load more')}
+                        {isLoading ? t('common.loading') : t('search.loadMore')}
                     </button>
                 )}
 
@@ -882,7 +882,7 @@ export default function SearchSidebar({
                 {!searchQuery.trim() && (
                     <div className={clsx("flex flex-col items-center justify-center py-12 text-center space-y-2", isDark ? "text-neutral-500" : "text-neutral-400")}>
                         <Search className="w-8 h-8 opacity-30" />
-                        <p className="text-sm">{t('search.hint', 'Enter keywords to search')}</p>
+                        <p className="text-sm">{t('search.hint')}</p>
                     </div>
                 )}
             </div>

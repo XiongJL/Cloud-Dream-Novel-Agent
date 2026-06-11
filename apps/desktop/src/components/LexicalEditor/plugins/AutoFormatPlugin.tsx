@@ -147,7 +147,6 @@ export default function AutoFormatPlugin({ indentMode, language }: AutoFormatPlu
                     processNode(root);
                 });
 
-                console.log('🎨 一键格式化完成 (语言:', language, ')');
                 return true;
             },
             COMMAND_PRIORITY_EDITOR

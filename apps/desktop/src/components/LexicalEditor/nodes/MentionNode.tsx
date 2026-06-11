@@ -11,6 +11,7 @@ import {
     Spread,
 } from 'lexical';
 import { ReactNode } from 'react';
+import i18next from 'i18next';
 
 export type MentionType = 'character' | 'item' | 'world' | 'map';
 
@@ -120,10 +121,10 @@ export class MentionNode extends DecoratorNode<ReactNode> {
             map: '🗺️',
         };
         const labelMap: Record<MentionType, string> = {
-            character: '角色',
-            item: '物品',
-            world: '世界观',
-            map: '地图',
+            character: i18next.t('world.characters'),
+            item: i18next.t('world.items'),
+            world: i18next.t('world.worldview'),
+            map: i18next.t('map.title'),
         };
         return (
             <span

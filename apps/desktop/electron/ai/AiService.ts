@@ -30,6 +30,9 @@ import {
     TitleGenerationPayload,
 } from './types';
 import { ContextBuilder } from './context/ContextBuilder';
+import { NovelRagService } from './rag/NovelRagService';
+import type { RagAskPayload, RagAskResult } from './rag/types';
+import { rebuildRagVectorIndex } from './rag/vectorIndex';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
 
 const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -150,6 +153,16 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         summaryFinalizeMinWords: 1200,
         recentChapterRawCount: 2,
     },
+    embedding: {
+        enabled: false,
+        baseUrl: '',
+        apiKey: '',
+        model: 'bge-large-zh-v1.5',
+        dimensions: 1024,
+        batchSize: 8,
+        timeoutMs: 60000,
+        fallbackToHash: true,
+    },
 };
 
 function toProfileJson(profile?: Record<string, string>): string {
@@ -244,6 +257,7 @@ export class AiService {
     private readonly capabilityDefinitions: CapabilityDefinition[];
     private readonly capabilityRegistry: Map<string, CapabilityHandler>;
     private readonly contextBuilder: ContextBuilder;
+    private readonly novelRagService: NovelRagService;
 
     constructor(userDataPathGetter: () => string) {
         this.userDataPath = userDataPathGetter();
@@ -252,8 +266,11 @@ export class AiService {
         this.settingsCache = this.loadSettings();
         this.mapImageStatsCache = this.loadMapImageStats();
         this.contextBuilder = new ContextBuilder();
+        this.novelRagService = new NovelRagService();
         this.capabilityDefinitions = createCapabilityDefinitions({
             continueWriting: (payload) => this.continueWriting(payload),
+            askNovel: (payload) => this.askNovel(payload),
+            rebuildRagIndex: (novelId) => this.rebuildRagIndex(novelId),
         });
         this.capabilityRegistry = new Map(
             this.capabilityDefinitions.map((definition) => [definition.actionId, definition.handler]),
@@ -381,6 +398,7 @@ export class AiService {
             mcpCli: { ...this.settingsCache.mcpCli, ...(partial.mcpCli ?? {}) },
             proxy: { ...this.settingsCache.proxy, ...(partial.proxy ?? {}) },
             summary: { ...this.settingsCache.summary, ...(partial.summary ?? {}) },
+            embedding: { ...this.settingsCache.embedding, ...(partial.embedding ?? {}) },
         };
 
         this.persistSettings();
@@ -777,6 +795,45 @@ export class AiService {
         }
 
         return { ok: issues.length === 0, issues };
+    }
+
+    async previewNovelAskPrompt(payload: RagAskPayload): Promise<RagAskResult> {
+        devLog('INFO', 'AiService.previewNovelAskPrompt.start', 'Preview novel RAG prompt start', {
+            novelId: payload.novelId,
+            questionLength: payload.question?.length ?? 0,
+        });
+        const result = await this.novelRagService.preview(payload, this.settingsCache.embedding);
+        devLog('INFO', 'AiService.previewNovelAskPrompt.success', 'Preview novel RAG prompt success', {
+            novelId: payload.novelId,
+            intent: result.intent,
+            evidenceCount: result.evidence.length,
+        });
+        return result;
+    }
+
+    async askNovel(payload: RagAskPayload): Promise<RagAskResult> {
+        devLog('INFO', 'AiService.askNovel.start', 'Novel RAG ask start', {
+            novelId: payload.novelId,
+            questionLength: payload.question?.length ?? 0,
+            providerType: this.settingsCache.providerType,
+        });
+        const provider = this.getProvider();
+        const result = await this.novelRagService.ask(payload, provider, {
+            maxTokens: Math.min(2048, this.settingsCache.http.maxTokens || 2048),
+            temperature: 0.2,
+            embeddingSettings: this.settingsCache.embedding,
+        });
+        devLog('INFO', 'AiService.askNovel.success', 'Novel RAG ask success', {
+            novelId: payload.novelId,
+            intent: result.intent,
+            confidence: result.confidence,
+            evidenceCount: result.evidence.length,
+        });
+        return result;
+    }
+
+    async rebuildRagIndex(novelId: string): Promise<{ chunks: number; sources: number; provider: string; model: string; dimensions: number; fallbackUsed: boolean; fallbackError?: string }> {
+        return rebuildRagVectorIndex(novelId, this.settingsCache.embedding);
     }
 
     async previewCreativeAssetsPrompt(payload: CreativeAssetsGeneratePayload): Promise<PromptPreviewResult> {
@@ -1996,6 +2053,7 @@ export class AiService {
                 mcpCli: { ...DEFAULT_AI_SETTINGS.mcpCli, ...(parsed.mcpCli ?? {}) },
                 proxy: { ...DEFAULT_AI_SETTINGS.proxy, ...(parsed.proxy ?? {}) },
                 summary: { ...DEFAULT_AI_SETTINGS.summary, ...(parsed.summary ?? {}) },
+                embedding: { ...DEFAULT_AI_SETTINGS.embedding, ...(parsed.embedding ?? {}) },
             };
         } catch (error) {
             console.error('[AI] Failed to load settings, fallback to defaults:', error);

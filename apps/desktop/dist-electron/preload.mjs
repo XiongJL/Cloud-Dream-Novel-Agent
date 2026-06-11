@@ -117,6 +117,8 @@ electron.contextBridge.exposeInMainWorld("ai", {
   continueWriting: (payload) => electron.ipcRenderer.invoke("ai:continue-writing", payload),
   previewContinuePrompt: (payload) => electron.ipcRenderer.invoke("ai:preview-continue-prompt", payload),
   checkConsistency: (payload) => electron.ipcRenderer.invoke("ai:check-consistency", payload),
+  askNovel: (payload) => electron.ipcRenderer.invoke("ai:ask-novel", payload),
+  previewNovelAskPrompt: (payload) => electron.ipcRenderer.invoke("ai:preview-novel-ask-prompt", payload),
   generateCreativeAssets: (payload) => electron.ipcRenderer.invoke("ai:generate-creative-assets", payload),
   previewCreativeAssetsPrompt: (payload) => electron.ipcRenderer.invoke("ai:preview-creative-assets-prompt", payload),
   validateCreativeAssetsDraft: (payload) => electron.ipcRenderer.invoke("ai:validate-creative-assets", payload),

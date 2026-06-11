@@ -2,6 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
 import { Loader2, Sparkles } from 'lucide-react';
+import { BaseModal } from '../ui/BaseModal';
 import PromptInlinePanel from '../AIPromptPreview/PromptInlinePanel';
 import { Idea } from '../../types';
 import type { PromptPreviewData } from '../AIPromptPreview/types';
@@ -73,14 +74,8 @@ export const ContinueWritingModal: React.FC<ContinueWritingModalProps> = ({
 }) => {
     const { t } = useTranslation();
 
-    if (!isOpen) return null;
-
     return (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/45 px-4">
-            <div className={clsx(
-                "w-full max-w-2xl rounded-2xl border shadow-2xl",
-                theme === 'dark' ? 'bg-[#11131a] border-white/10' : 'bg-white border-gray-200'
-            )}>
+        <BaseModal isOpen={isOpen} onClose={onClose} theme={theme} maxWidth="max-w-2xl" className="p-0">
                 <div className={clsx(
                     "px-5 py-4 border-b flex items-center justify-between",
                     theme === 'dark' ? 'border-white/10' : 'border-gray-100'
@@ -325,7 +320,6 @@ export const ContinueWritingModal: React.FC<ContinueWritingModalProps> = ({
                         {t('editor.startContinue')}
                     </button>
                 </div>
-            </div>
-        </div>
+        </BaseModal>
     );
 };

@@ -168,6 +168,7 @@ const VirtualizedList = ({ options, onSelect, value, isDark }: {
     value: string,
     isDark: boolean
 }) => {
+    const { t } = useTranslation();
     // Flatten options with headers
     const flatItems = useMemo(() => {
         const items: ({ type: 'header', title: string } | { type: 'option', data: Option })[] = [];
@@ -234,7 +235,7 @@ const VirtualizedList = ({ options, onSelect, value, isDark }: {
                 );
             })}
             {visibleCount < flatItems.length && (
-                <div className="p-2 text-center text-xs opacity-50">Loading more...</div>
+                <div className="p-2 text-center text-xs opacity-50">{t('common.loading')}</div>
             )}
         </div>
     );

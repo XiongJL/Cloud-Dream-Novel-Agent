@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
+import { BaseModal } from '../ui/BaseModal';
 import { usePlotSystem } from '../../hooks/usePlotSystem';
-import { X, ChevronRight, ChevronDown } from 'lucide-react';
+import { ChevronRight, ChevronDown } from 'lucide-react';
 
 interface PlotAnchorModalProps {
     novelId: string;
@@ -21,21 +22,6 @@ export default function PlotAnchorModal({ novelId, isOpen, onClose, onSubmit, th
     const [anchorType, setAnchorType] = useState<'setup' | 'payoff'>('setup');
     const [expandedLines, setExpandedLines] = useState<Set<string>>(new Set());
 
-    // ESC to close
-    useEffect(() => {
-        if (!isOpen) return;
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                e.stopPropagation();
-                onClose();
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown, { capture: true });
-        return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
-    }, [isOpen, onClose]);
-
-    if (!isOpen) return null;
-
     const toggleExpand = (id: string) => {
         const newSet = new Set(expandedLines);
         if (newSet.has(id)) newSet.delete(id);
@@ -51,17 +37,10 @@ export default function PlotAnchorModal({ novelId, isOpen, onClose, onSubmit, th
     };
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-            <div className={clsx(
-                "w-[500px] max-h-[80vh] flex flex-col rounded-xl shadow-2xl overflow-hidden border",
-                isDark ? "bg-[#1e1e24] border-white/10 text-neutral-200" : "bg-white border-neutral-200 text-neutral-800"
-            )}>
+        <BaseModal isOpen={isOpen} onClose={onClose} theme={theme} maxWidth="max-w-[500px]" className="p-0 max-h-[80vh] overflow-hidden">
                 {/* Header */}
                 <div className="flex items-center justify-between p-4 border-b border-white/10">
                     <h3 className="font-medium text-lg">{t('plot.addAnchor', 'Add Plot Anchor')}</h3>
-                    <button onClick={onClose} className="p-1 rounded hover:bg-white/10">
-                        <X className="w-5 h-5" />
-                    </button>
                 </div>
 
                 {/* Content */}
@@ -150,7 +129,6 @@ export default function PlotAnchorModal({ novelId, isOpen, onClose, onSubmit, th
                         {t('common.confirm', 'Confirm')}
                     </button>
                 </div>
-            </div>
-        </div>
+        </BaseModal>
     );
 }

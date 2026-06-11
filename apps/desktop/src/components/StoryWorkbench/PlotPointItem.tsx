@@ -6,6 +6,7 @@ import { clsx } from 'clsx';
 import { PlotPoint } from '../../types';
 import { ConfirmModal } from '../ui/ConfirmModal';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 interface PlotPointItemProps {
     point: PlotPoint;
@@ -17,19 +18,19 @@ interface PlotPointItemProps {
 }
 
 // Helper to get icon for point type
-const getTypeIcon = (type: string) => {
+const getTypeIcon = (type: string, t: TFunction) => {
     switch (type) {
-        case 'mystery': // 悬念
-        case '悬念':
+        case 'mystery':
+        case t('plot.types.mystery'):
             return <HelpCircle className="w-3 h-3" />;
-        case 'promise': // 承诺
-        case '承诺':
+        case 'promise':
+        case t('plot.types.promise'):
             return <Flag className="w-3 h-3" />;
-        case 'foreshadowing': // 伏笔
-        case '伏笔':
+        case 'foreshadowing':
+        case t('plot.types.foreshadowing'):
             return <Sparkles className="w-3 h-3" />;
-        case 'event': // 事件
-        case '事件':
+        case 'event':
+        case t('plot.types.event'):
         default:
             return <CircleDot className="w-3 h-3" />;
     }
@@ -121,7 +122,7 @@ export function PlotPointItem({ point, isDark, onClick, onDelete, isHighlighted,
                     "flex items-center justify-center w-5 h-5 rounded-full shrink-0 mr-1.5",
                     isDark ? "bg-white/10 text-white/80" : "bg-gray-100 text-gray-600"
                 )}>
-                    {getTypeIcon(point.type)}
+                    {getTypeIcon(point.type, t)}
                 </div>
 
                 <span className="truncate flex-1">{point.title}</span>
@@ -140,7 +141,7 @@ export function PlotPointItem({ point, isDark, onClick, onDelete, isHighlighted,
                             isDark ? "hover:bg-white/10 hover:text-white" : "hover:bg-black/5 hover:text-black",
                             (!point.anchors || point.anchors.length === 0) && "opacity-30 cursor-not-allowed group-hover/point:opacity-50"
                         )}
-                        title={t('plot.jumpToText', '跳转到原文')}
+                        title={t('plot.jumpToText')}
                     >
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                             <circle cx="12" cy="12" r="10" />

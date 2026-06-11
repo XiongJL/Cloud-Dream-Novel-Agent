@@ -19,7 +19,7 @@ import SearchSidebar from '../../components/SearchWorkbench/SearchSidebar';
 import { FlowModeButton } from '../../components/FlowModeButton';
 import { GlobalIdeaModal } from '../../components/GlobalIdeaModal';
 import WorldWorkbench from '../../components/WorldWorkbench/WorldWorkbench';
-import AIWorkbenchPanel from '../../components/AIWorkbench/AIWorkbenchPanel';
+import AIWorkbenchShell from '../../components/AIWorkbench/AIWorkbenchShell';
 import AIWorkbenchDraftDock from '../../components/AIWorkbench/AIWorkbenchDraftDock';
 import type { DraftSessionRecord } from '../../components/AIWorkbench/types';
 import PlotSidebar from '../../components/StoryWorkbench/PlotSidebar';
@@ -482,7 +482,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
             }
         } catch (error) {
             console.error('[Editor] chapter summary rebuild failed:', error);
-            setSummaryStatus(formatAiErrorFromUnknown(error, t('editor.summaryRebuildFailed')));
+            setSummaryStatus(formatAiErrorFromUnknown(error, t, t('editor.summaryRebuildFailed')));
         } finally {
             setIsRebuildingSummary(false);
             window.setTimeout(() => setSummaryStatus(''), 4000);
@@ -498,8 +498,8 @@ export default function Editor({ novelId, onBack }: EditorProps) {
         editor.update(() => {
             const root = $getRoot();
             const normalized = deduped.replace(/\r\n/g, '\n').trim();
-            // 鎸夊崟涓崲琛屽垎鍓诧紝姣忚涓€涓钀斤紝纭繚姣忔閮借兘鑾峰緱 CSS text-indent 棣栬缂╄繘
-            // 鍚屾椂鍘婚櫎娈甸鐨勫叏瑙?鍗婅绌烘牸锛堢缉杩涚敱 CSS text-indent 缁熶竴鎺у埗锛?
+            // Split by newlines, one block per paragraph; CSS text-indent handles first-line indent
+            // Strip leading full-width/half-width spaces (indent is controlled by CSS text-indent)
             const blocks = normalized.split(/\n+/).map((block) => block.replace(/^[\s\u3000]+/, '').trim()).filter(Boolean);
             if (blocks.length === 0) return;
             blocks.forEach((block) => {
@@ -679,12 +679,14 @@ export default function Editor({ novelId, onBack }: EditorProps) {
 
                         {/* AI Workbench */}
                         <div className={clsx("flex-1 h-full flex flex-col min-h-0", activeTab !== 'ai_workbench' && "hidden")}>
-                            <AIWorkbenchPanel
+                            <AIWorkbenchShell
                                 novelId={novelId}
                                 theme={preferences.theme}
                                 draft={creativeDraft}
                                 selection={creativeSelection}
                                 draftSession={creativeDraftSession}
+                                currentChapterId={currentChapter?.id || null}
+                                currentContent={content}
                                 onDraftChange={handleCreativeDraftChange}
                                 onSelectionChange={handleCreativeSelectionChange}
                                 onDraftSessionChange={handleCreativeDraftSessionChange}
@@ -759,14 +761,14 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                             <button
                                 onClick={() => setViewMode('editor')}
                                 className={clsx("p-2 rounded-full transition-all flex items-center gap-2", viewMode === 'editor' ? (preferences.theme === 'dark' ? "bg-white/20 text-white" : "bg-gray-200 text-black") : "opacity-60 hover:opacity-100")}
-                                title={t('editor.mode.editor', 'Editor Mode')}
+                                title={t('editor.mode.editor')}
                             >
                                 <FileText className="w-4 h-4" />
                             </button>
                             <button
                                 onClick={() => setViewMode('matrix')}
                                 className={clsx("p-2 rounded-full transition-all flex items-center gap-2", viewMode === 'matrix' ? (preferences.theme === 'dark' ? "bg-white/20 text-white" : "bg-gray-200 text-black") : "opacity-60 hover:opacity-100")}
-                                title={t('editor.mode.matrix', 'Matrix Mode')}
+                                title={t('editor.mode.matrix')}
                             >
                                 <LayoutGrid className="w-4 h-4" />
                             </button>
@@ -881,7 +883,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                             <button
                                                 onClick={() => setIsContinueModalOpen(true)}
                                                 disabled={!currentChapter || isContinuing}
-                                                title={t('editor.continueWriting', 'AI 缁啓')}
+                                                title={t('editor.continueWriting')}
                                                 className={clsx(
                                                     "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
                                                     preferences.theme === 'dark'
@@ -890,12 +892,12 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                                 )}
                                             >
                                                 {isContinuing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                                                <span>{t('editor.continueWriting', 'AI 缁啓')}</span>
+                                                <span>{t('editor.continueWriting')}</span>
                                             </button>
                                             {hasContinuePreviewDraft && (
                                                 <button
                                                     onClick={() => setIsContinuePreviewOpen(true)}
-                                                    title={t('editor.continueViewDraft', 'View Continue Draft')}
+                                                    title={t('editor.continueViewDraft')}
                                                     className={clsx(
                                                         "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
                                                         preferences.theme === 'dark'
@@ -904,13 +906,13 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                                     )}
                                                 >
                                                     <FileText className="w-4 h-4" />
-                                                    <span>{t('editor.continueViewDraft', 'View Continue Draft')}</span>
+                                                    <span>{t('editor.continueViewDraft')}</span>
                                                 </button>
                                             )}
                                             <button
                                                 onClick={() => void handleRebuildChapterSummary()}
                                                 disabled={isRebuildingSummary || !currentChapter}
-                                                title={t('editor.rebuildSummary', '鎵嬪姩鐢熸垚鎽樿')}
+                                                title={t('editor.rebuildSummary')}
                                                 className={clsx(
                                                     "shrink-0 p-2 rounded-lg border transition-colors",
                                                     preferences.theme === 'dark'
@@ -935,7 +937,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                             <button
                                                 onClick={() => void handleGenerateTitle()}
                                                 disabled={isGeneratingTitle || !currentChapter || !content.trim()}
-                                                title={t('editor.aiTitle', 'AI 鐢熸垚鏍囬')}
+                                                title={t('editor.aiTitle')}
                                                 className={clsx(
                                                     "shrink-0 p-2 rounded-lg border transition-colors",
                                                     preferences.theme === 'dark'
@@ -1289,7 +1291,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                     preferences.theme === 'dark' ? 'border-white/20 text-neutral-100 hover:bg-white/10' : 'border-gray-300 text-gray-800 hover:bg-gray-50'
                                 )}
                             >
-                                {t('editor.confirmInsert', '纭鎻掑叆')}
+                                {t('editor.confirmInsert')}
                             </button>
                         </div>
                     </div>

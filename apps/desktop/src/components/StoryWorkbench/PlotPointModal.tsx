@@ -353,7 +353,7 @@ export function PlotPointModal({
 
     const formattedChapters = useMemo(() => {
         if (!isOpen) return [];
-        console.log('[PlotPointModal] Processing chapters memo...');
+
         const flatChapters: { id: string, title: string, order: number, group: string }[] = [];
         const formatConfig = formatting ? JSON.parse(formatting) : {};
         const chapFormat = formatConfig.chapter || t('common.chapterPrefix', '第') + '{n}' + t('common.chapterSuffix', '章');

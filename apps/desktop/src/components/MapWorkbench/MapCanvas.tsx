@@ -30,11 +30,11 @@ interface AiMapImageStats {
 const MIN_SCALE = 0.1;
 const MAX_SCALE = 5;
 const MAP_IMAGE_SIZES = ['2K', '1024x1024', '1536x1024', '1024x1536'] as const;
-const MAP_STYLE_OPTIONS: Array<{ value: 'realistic' | 'fantasy' | 'ancient' | 'scifi'; label: string }> = [
-    { value: 'fantasy', label: '奇幻' },
-    { value: 'realistic', label: '写实' },
-    { value: 'ancient', label: '古风' },
-    { value: 'scifi', label: '科幻' },
+const MAP_STYLE_OPTIONS: Array<{ value: 'realistic' | 'fantasy' | 'ancient' | 'scifi'; labelKey: string }> = [
+    { value: 'fantasy', labelKey: 'map.style.fantasy' },
+    { value: 'realistic', labelKey: 'map.style.realistic' },
+    { value: 'ancient', labelKey: 'map.style.ancient' },
+    { value: 'scifi', labelKey: 'map.style.scifi' },
 ];
 
 export default function MapCanvasView({ mapId, novelId: _novelId, theme, characters }: MapCanvasProps) {
@@ -241,7 +241,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
         if (!map) return;
         const prompt = aiPrompt.trim();
         if (!prompt) {
-            setAiMapStatus(t('map.aiPromptRequired', '请先填写地图描述后再生成'));
+            setAiMapStatus(t('map.aiPromptRequired'));
             return;
         }
 
@@ -289,18 +289,18 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                 setAiProgressPercent(96);
                 await loadMap();
                 setAiProgressPercent(100);
-                setAiMapStatus(t('map.aiGenerateSuccess', 'AI 底图生成成功'));
+                setAiMapStatus(t('map.aiGenerateSuccess'));
             } else {
                 const detailText = (result.detail || '').toLowerCase();
                 const isRateLimit = detailText.includes('429') || detailText.includes('rate limit') || detailText.includes('quota');
                 const readable = isRateLimit
-                    ? t('map.aiRateLimited', '触发配额限制(429)，请稍后重试或切换模型/尺寸')
-                    : formatAiError(result.code, result.detail);
-                setAiMapStatus(`${t('map.aiGenerateFailed', 'AI 底图生成失败')}: ${readable}`);
+                    ? t('map.aiRateLimited')
+                    : formatAiError(result.code, t, result.detail);
+                setAiMapStatus(`${t('map.aiGenerateFailed')}: ${readable}`);
             }
         } catch (e) {
             console.error('Failed to generate map background by AI:', e);
-            setAiMapStatus(`${t('map.aiGenerateFailed', 'AI 底图生成失败')}: ${formatAiError('UNKNOWN')}`);
+            setAiMapStatus(`${t('map.aiGenerateFailed')}: ${formatAiError('UNKNOWN', t)}`);
         } finally {
             if (aiProgressTimerRef.current !== null) {
                 window.clearInterval(aiProgressTimerRef.current);
@@ -335,8 +335,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
         setMapPromptPreviewError('');
         try {
             const preview = await window.ai.previewMapPrompt({
-                novelId: _novelId,
-                mapId,
+                novelId: _novelId, mapId,
                 mapName: map.name,
                 mapType: map.type as 'world' | 'region' | 'scene',
                 prompt: aiPrompt,
@@ -347,7 +346,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
             setMapPromptOverride((prev) => prev || preview.editableUserPrompt || '');
         } catch (error) {
             console.error('Failed to preview map prompt:', error);
-            setMapPromptPreviewError(t('map.promptPreviewFailed', 'Failed to load prompt preview'));
+            setMapPromptPreviewError(t('map.promptPreviewFailed'));
         } finally {
             setMapPromptPreviewLoading(false);
         }
@@ -367,17 +366,17 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
     };
 
     const aiStageLabel = aiProgressStage === 'requesting'
-        ? t('map.aiStage.requesting', '请求中')
+        ? t('map.aiStage.requesting')
         : aiProgressStage === 'generating'
-            ? t('map.aiStage.generating', '生成中')
+            ? t('map.aiStage.generating')
             : aiProgressStage === 'downloading'
-                ? t('map.aiStage.downloading', '下载中')
-                : t('map.aiStage.saving', '入库中');
+                ? t('map.aiStage.downloading')
+                : t('map.aiStage.saving');
 
     const generateDisabledReason = !map
-        ? t('map.aiDisabled.noMap', '请先选择地图')
+        ? t('map.aiDisabled.noMap')
         : isGeneratingBg
-            ? t('map.aiDisabled.running', '正在生成中，请稍候')
+            ? t('map.aiDisabled.running')
             : '';
 
     // Drag character to create marker
@@ -483,19 +482,19 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                         )}
                     >
                         <Upload className="w-3.5 h-3.5" />
-                        {map?.background ? t('map.changeBg', '更换底图') : t('map.uploadBg', '上传底图')}
+                        {map?.background ? t('map.changeBg') : t('map.uploadBg')}
                     </button>
                     <button
                         onClick={handleOpenAiModal}
                         disabled={!map || isGeneratingBg}
-                        title={generateDisabledReason || t('map.generateBgAI', 'AI 生成底图')}
+                        title={generateDisabledReason || t('map.generateBgAI')}
                         className={clsx(
                             "text-xs flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors relative overflow-hidden",
                             isDark ? "text-amber-300 hover:bg-white/5 disabled:opacity-40" : "text-amber-700 hover:bg-black/5 disabled:opacity-40"
                         )}
                     >
                         <Sparkles className={clsx("w-3.5 h-3.5", isGeneratingBg && "animate-pulse")} />
-                        {isGeneratingBg ? `${aiStageLabel} ${aiElapsedSeconds}s` : t('map.generateBgAI', 'AI 生成底图')}
+                        {isGeneratingBg ? `${aiStageLabel} ${aiElapsedSeconds}s` : t('map.generateBgAI')}
                         {isGeneratingBg && (
                             <span
                                 className={clsx(
@@ -516,7 +515,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
 
                     <button onClick={() => setScale(s => Math.min(MAX_SCALE, s * 1.2))}
                         className={clsx("p-1.5 rounded-lg transition-colors", isDark ? "hover:bg-white/5 text-neutral-400" : "hover:bg-gray-100 text-neutral-500")}
-                        title={t('map.zoomIn', '放大')}>
+                        title={t('map.zoomIn')}>
                         <ZoomIn className="w-4 h-4" />
                     </button>
                     <span className={clsx("text-[10px] w-10 text-center", isDark ? "text-neutral-500" : "text-neutral-400")}>
@@ -524,12 +523,12 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                     </span>
                     <button onClick={() => setScale(s => Math.max(MIN_SCALE, s / 1.2))}
                         className={clsx("p-1.5 rounded-lg transition-colors", isDark ? "hover:bg-white/5 text-neutral-400" : "hover:bg-gray-100 text-neutral-500")}
-                        title={t('map.zoomOut', '缩小')}>
+                        title={t('map.zoomOut')}>
                         <ZoomOut className="w-4 h-4" />
                     </button>
                     <button onClick={resetView}
                         className={clsx("p-1.5 rounded-lg transition-colors", isDark ? "hover:bg-white/5 text-neutral-400" : "hover:bg-gray-100 text-neutral-500")}
-                        title={t('map.resetView', '重置视图')}>
+                        title={t('map.resetView')}>
                         <RotateCcw className="w-4 h-4" />
                     </button>
 
@@ -543,7 +542,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                                 ? isDark ? "bg-indigo-500/20 text-indigo-400" : "bg-indigo-50 text-indigo-600"
                                 : isDark ? "hover:bg-white/5 text-neutral-400" : "hover:bg-gray-100 text-neutral-500"
                         )}
-                        title={t('map.characters', '角色列表')}>
+                        title={t('map.characters')}>
                         <User className="w-4 h-4" />
                     </button>
                 </div>
@@ -551,7 +550,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
             {aiMapStatus && (
                 <div className={clsx(
                     "px-4 py-2 text-xs border-b",
-                    aiMapStatus.includes(t('map.aiGenerateSuccess', 'AI 底图生成成功'))
+                    aiMapStatus.includes(t('map.aiGenerateSuccess'))
                         ? (isDark ? "border-emerald-400/20 text-emerald-300 bg-emerald-500/5" : "border-emerald-200 text-emerald-700 bg-emerald-50")
                         : (isDark ? "border-rose-400/20 text-rose-300 bg-rose-500/5" : "border-rose-200 text-rose-700 bg-rose-50")
                 )}>
@@ -561,19 +560,19 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
             <BaseModal
                 isOpen={isAiModalOpen}
                 onClose={() => setIsAiModalOpen(false)}
-                title={t('map.generateBgAI', 'AI 生成底图')}
+                title={t('map.generateBgAI')}
                 theme={theme}
                 maxWidth="max-w-2xl"
             >
                 <div className="space-y-4">
                     <div>
                         <label className={clsx("block text-xs mb-2", isDark ? "text-neutral-300" : "text-neutral-600")}>
-                            {t('map.aiPromptLabel', '地图描述')}
+                            {t('map.aiPromptLabel')}
                         </label>
                         <textarea
                             value={aiPrompt}
                             onChange={(e) => setAiPrompt(e.target.value)}
-                            placeholder={t('map.aiPrompt', '输入地图描述，例如：山脉、河流、文明和地标')}
+                            placeholder={t('map.aiPrompt')}
                             rows={5}
                             className={clsx(
                                 "w-full rounded-lg border px-3 py-2 text-sm resize-y",
@@ -584,7 +583,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <div>
                             <label className={clsx("block text-xs mb-2", isDark ? "text-neutral-300" : "text-neutral-600")}>
-                                {t('map.aiSize', '尺寸')}
+                                {t('map.aiSize')}
                             </label>
                             <select
                                 value={aiImageSize}
@@ -603,7 +602,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                         </div>
                         <div>
                             <label className={clsx("block text-xs mb-2", isDark ? "text-neutral-300" : "text-neutral-600")}>
-                                {t('map.aiStyle', '风格')}
+                                {t('map.aiStyle')}
                             </label>
                             <select
                                 value={aiStyleTemplate}
@@ -615,7 +614,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                             >
                                 {MAP_STYLE_OPTIONS.map((style) => (
                                     <option key={style.value} value={style.value}>
-                                        {style.label}
+                                        {t(style.labelKey)}
                                     </option>
                                 ))}
                             </select>
@@ -623,7 +622,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                     </div>
                     <PromptInlinePanel
                         theme={theme}
-                        title={t('map.promptPreview', '提示词预览')}
+                        title={t('map.promptPreview')}
                         loading={mapPromptPreviewLoading}
                         error={mapPromptPreviewError}
                         data={mapPromptPreview}
@@ -636,7 +635,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                             "rounded-lg border px-3 py-2 text-xs",
                             isDark ? "border-white/10 bg-white/5 text-neutral-300" : "border-gray-200 bg-gray-50 text-neutral-600"
                         )}>
-                            {`AI统计: 总调用 ${aiMapStats.totalCalls} 次, 成功 ${aiMapStats.successCalls} 次, 失败 ${aiMapStats.failedCalls} 次, 429 ${aiMapStats.rateLimitFailures} 次`}
+                            {t('map.aiStats', { total: aiMapStats.totalCalls, success: aiMapStats.successCalls, failed: aiMapStats.failedCalls, rateLimit: aiMapStats.rateLimitFailures })}
                         </div>
                     )}
                     <div className="flex items-center justify-end gap-2 pt-1">
@@ -647,7 +646,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                                 isDark ? "border-white/10 text-neutral-300 hover:bg-white/5" : "border-gray-200 text-neutral-600 hover:bg-gray-50"
                             )}
                         >
-                            {t('common.cancel', '取消')}
+                            {t('common.cancel')}
                         </button>
                         <button
                             onClick={handleSubmitAiGenerate}
@@ -657,7 +656,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                                 isDark ? "bg-amber-500/20 text-amber-300 hover:bg-amber-500/30" : "bg-amber-100 text-amber-800 hover:bg-amber-200"
                             )}
                         >
-                            {t('map.generateBgAI', 'AI 生成底图')}
+                            {t('map.generateBgAI')}
                         </button>
                     </div>
                 </div>
@@ -677,10 +676,10 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                         <div className="absolute inset-0 flex flex-col items-center justify-center z-10 pointer-events-none">
                             <Upload className={clsx("w-12 h-12 mb-3", isDark ? "text-neutral-700" : "text-neutral-300")} />
                             <p className={clsx("text-sm", isDark ? "text-neutral-600" : "text-neutral-400")}>
-                                {t('map.noBg', '暂无底图')}
+                                {t('map.noBg')}
                             </p>
                             <p className={clsx("text-xs mt-1", isDark ? "text-neutral-700" : "text-neutral-400")}>
-                                {t('map.noBgHint', '点击“上传底图”添加地图图片')}
+                                {t('map.noBgHint')}
                             </p>
                         </div>
                     )}
@@ -807,7 +806,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                                 )}
                             >
                                 <Trash2 className="w-3 h-3" />
-                                {t('map.removeMarker', '绉婚櫎鏍囪')}
+                                {t('map.removeMarker')}
                             </button>
                         </div>
                     )}
@@ -822,7 +821,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                         <div className={clsx("px-3 py-2 text-xs font-medium border-b",
                             isDark ? "text-neutral-400 border-white/5" : "text-neutral-500 border-gray-100"
                         )}>
-                            {t('map.characters', '角色列表')}
+                            {t('map.characters')}
                         </div>
                         {/* Search box */}
                         <div className={clsx("px-2 py-1.5 border-b", isDark ? "border-white/5" : "border-gray-100")}>
@@ -834,7 +833,7 @@ export default function MapCanvasView({ mapId, novelId: _novelId, theme, charact
                                 <input
                                     value={charSearch}
                                     onChange={e => setCharSearch(e.target.value)}
-                                    placeholder={t('common.search', '鎼滅储') + '...'}
+                                    placeholder={t('common.search') + '...'}
                                     className={clsx(
                                         "flex-1 bg-transparent outline-none text-xs placeholder:opacity-40",
                                         isDark ? "text-neutral-200" : "text-neutral-700"

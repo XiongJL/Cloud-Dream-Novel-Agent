@@ -23,7 +23,7 @@ export const FlowModeButton: React.FC<FlowModeButtonProps> = ({ isActive, onClic
         >
             <div className="flow-btn-bg" />
             <div className="flow-btn-content">
-                {isActive ? t('editor.inFlow', 'Entering Flow') : '心流'}
+                {isActive ? t('editor.inFlow', 'Entering Flow') : t('editor.flowMode')}
             </div>
         </button>
     );

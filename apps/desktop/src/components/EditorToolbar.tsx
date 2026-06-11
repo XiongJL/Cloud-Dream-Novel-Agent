@@ -6,6 +6,7 @@ import { clsx } from 'clsx';
 import { EditorPreferences } from '../hooks/useEditorPreferences';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface EditorToolbarProps {
     preferences: EditorPreferences;
@@ -22,12 +23,13 @@ export default function EditorToolbar({
     onUndo,
     onRedo
 }: EditorToolbarProps) {
+    const { t } = useTranslation();
     const [showMobileMenu, setShowMobileMenu] = useState(false);
 
     const fontFamilies = [
-        { id: 'serif', name: '宋体', style: 'font-serif' },
-        { id: 'sans', name: '黑体', style: 'font-sans' },
-        { id: 'kaiti', name: '楷体', style: "font-['Kaiti']" },
+        { id: 'serif', name: t('toolbar.fontSerif'), style: 'font-serif' },
+        { id: 'sans', name: t('toolbar.fontSans'), style: 'font-sans' },
+        { id: 'kaiti', name: t('toolbar.fontKaiti'), style: "font-['Kaiti']" },
     ];
 
     const mobileDevices = [
@@ -85,7 +87,7 @@ export default function EditorToolbar({
                         "p-1.5 rounded transition-colors relative group",
                         preferences.maxWidth === 'wide' ? "bg-indigo-600 text-white" : "text-neutral-400 hover:text-white"
                     )}
-                    title="电脑模式"
+                    title={t('toolbar.wideMode')}
                 >
                     <Monitor className="w-4 h-4" />
                 </button>
@@ -104,7 +106,7 @@ export default function EditorToolbar({
                             "p-1.5 rounded transition-colors relative group",
                             preferences.maxWidth === 'mobile' ? "bg-indigo-600 text-white" : "text-neutral-400 hover:text-white"
                         )}
-                        title="手机预览"
+                        title={t('toolbar.mobileMode')}
                     >
                         <Smartphone className="w-4 h-4" />
                     </button>
@@ -148,19 +150,19 @@ export default function EditorToolbar({
                     "flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors bg-white/5 hover:bg-white/10",
                     preferences.indentMode === 'enabled' ? "text-indigo-400 ring-1 ring-indigo-500/50" : "text-neutral-400"
                 )}
-                title="智能缩进 (回车自动添加)"
+                title={t('toolbar.indentTip')}
             >
                 <ArrowUpLeft className="w-3 h-3" />
-                <span>缩进</span>
+                <span>{t('toolbar.indent')}</span>
             </button>
 
             <button
                 onClick={onAutoFormat}
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium bg-white/5 hover:bg-white/10 text-neutral-400 hover:text-white transition-colors"
-                title="自动清理空行和末尾空格"
+                title={t('toolbar.formatTip')}
             >
                 <AlignLeft className="w-3 h-3" />
-                <span>一键排版</span>
+                <span>{t('toolbar.format')}</span>
             </button>
 
             <div className="flex-1" />
@@ -170,14 +172,14 @@ export default function EditorToolbar({
                 <button
                     onClick={onUndo}
                     className="p-1.5 hover:bg-white/10 rounded text-neutral-500 hover:text-white transition-colors"
-                    title="撤销"
+                    title={t('toolbar.undo')}
                 >
                     <Undo2 className="w-4 h-4" />
                 </button>
                 <button
                     onClick={onRedo}
                     className="p-1.5 hover:bg-white/10 rounded text-neutral-500 hover:text-white transition-colors"
-                    title="重做"
+                    title={t('toolbar.redo')}
                 >
                     <Redo2 className="w-4 h-4" />
                 </button>

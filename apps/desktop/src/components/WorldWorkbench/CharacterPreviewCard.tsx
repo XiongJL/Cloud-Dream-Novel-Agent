@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { X, Edit, User, Box, MapPin, Zap } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getAvatarColors } from '../../utils/avatarUtils';
+import { useTranslation } from 'react-i18next';
 
 interface CharacterPreviewCardProps {
     id: string;
@@ -27,6 +28,7 @@ export const CharacterPreviewCard: React.FC<CharacterPreviewCardProps> = ({
     const [loading, setLoading] = useState(true);
     const cardRef = useRef<HTMLDivElement>(null);
     const isDark = theme === 'dark';
+    const { t } = useTranslation();
 
     useEffect(() => {
         let mounted = true;
@@ -111,11 +113,11 @@ export const CharacterPreviewCard: React.FC<CharacterPreviewCardProps> = ({
     };
 
     const getTypeLabel = () => {
-        if (type === 'character') return (data as Character).role || '角色';
+        if (type === 'character') return (data as Character).role || t('world.characters');
         const item = data as Item;
-        if (item.type === 'skill') return '技能';
-        if (item.type === 'location') return '地点';
-        return '物品';
+        if (item.type === 'skill') return t('world.itemTypes.skill');
+        if (item.type === 'location') return t('world.itemTypes.location');
+        return t('world.items');
     };
 
     return createPortal(
@@ -173,7 +175,7 @@ export const CharacterPreviewCard: React.FC<CharacterPreviewCardProps> = ({
                     {/* Custom Attributes */}
                     {Object.keys(profile).length > 0 && (
                         <div className="space-y-2">
-                            <h4 className="text-xs font-semibold opacity-50 uppercase tracking-wider mb-2">属性</h4>
+                            <h4 className="text-xs font-semibold opacity-50 uppercase tracking-wider mb-2">{t('world.customAttrs')}</h4>
                             {Object.entries(profile).map(([key, value]) => (
                                 <div key={key} className="flex justify-between text-sm py-1 border-b border-black/5 dark:border-white/5 last:border-0">
                                     <span className="opacity-70">{key}</span>
@@ -208,7 +210,7 @@ export const CharacterPreviewCard: React.FC<CharacterPreviewCardProps> = ({
                     {/* Items possessed (for Character) */}
                     {type === 'character' && (data as Character).items && (data as Character).items!.length > 0 && (
                         <div className="mt-4">
-                            <h4 className="text-xs font-semibold opacity-50 uppercase tracking-wider mb-2">持有物品</h4>
+                            <h4 className="text-xs font-semibold opacity-50 uppercase tracking-wider mb-2">{t('world.inventory')}</h4>
                             <div className="flex flex-wrap gap-2">
                                 {(data as Character).items!.map(ownership => (
                                     <span key={ownership.id} className={clsx(
@@ -234,7 +236,7 @@ export const CharacterPreviewCard: React.FC<CharacterPreviewCardProps> = ({
                             )}
                         >
                             <Edit className="w-3.5 h-3.5" />
-                            编辑详情
+                            {type === 'character' ? t('world.editCharacter') : t('world.editItem')}
                         </button>
                     )}
                 </div>

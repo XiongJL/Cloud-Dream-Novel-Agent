@@ -29,7 +29,21 @@
     "copy": "复制",
     "copied": "已复制",
     "copyFailed": "复制失败",
-    "refresh": "刷新"
+    "refresh": "刷新",
+    "on": "开启",
+    "off": "关闭",
+    "clear": "清除",
+    "chars": "字",
+    "add": "添加",
+    "selected": "已选择",
+    "remove": "点击移除",
+    "noResults": "无匹配结果",
+    "select": "请选择...",
+    "noSelection": "未选择",
+    "justNow": "刚刚",
+    "minutesAgo": "{{count}}分钟前",
+    "hoursAgo": "{{count}}小时前",
+    "exitFlow": "退出心流"
   },
   "matrix": {
     "title": "叙事矩阵",
@@ -72,7 +86,17 @@
     "deletePoint": "删除情节要点",
     "confirmDeletePoint": "确定要删除这个情节要点吗？此操作不可撤销。",
     "deleteLine": "删除情节线",
-    "confirmDeleteLine": "确定要删除这条情节线吗？这将同时删除其包含的所有情节要点。此操作不可撤销。"
+    "confirmDeleteLine": "确定要删除这条情节线吗？这将同时删除其包含的所有情节要点。此操作不可撤销。",
+    "addAnchor": "添加情节锚点",
+    "noPoints": "暂无要点",
+    "setup": "伏笔（铺垫）",
+    "payoff": "回收（兑现）",
+    "noPlotLines": "暂无情节线",
+    "viewDetails": "查看详情",
+    "removeAnchor": "移除锚点",
+    "linkExisting": "关联已有要点",
+    "createNew": "创建新要点",
+    "jumpToText": "跳转到原文"
   },
   "home": {
     "greeting": "晚上好，作家",
@@ -250,6 +274,8 @@
     "paramCurrentLocation": "当前场景（可选）",
     "newIdea": "记录灵感",
     "ideaPlaceholder": "写下你的想法...",
+    "recentFiles": "最近编辑",
+    "noRecentFiles": "暂无记录",
     "mode": {
       "editor": "编辑模式",
       "matrix": "矩阵模式"
@@ -288,6 +314,8 @@
     "chapters": "章节",
     "ideas": "灵感",
     "volumes": "卷",
+    "defaultVolumeFormat": "第 {n} 卷",
+    "defaultChapterFormat": "第 {n} 章",
     "loadMore": "加载更多",
     "hint": "输入关键词搜索",
     "untitled": "无标题",
@@ -301,7 +329,9 @@
     "characters": "角色",
     "items": "物品",
     "worldSettings": "世界观",
+    "maps": "地图",
     "category": {
+      "all": "全部",
       "chapter": "章节",
       "idea": "灵感",
       "character": "角色",
@@ -314,6 +344,8 @@
     "create": "添加灵感",
     "searchPlaceholder": "搜索灵感……",
     "placeholder": "记录点什么...",
+    "star": "收藏",
+    "unstar": "取消收藏",
     "jump": "跳转到原文",
     "jumpFailed": "原文已变更，无法定位"
   },
@@ -345,7 +377,9 @@
     "fontSans": "黑体",
     "fontKaiti": "楷体",
     "copy": "复制全文",
-    "copied": "已复制"
+    "copied": "已复制",
+    "indentTip": "智能缩进 (回车自动添加)",
+    "formatTip": "自动清理空行和末尾空格"
   },
   "settings": {
     "title": "设置",
@@ -371,6 +405,7 @@
       "recordTip": "点击按钮可重新录制快捷键。Esc 取消录制。",
       "recording": "录制中...",
       "unbind": "取消绑定",
+      "none": "无",
       "actions": {
         "format": "一键排版",
         "save": "保存",
@@ -435,6 +470,7 @@
       "testProxy": "测试代理",
       "testGenerate": "测试生成",
       "testPrompt": "测试生成内容",
+      "defaultTestPrompt": "请用一句话生成一个玄幻小说章节标题",
       "localOnlyTitle": "本机 AI 配置",
       "localOnlyDesc": "API Key / Token 仅保存在当前设备本地，不写入小说数据库，也不会进入备份恢复。",
       "presetDesc": "预设只会填入推荐接口、模型和默认参数，不会自动写入你的密钥。",
@@ -509,6 +545,20 @@
         "recentRawCount": "续写时最近几章优先正文数量",
         "notice": "提示：本地启发式摘要可能不准确；AI 摘要会消耗 token。建议优先维护大纲与故事线，再启用 AI 摘要。",
         "notice2": "建议：AI 摘要默认仅手动触发；若选择“章节完稿后触发”，系统会在章节一段时间未再编辑且达到最小字数后自动触发。"
+      },
+      "embedding": {
+        "title": "RAG 向量检索",
+        "enabled": "启用 Embedding API",
+        "fallbackToHash": "失败时回退本地 Hash",
+        "baseUrl": "Embedding Base URL",
+        "baseUrlHint": "兼容 OpenAI Embeddings 接口；可填写本地 BGE 服务或云端 API 地址。",
+        "apiKey": "Embedding API Key",
+        "apiKeyPlaceholder": "本地服务可留空",
+        "model": "Embedding 模型",
+        "dimensions": "向量维度",
+        "batchSize": "批量大小",
+        "timeoutMs": "超时（毫秒）",
+        "notice": "启用后，重建向量索引会调用该接口生成语义向量，并以 BLOB 存入 SQLite。未启用或失败回退时使用本地 Hash 向量。"
       },
       "openclawSmokeResult": "OpenClaw 冒烟结果",
       "smokePassed": "通过",
@@ -630,6 +680,7 @@
     "noRelations": "暂无人际关系",
     "addRelationHint": "点击上方按钮添加",
     "confirmDeleteRelation": "确定删除此关系？",
+    "unknownCharacter": "未知角色",
     "addItemToChar": "添加物品",
     "searchItem": "搜索物品...",
     "ownerNote": "持有备注",
@@ -642,7 +693,15 @@
     "chapterLine": "章节线",
     "storyTimeline": "故事性生平",
     "noChapterAppearances": "该角色未在任何章节中出现",
-    "noChapterAppearancesHint": "角色名称出现在章节正文中时自动标记"
+    "noChapterAppearancesHint": "角色名称出现在章节正文中时自动标记",
+    "uploadAvatar": "上传头像",
+    "customProperties": "自定义属性",
+    "property": "属性名",
+    "value": "属性值",
+    "fullBodyImages": "全身图",
+    "noFullBody": "暂无全身图",
+    "mapLocations": "所处位置",
+    "selectCategory": "选择或输入分类..."
   },
   "map": {
     "title": "地图",
@@ -670,7 +729,36 @@
     "resetView": "重置视图",
     "promptPreview": "提示词预览",
     "promptPreviewFailed": "加载提示词预览失败",
-    "promptUsedLore": "引用世界观"
+    "promptUsedLore": "引用世界观",
+    "hasBackground": "已有底图",
+    "mapType": "地图类型",
+    "descPlaceholder": "地图描述...",
+    "aiPromptRequired": "请先填写地图描述后再生成",
+    "aiGenerateSuccess": "AI 底图生成成功",
+    "aiRateLimited": "触发配额限制(429)，请稍后重试或切换模型/尺寸",
+    "aiGenerateFailed": "AI 底图生成失败",
+    "aiStage": {
+      "requesting": "请求中",
+      "generating": "生成中",
+      "downloading": "下载中",
+      "saving": "入库中"
+    },
+    "aiDisabled": {
+      "noMap": "请先选择地图",
+      "running": "正在生成中，请稍候"
+    },
+    "generateBgAI": "AI 生成底图",
+    "aiPromptLabel": "地图描述",
+    "aiPrompt": "输入地图描述，例如：山脉、河流、文明和地标",
+    "aiSize": "尺寸",
+    "aiStyle": "风格",
+    "aiStats": "AI统计: 总调用 {{total}} 次, 成功 {{success}} 次, 失败 {{failed}} 次, 429 {{rateLimit}} 次",
+    "style": {
+      "fantasy": "奇幻",
+      "realistic": "写实",
+      "ancient": "古风",
+      "scifi": "科幻"
+    }
   },
   "aiWorkbench": {
     "title": "AI 创作工坊",
@@ -779,8 +867,87 @@
     "generatedOpenRightHint": "草稿已生成，已在右侧草稿区打开，可直接编辑与勾选入库。",
     "filteredInvalidCount": "已过滤 {{count}} 条无效草稿（缺少必填名称/标题）",
     "emptyGeneratedHint": "未生成有效草稿，请补充描述或调整生成类别后重试。",
-    "editInRightDockHint": "草稿明细编辑已移到右侧草稿区。可用顶部“草稿”按钮快速开关。",
-    "editInRightDockHintCompact": "草稿详情已移到右侧。用顶部“草稿”按钮快速开关。"
+    "editInRightDockHint": "草稿明细编辑已移到右侧草稿区。可用顶部「草稿」按钮快速开关。",
+    "editInRightDockHintCompact": "草稿详情已移到右侧。用顶部「草稿」按钮快速开关。",
+    "contextSettings": "上下文配置",
+    "includeExistingEntities": "包含已有角色/物品/情节线",
+    "filterCompletedPlotLines": "过滤已完成的情节点",
+    "contextChapterNone": "不参考",
+    "estimatedContextTokens": "预估上下文 Token",
+    "modeAssets": "素材生成",
+    "modeRag": "小说问答",
+    "rag": {
+      "title": "小说问答",
+      "questionPlaceholder": "提问当前小说，例如：这个角色现在是什么状态？后续还有剧情吗？接下来按大纲应该怎么写？",
+      "includeCurrentContext": "包含当前章节上下文",
+      "showEvidence": "显示证据",
+      "needQuestion": "请先输入问题",
+      "ask": "提问",
+      "askFailed": "问答失败，请检查模型配置后重试",
+      "rebuildIndex": "重建向量索引",
+      "rebuildIndexFailed": "向量索引重建失败",
+      "rebuildIndexSuccess": "向量索引已重建：{{chunks}} 个片段，模型 {{model}}，维度 {{dimensions}}。",
+      "rebuildIndexFallback": "Embedding API 调用失败，已回退为本地 Hash 索引：{{chunks}} 个片段，当前模型 {{model}}。原因：{{error}}",
+      "unknownEmbeddingError": "未知 Embedding API 错误",
+      "previewPrompt": "预览提示词",
+      "promptPreview": "问答提示词",
+      "promptPreviewFailed": "加载问答提示词失败",
+      "answerTitle": "回答",
+      "noAnswer": "暂无回答",
+      "copyAnswer": "复制回答",
+      "copied": "已复制",
+      "evidenceTitle": "证据 {{count}} 条",
+      "previewGoal": "基于小说资料回答问题",
+      "constraintEvidenceOnly": "仅基于证据回答",
+      "constraintCiteEvidence": "引用证据标签",
+      "constraintInsufficientEvidence": "证据不足时明确说明",
+      "sourceType": {
+        "character": "角色",
+        "relationship": "关系",
+        "item": "物品",
+        "map": "地图",
+        "plotPoint": "情节点",
+        "plotLine": "故事线",
+        "worldSetting": "世界观",
+        "chapter": "章节",
+        "chapterSummary": "章节摘要",
+        "narrativeSummary": "叙事摘要",
+        "searchHit": "搜索结果",
+        "idea": "灵感",
+        "currentContext": "当前上下文"
+      },
+      "contextRef": {
+        "selected_text": "选中文本",
+        "current_chapter_context": "当前章节上下文",
+        "current_location": "当前位置",
+        "vector_chunks": "本地向量片段",
+        "characters": "角色资料",
+        "items": "物品资料",
+        "world_settings": "世界观资料",
+        "plot_outline": "故事线资料",
+        "plot_points": "情节点资料",
+        "narrative_summaries": "叙事摘要",
+        "chapter_summaries": "章节摘要",
+        "search_hits": "全文搜索结果"
+      },
+      "confidence": {
+        "high": "高置信度",
+        "medium": "中置信度",
+        "low": "低置信度"
+      }
+    }
+  },
+  "aiError": {
+    "INVALID_INPUT": "参数不完整或格式错误，请检查输入。",
+    "NOT_FOUND": "目标数据不存在，可能已被删除。",
+    "CONFLICT": "当前操作与现有数据冲突，请刷新后重试。",
+    "PROVIDER_AUTH": "模型鉴权失败，请检查 API Key 或权限。",
+    "PROVIDER_TIMEOUT": "模型请求超时，请稍后重试或调大超时。",
+    "PROVIDER_UNAVAILABLE": "模型暂不可用，请稍后重试或切换模型。",
+    "PROVIDER_FILTERED": "请求触发内容策略限制，请调整提示词。",
+    "NETWORK_ERROR": "网络连接失败，请检查代理或网络配置。",
+    "PERSISTENCE_ERROR": "写入失败，数据未成功保存。",
+    "UNKNOWN": "未知错误，请稍后重试。"
   }
 }
 

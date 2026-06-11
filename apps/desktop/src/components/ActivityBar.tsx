@@ -15,11 +15,11 @@ export default function ActivityBar({ activeTab, onTabChange, theme }: ActivityB
 
     const items: { id: ActivityTab; icon: React.ElementType; label: string }[] = [
         { id: 'explorer', icon: BookOpen, label: t('sidebar.explorer') },
-        { id: 'search', icon: Search, label: t('sidebar.search', 'Search') },
+        { id: 'search', icon: Search, label: t('sidebar.search') },
         { id: 'outline', icon: FileText, label: t('sidebar.outline') },
         { id: 'characters', icon: Users, label: t('sidebar.characters') },
         { id: 'map', icon: MapIcon, label: t('sidebar.map') },
-        { id: 'ai_workbench', icon: WandSparkles, label: t('sidebar.aiWorkbench', 'AI 工坊') },
+        { id: 'ai_workbench', icon: WandSparkles, label: t('sidebar.aiWorkbench') },
         { id: 'idea', icon: Lightbulb, label: t('sidebar.idea') },
     ];
 

@@ -1457,6 +1457,26 @@ ipcMain.handle('ai:check-consistency', async (_, payload: any) => {
     }
 });
 
+ipcMain.handle('ai:ask-novel', async (_, payload: any) => {
+    try {
+        return await aiService.askNovel(payload);
+    } catch (e) {
+        logAiIpcError('ai:ask-novel', payload, e);
+        console.error('[Main] ai:ask-novel failed:', e);
+        throw e;
+    }
+});
+
+ipcMain.handle('ai:preview-novel-ask-prompt', async (_, payload: any) => {
+    try {
+        return await aiService.previewNovelAskPrompt(payload);
+    } catch (e) {
+        logAiIpcError('ai:preview-novel-ask-prompt', payload, e);
+        console.error('[Main] ai:preview-novel-ask-prompt failed:', e);
+        throw e;
+    }
+});
+
 ipcMain.handle('ai:generate-creative-assets', async (_, payload: any) => {
     try {
         return await aiService.generateCreativeAssets(payload);
@@ -1964,7 +1984,11 @@ ipcMain.handle('db:upload-character-image', async (_, { characterId, type }: { c
 
 ipcMain.handle('db:delete-character-image', async (_, { characterId, imagePath, type }: { characterId: string; imagePath: string; type: 'avatar' | 'fullBody' }) => {
     try {
-        const fullPath = path.join(app.getPath('userData'), imagePath);
+        const userDataDir = app.getPath('userData');
+        const fullPath = path.resolve(path.join(userDataDir, imagePath));
+        if (!fullPath.startsWith(userDataDir + path.sep)) {
+            throw new Error('Invalid image path: path traversal detected');
+        }
         if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
 
         if (type === 'avatar') {
@@ -2722,9 +2746,13 @@ app.whenReady().then(async () => {
     }
 
     // Register custom protocol for serving local files (map backgrounds etc.)
+    const userDataRoot = path.resolve(app.getPath('userData'));
     protocol.handle('local-resource', (request) => {
         const relativePath = decodeURIComponent(request.url.replace('local-resource://', ''));
-        const fullPath = path.join(app.getPath('userData'), relativePath);
+        const fullPath = path.resolve(path.join(userDataRoot, relativePath));
+        if (!fullPath.startsWith(userDataRoot + path.sep) && fullPath !== userDataRoot) {
+            return new Response('Forbidden', { status: 403 });
+        }
         return net.fetch('file:///' + fullPath.replace(/\\/g, '/'));
     });
 

@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Download, Upload, Shield, ArchiveRestore, Clock, History } from 'lucide-react';
 import { Button } from '../ui/Button';
+import { ConfirmModal } from '../ui/ConfirmModal';
+import { useEditorPreferences } from '../../hooks/useEditorPreferences';
 import { toast } from 'sonner';
 
 interface AutoBackupInfo {
@@ -12,6 +14,7 @@ interface AutoBackupInfo {
 
 export const BackupRestorePanel: React.FC = () => {
     const { t } = useTranslation();
+    const { preferences } = useEditorPreferences();
 
     // Export state
     const [exportPassword, setExportPassword] = useState('');
@@ -23,6 +26,7 @@ export const BackupRestorePanel: React.FC = () => {
 
     const [isLoading, setIsLoading] = useState(false);
     const [autoBackups, setAutoBackups] = useState<AutoBackupInfo[]>([]);
+    const [pendingRestore, setPendingRestore] = useState<string | null>(null);
 
     useEffect(() => {
         loadAutoBackups();
@@ -84,18 +88,22 @@ export const BackupRestorePanel: React.FC = () => {
         }
     };
 
-    const handleRestoreAuto = async (filename: string) => {
-        if (!confirm(t('backup.confirmRestoreAuto'))) return;
+    const handleRestoreAuto = (filename: string) => {
+        setPendingRestore(filename);
+    };
 
+    const confirmRestore = async () => {
+        if (!pendingRestore) return;
         setIsLoading(true);
         try {
-            await window.backup.restoreAutoBackup(filename);
+            await window.backup.restoreAutoBackup(pendingRestore);
             toast.success(t('backup.importSuccess'));
             window.location.reload();
         } catch (e) {
             toast.error(t('backup.importFailed'));
         } finally {
             setIsLoading(false);
+            setPendingRestore(null);
         }
     };
 
@@ -214,6 +222,16 @@ export const BackupRestorePanel: React.FC = () => {
                     </div>
                 </div>
             )}
+
+            <ConfirmModal
+                isOpen={!!pendingRestore}
+                onClose={() => setPendingRestore(null)}
+                onConfirm={confirmRestore}
+                title={t('backup.autoTitle')}
+                message={t('backup.confirmRestoreAuto')}
+                theme={preferences.theme}
+                type="warning"
+            />
         </div>
     );
 };

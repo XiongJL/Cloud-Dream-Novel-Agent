@@ -534,7 +534,7 @@ function sanitizeValue(value, seen) {
   }
   return String(value);
 }
-function joinUrl(baseUrl, path2) {
+function joinUrl$1(baseUrl, path2) {
   return `${baseUrl.replace(/\/+$/, "")}/${path2.replace(/^\/+/, "")}`;
 }
 function parseJsonSafe(text) {
@@ -558,7 +558,7 @@ function describeNetworkError(error) {
   }
   return parts.join(" | ");
 }
-async function transportFetch(url, init) {
+async function transportFetch$1(url, init) {
   try {
     return await net.fetch(url, init);
   } catch {
@@ -590,7 +590,7 @@ class HttpProvider {
       didTimeout = true;
       controller.abort();
     }, effectiveTimeout);
-    const url = joinUrl(baseUrl, "models");
+    const url = joinUrl$1(baseUrl, "models");
     const startedAt = Date.now();
     try {
       devLog("INFO", "HttpProvider.healthCheck.request", "HTTP health check request", {
@@ -598,7 +598,7 @@ class HttpProvider {
         timeoutMs: effectiveTimeout,
         headers: { Authorization: `Bearer ${apiKey}` }
       });
-      const res = await transportFetch(url, {
+      const res = await transportFetch$1(url, {
         method: "GET",
         headers: {
           Authorization: `Bearer ${apiKey}`
@@ -655,7 +655,7 @@ class HttpProvider {
       max_tokens: req.maxTokens ?? this.settings.http.maxTokens,
       temperature: req.temperature ?? this.settings.http.temperature
     };
-    const url = joinUrl(this.settings.http.baseUrl, "chat/completions");
+    const url = joinUrl$1(this.settings.http.baseUrl, "chat/completions");
     const startedAt = Date.now();
     try {
       devLog("INFO", "HttpProvider.generate.request", "AI text generation request", {
@@ -663,7 +663,7 @@ class HttpProvider {
         timeoutMs: timeout,
         body: redactForLog(body)
       });
-      const res = await transportFetch(url, {
+      const res = await transportFetch$1(url, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.settings.http.apiKey}`,
@@ -723,7 +723,7 @@ class HttpProvider {
       output_format: req.outputFormat || "png",
       watermark: req.watermark ?? true
     };
-    const url = joinUrl(this.settings.http.baseUrl, "images/generations");
+    const url = joinUrl$1(this.settings.http.baseUrl, "images/generations");
     const startedAt = Date.now();
     try {
       devLog("INFO", "HttpProvider.generateImage.request", "AI image generation request", {
@@ -731,7 +731,7 @@ class HttpProvider {
         timeoutMs: timeout,
         body: redactForLog(body)
       });
-      const res = await transportFetch(url, {
+      const res = await transportFetch$1(url, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.settings.http.apiKey}`,
@@ -812,14 +812,24 @@ const DEFAULT_AI_SETTINGS$1 = {
     allProxy: "",
     noProxy: ""
   },
-  summary: DEFAULT_SUMMARY_SETTINGS
+  summary: DEFAULT_SUMMARY_SETTINGS,
+  embedding: {
+    enabled: false,
+    baseUrl: "",
+    apiKey: "",
+    model: "bge-large-zh-v1.5",
+    dimensions: 1024,
+    batchSize: 8,
+    timeoutMs: 6e4,
+    fallbackToHash: true
+  }
 };
 const pendingTimers = /* @__PURE__ */ new Map();
 const aiPendingCounters = /* @__PURE__ */ new Map();
 const finalizeTimers = /* @__PURE__ */ new Map();
 const narrativeTimers = /* @__PURE__ */ new Map();
 let dbPathLogged = false;
-function extractPlainTextFromLexical$2(content) {
+function extractPlainTextFromLexical$3(content) {
   if (!(content == null ? void 0 : content.trim()))
     return "";
   try {
@@ -1185,7 +1195,7 @@ async function rebuildChapterSummary(chapterId, options) {
     );
     return;
   }
-  const plainText = extractPlainTextFromLexical$2(sourceContent);
+  const plainText = extractPlainTextFromLexical$3(sourceContent);
   console.log(
     `${LOG_PREFIX} [${chapterId}] start rebuild (reason=${reason}, mode=${settings.summary.summaryMode}, words=${chapter.wordCount || plainText.length}, deltaWords=${wordDelta}, force=${force})`
   );
@@ -1892,6 +1902,71 @@ function createCapabilityDefinitions(deps) {
         }
         return search(input.novelId, input.keyword, input.limit ?? 20, input.offset ?? 0);
       }
+    },
+    {
+      actionId: "rag.ask",
+      title: "Ask novel RAG",
+      description: "Answer a novel-aware question using structured story data, summaries, and search evidence.",
+      permission: "read",
+      inputSchema: {
+        type: "object",
+        properties: {
+          novelId: { type: "string" },
+          question: { type: "string" },
+          chapterId: { type: "string" },
+          currentContent: { type: "string" },
+          selectedText: { type: "string" },
+          currentLocation: { type: "string" },
+          locale: { type: "string" },
+          maxEvidenceItems: { type: "number" },
+          overrideUserPrompt: { type: "string" }
+        },
+        required: ["novelId", "question"]
+      },
+      outputSchema: { type: "object" },
+      handler: async (payload) => {
+        var _a;
+        const input = payload;
+        if (!(input == null ? void 0 : input.novelId) || !((_a = input.question) == null ? void 0 : _a.trim())) {
+          throw new AiActionError("INVALID_INPUT", "novelId and question are required");
+        }
+        try {
+          return await deps.askNovel({
+            novelId: input.novelId,
+            question: input.question,
+            chapterId: input.chapterId,
+            currentContent: input.currentContent,
+            selectedText: input.selectedText,
+            currentLocation: input.currentLocation,
+            locale: input.locale,
+            maxEvidenceItems: input.maxEvidenceItems,
+            overrideUserPrompt: input.overrideUserPrompt
+          });
+        } catch (error) {
+          throw normalizeAiError(error);
+        }
+      }
+    },
+    {
+      actionId: "rag.rebuild_index",
+      title: "Rebuild RAG vector index",
+      description: "Rebuild the local vector chunk index for a novel.",
+      permission: "read",
+      inputSchema: {
+        type: "object",
+        properties: {
+          novelId: { type: "string" }
+        },
+        required: ["novelId"]
+      },
+      outputSchema: { type: "object" },
+      handler: async (payload) => {
+        const input = payload;
+        if (!(input == null ? void 0 : input.novelId)) {
+          throw new AiActionError("INVALID_INPUT", "novelId is required");
+        }
+        return deps.rebuildRagIndex(input.novelId);
+      }
     }
   ];
 }
@@ -2062,7 +2137,7 @@ function uniqueArray(values) {
   }
   return output;
 }
-function extractPlainTextFromLexical$1(content) {
+function extractPlainTextFromLexical$2(content) {
   if (!(content == null ? void 0 : content.trim()))
     return "";
   try {
@@ -2179,7 +2254,7 @@ class ContextBuilder {
       return {
         chapterId: ch.id,
         title: ch.title || "",
-        summary: extractPlainTextFromLexical$1(ch.content || "").slice(0, 600)
+        summary: extractPlainTextFromLexical$2(ch.content || "").slice(0, 600)
       };
     });
     if (fallbackCount > 0) {
@@ -2362,7 +2437,7 @@ class ContextBuilder {
       title: chapter.title || "",
       excerpt: (() => {
         if (index < recentRawChapterCount) {
-          return extractPlainTextFromLexical$1(chapter.content || "").slice(-1200);
+          return extractPlainTextFromLexical$2(chapter.content || "").slice(-1200);
         }
         const summary = summaryByChapterId.get(chapter.id);
         const summaryText = (summary == null ? void 0 : summary.compressedMemory) || (summary == null ? void 0 : summary.summaryText);
@@ -2370,10 +2445,10 @@ class ContextBuilder {
           return summaryText.slice(-1200);
         }
         fallbackCount.value += 1;
-        return extractPlainTextFromLexical$1(chapter.content || "").slice(-1200);
+        return extractPlainTextFromLexical$2(chapter.content || "").slice(-1200);
       })()
     }));
-    const currentChapterBeforeCursor = extractPlainTextFromLexical$1(payload.currentContent || "").slice(-2400);
+    const currentChapterBeforeCursor = extractPlainTextFromLexical$2(payload.currentContent || "").slice(-2400);
     const selectedIdeas = selectedIdeasRaw.map((idea) => ({
       ideaId: idea.id,
       content: (idea.content || "").slice(0, 800),
@@ -2464,6 +2539,1138 @@ ${idea.quote || ""}`;
         "current_chapter_before_cursor"
       ],
       warnings
+    };
+  }
+}
+const CJK_STOP_WORDS = /* @__PURE__ */ new Set([
+  "当前",
+  "现在",
+  "后续",
+  "之后",
+  "后面",
+  "剧情",
+  "大纲",
+  "应该",
+  "怎么",
+  "是否",
+  "还有",
+  "哪些",
+  "这个",
+  "那个",
+  "角色",
+  "状态",
+  "写作",
+  "伏笔",
+  "回收",
+  "冲突",
+  "前文",
+  "设定",
+  "什么",
+  "一下",
+  "分析"
+]);
+const EN_STOP_WORDS = /* @__PURE__ */ new Set([
+  "the",
+  "a",
+  "an",
+  "and",
+  "or",
+  "to",
+  "of",
+  "in",
+  "on",
+  "for",
+  "is",
+  "are",
+  "what",
+  "where",
+  "when",
+  "how",
+  "does",
+  "do",
+  "after",
+  "next",
+  "current"
+]);
+function unique(values) {
+  const seen = /* @__PURE__ */ new Set();
+  const output = [];
+  for (const raw of values) {
+    const value = String(raw || "").trim();
+    if (!value)
+      continue;
+    const key = value.toLowerCase();
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    output.push(value);
+  }
+  return output;
+}
+function detectRagIntent(question) {
+  const text = question.toLowerCase();
+  if (/冲突|矛盾|一致|合理|consisten|conflict/.test(text))
+    return "consistency_check";
+  if (/伏笔|坑|悬念|未解|没回收|未回收|unresolved|thread|foreshadow/.test(text))
+    return "unresolved_threads";
+  if (/大纲|接下来|下一步|后续写|怎么写|outline|next beat|next/.test(text))
+    return "outline_next";
+  if (/后续|后面|之后|还有戏|还有剧情|未来|安排|future|later/.test(text))
+    return "future_plot_for_entity";
+  if (/当前|现在|状态|在哪里|位置|持有|关系|current|state|status|where/.test(text))
+    return "character_state";
+  return "general_qa";
+}
+function extractQuestionKeywords(question) {
+  const atMentions = Array.from(question.matchAll(/@([^\s@，。！？,!.;；:："'""''()\[\]{}<>]+)/g)).map((match) => String(match[1] || "").trim()).filter(Boolean);
+  const cjkWords = Array.from(question.matchAll(/[\u4e00-\u9fff\u3400-\u4dbf]{2,}/g)).map((match) => match[0]).filter((word) => !CJK_STOP_WORDS.has(word));
+  const latinWords = Array.from(question.matchAll(/[a-zA-Z][a-zA-Z0-9_-]{2,}/g)).map((match) => match[0]).filter((word) => !EN_STOP_WORDS.has(word.toLowerCase()));
+  return unique([...atMentions, ...cjkWords, ...latinWords]).slice(0, 8);
+}
+function detectRagQuestion(question, knownEntityNames) {
+  const normalizedQuestion = String(question || "");
+  const lowerQuestion = normalizedQuestion.toLowerCase();
+  const exactMatches = knownEntityNames.map((name) => String(name || "").trim()).filter(Boolean).filter((name) => lowerQuestion.includes(name.toLowerCase()));
+  const atMentions = Array.from(normalizedQuestion.matchAll(/@([^\s@，。！？,!.;；:："'""''()\[\]{}<>]+)/g)).map((match) => String(match[1] || "").trim()).filter(Boolean);
+  return {
+    intent: detectRagIntent(normalizedQuestion),
+    entityNames: unique([...exactMatches, ...atMentions]).slice(0, 8),
+    keywords: extractQuestionKeywords(normalizedQuestion)
+  };
+}
+function joinUrl(baseUrl, path2) {
+  return `${baseUrl.replace(/\/+$/, "")}/${path2.replace(/^\/+/, "")}`;
+}
+async function transportFetch(url, init) {
+  try {
+    return await net.fetch(url, init);
+  } catch {
+    return await fetch(url, init);
+  }
+}
+function normalizeEmbedding(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.map((item) => Number(item)).filter((item) => Number.isFinite(item));
+}
+function resolveEmbeddingUrl(baseUrl) {
+  const normalized = baseUrl.trim().replace(/\/+$/, "");
+  if (normalized.endsWith("/embeddings"))
+    return normalized;
+  if (normalized.endsWith("/v1"))
+    return joinUrl(normalized, "embeddings");
+  return joinUrl(normalized, "v1/embeddings");
+}
+class EmbeddingClient {
+  constructor(settings) {
+    this.settings = settings;
+  }
+  isEnabled() {
+    return Boolean(this.settings.enabled && this.settings.baseUrl.trim() && this.settings.model.trim());
+  }
+  async embed(input) {
+    var _a, _b;
+    if (!this.isEnabled()) {
+      throw new Error("Embedding API is disabled or incomplete.");
+    }
+    const texts = input.map((item) => String(item || "").trim()).filter(Boolean);
+    if (texts.length === 0) {
+      return {
+        embeddings: [],
+        model: this.settings.model,
+        dimensions: this.settings.dimensions || 0,
+        provider: "openai-compatible"
+      };
+    }
+    const controller = new AbortController();
+    const timeout = Math.max(1e3, this.settings.timeoutMs || 6e4);
+    let didTimeout = false;
+    const timer = setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+    }, timeout);
+    const url = resolveEmbeddingUrl(this.settings.baseUrl);
+    const body = {
+      model: this.settings.model,
+      input: texts
+    };
+    if (this.settings.dimensions && Number.isFinite(this.settings.dimensions)) {
+      body.dimensions = this.settings.dimensions;
+    }
+    const startedAt = Date.now();
+    try {
+      devLog("INFO", "EmbeddingClient.embed.request", "Embedding request", {
+        url,
+        timeoutMs: timeout,
+        body: redactForLog(body),
+        inputCount: texts.length
+      });
+      const res = await transportFetch(url, {
+        method: "POST",
+        headers: {
+          ...this.settings.apiKey.trim() ? { Authorization: `Bearer ${this.settings.apiKey}` } : {},
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+      const raw = await res.text();
+      let json = null;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        json = null;
+      }
+      if (!res.ok) {
+        throw new Error(((_a = json == null ? void 0 : json.error) == null ? void 0 : _a.message) || `Embedding API rejected: ${res.status} ${raw.slice(0, 240)}`);
+      }
+      const data = Array.isArray(json == null ? void 0 : json.data) ? json.data : [];
+      const embeddings = data.sort((a, b) => Number((a == null ? void 0 : a.index) || 0) - Number((b == null ? void 0 : b.index) || 0)).map((item) => normalizeEmbedding(item == null ? void 0 : item.embedding)).filter((item) => item.length > 0);
+      const dimensions = ((_b = embeddings[0]) == null ? void 0 : _b.length) || this.settings.dimensions || 0;
+      if (embeddings.length !== texts.length) {
+        throw new Error(`Embedding API returned ${embeddings.length} vectors for ${texts.length} inputs.`);
+      }
+      devLog("INFO", "EmbeddingClient.embed.response", "Embedding response ok", {
+        url,
+        elapsedMs: Date.now() - startedAt,
+        inputCount: texts.length,
+        dimensions,
+        model: (json == null ? void 0 : json.model) || this.settings.model
+      });
+      return {
+        embeddings,
+        model: (json == null ? void 0 : json.model) || this.settings.model,
+        dimensions,
+        provider: "openai-compatible"
+      };
+    } catch (error) {
+      devLogError("EmbeddingClient.embed.error", error, {
+        url,
+        elapsedMs: Date.now() - startedAt,
+        didTimeout,
+        requestBody: redactForLog(body)
+      });
+      if (didTimeout) {
+        throw new Error(`Embedding API timeout after ${timeout}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+const VECTOR_DIM = 384;
+const MAX_CHUNK_CHARS = 900;
+const CHUNK_OVERLAP_CHARS = 120;
+const MIN_SIMILARITY = 0.08;
+function hashText(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+function extractPlainTextFromLexical$1(content) {
+  if (!(content == null ? void 0 : content.trim()))
+    return "";
+  try {
+    const parsed = JSON.parse(content);
+    const texts = [];
+    const walk = (node) => {
+      if (!node || typeof node !== "object")
+        return;
+      if (typeof node.text === "string")
+        texts.push(node.text);
+      if (Array.isArray(node.children))
+        node.children.forEach(walk);
+    };
+    walk((parsed == null ? void 0 : parsed.root) || parsed);
+    return texts.join(" ").replace(/\s+/g, " ").trim();
+  } catch {
+    return content.replace(/\s+/g, " ").trim();
+  }
+}
+function parseJsonArray$1(value) {
+  if (typeof value !== "string" || !value.trim())
+    return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+function parseProfile$1(value) {
+  if (typeof value !== "string" || !value.trim() || value.trim() === "{}")
+    return "";
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object")
+      return "";
+    return Object.entries(parsed).map(([key, val]) => `${key}: ${String(val || "")}`).filter((line) => !line.endsWith(": ")).join("; ");
+  } catch {
+    return value;
+  }
+}
+function tokenize(text) {
+  const normalized = text.toLowerCase();
+  const latin = Array.from(normalized.matchAll(/[a-z0-9][a-z0-9_-]{1,}/g)).map((match) => match[0]);
+  const cjkRuns = Array.from(normalized.matchAll(/[\u4e00-\u9fff\u3400-\u4dbf]+/g)).map((match) => match[0]);
+  const cjkTokens = [];
+  for (const run of cjkRuns) {
+    if (run.length === 1) {
+      cjkTokens.push(run);
+      continue;
+    }
+    for (let i = 0; i < run.length - 1; i += 1) {
+      cjkTokens.push(run.slice(i, i + 2));
+    }
+    if (run.length <= 4)
+      cjkTokens.push(run);
+  }
+  return [...latin, ...cjkTokens].filter(Boolean);
+}
+function hashToken(token) {
+  const digest = createHash("sha1").update(token).digest();
+  const value = digest.readUInt32BE(0);
+  return {
+    index: value % VECTOR_DIM,
+    sign: (digest[4] & 1) === 1 ? 1 : -1
+  };
+}
+function embedText(text) {
+  const vector = new Array(VECTOR_DIM).fill(0);
+  const counts = /* @__PURE__ */ new Map();
+  for (const token of tokenize(text)) {
+    counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  for (const [token, count] of counts) {
+    const { index, sign } = hashToken(token);
+    vector[index] += sign * Math.log1p(count);
+  }
+  const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+  if (norm <= 0)
+    return vector;
+  return vector.map((value) => Number((value / norm).toFixed(6)));
+}
+function vectorToBlob(vector) {
+  const buffer = Buffer.alloc(vector.length * 4);
+  for (let i = 0; i < vector.length; i += 1) {
+    buffer.writeFloatLE(Number.isFinite(vector[i]) ? vector[i] : 0, i * 4);
+  }
+  return buffer;
+}
+function blobToVector(blob, dim) {
+  if (!blob)
+    return [];
+  const buffer = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+  const count = Math.floor(buffer.length / 4);
+  const limit = dim && dim > 0 ? Math.min(dim, count) : count;
+  const vector = [];
+  for (let i = 0; i < limit; i += 1) {
+    vector.push(buffer.readFloatLE(i * 4));
+  }
+  return vector;
+}
+function cosine(a, b) {
+  const len = Math.min(a.length, b.length);
+  let sum = 0;
+  for (let i = 0; i < len; i += 1)
+    sum += a[i] * b[i];
+  return sum;
+}
+function chunkText(text) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized)
+    return [];
+  if (normalized.length <= MAX_CHUNK_CHARS)
+    return [normalized];
+  const chunks = [];
+  let start = 0;
+  while (start < normalized.length) {
+    const end = Math.min(normalized.length, start + MAX_CHUNK_CHARS);
+    chunks.push(normalized.slice(start, end));
+    if (end >= normalized.length)
+      break;
+    start = Math.max(0, end - CHUNK_OVERLAP_CHARS);
+  }
+  return chunks;
+}
+async function ensureRagVectorIndex() {
+  await db.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS rag_vector_chunks (
+            id TEXT PRIMARY KEY,
+            novel_id TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            embedding_json TEXT NOT NULL,
+            embedding_blob BLOB,
+            embedding_dim INTEGER,
+            embedding_provider TEXT NOT NULL DEFAULT 'hash',
+            embedding_model TEXT NOT NULL DEFAULT 'local-hash-v1',
+            content_hash TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    `);
+  const columns = await db.$queryRawUnsafe("PRAGMA table_info(rag_vector_chunks);");
+  const columnNames = new Set(columns.map((column) => column.name));
+  const migrations = [
+    ["embedding_blob", "ALTER TABLE rag_vector_chunks ADD COLUMN embedding_blob BLOB;"],
+    ["embedding_dim", "ALTER TABLE rag_vector_chunks ADD COLUMN embedding_dim INTEGER;"],
+    ["embedding_provider", "ALTER TABLE rag_vector_chunks ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT 'hash';"],
+    ["embedding_model", "ALTER TABLE rag_vector_chunks ADD COLUMN embedding_model TEXT NOT NULL DEFAULT 'local-hash-v1';"]
+  ];
+  for (const [name, sql] of migrations) {
+    if (!columnNames.has(name)) {
+      await db.$executeRawUnsafe(sql);
+    }
+  }
+  await db.$executeRawUnsafe("CREATE INDEX IF NOT EXISTS idx_rag_vector_chunks_novel ON rag_vector_chunks(novel_id);");
+  await db.$executeRawUnsafe("CREATE INDEX IF NOT EXISTS idx_rag_vector_chunks_source ON rag_vector_chunks(source_type, source_id);");
+}
+async function buildVectorDocuments(novelId) {
+  var _a;
+  const [characters, items, worldSettings, plotLines, chapters, chapterSummaries, narrativeSummaries] = await Promise.all([
+    db.character.findMany({
+      where: { novelId },
+      include: { items: { include: { item: true } } },
+      orderBy: { sortOrder: "asc" }
+    }),
+    db.item.findMany({ where: { novelId }, orderBy: { sortOrder: "asc" } }),
+    db.worldSetting.findMany({ where: { novelId }, orderBy: { sortOrder: "asc" } }),
+    db.plotLine.findMany({
+      where: { novelId },
+      include: { points: { orderBy: { order: "asc" } } },
+      orderBy: { sortOrder: "asc" }
+    }),
+    db.chapter.findMany({
+      where: { volume: { novelId } },
+      select: { id: true, title: true, content: true, order: true, volume: { select: { title: true, order: true } } },
+      orderBy: [{ volume: { order: "asc" } }, { order: "asc" }]
+    }),
+    db.chapterSummary.findMany({
+      where: { novelId, isLatest: true, status: "active" },
+      orderBy: { updatedAt: "desc" }
+    }),
+    db.narrativeSummary.findMany({
+      where: { novelId, isLatest: true, status: "active" },
+      orderBy: { updatedAt: "desc" }
+    })
+  ]);
+  const docs = [];
+  for (const character of characters) {
+    const profile = parseProfile$1(character.profile);
+    const ownedItems = Array.isArray(character.items) ? character.items.map((owner) => {
+      var _a2;
+      return `${((_a2 = owner.item) == null ? void 0 : _a2.name) || ""}${owner.note ? ` ${owner.note}` : ""}`;
+    }).filter(Boolean).join("; ") : "";
+    docs.push({
+      novelId,
+      sourceType: "character",
+      sourceId: character.id,
+      title: `Character: ${character.name}`,
+      content: [
+        character.name,
+        character.role,
+        character.description,
+        profile,
+        ownedItems ? `Owned items: ${ownedItems}` : "",
+        character.isStarred ? "starred important" : ""
+      ].filter(Boolean).join("\n")
+    });
+  }
+  for (const item of items) {
+    docs.push({
+      novelId,
+      sourceType: "item",
+      sourceId: item.id,
+      title: `${item.type || "Item"}: ${item.name}`,
+      content: [item.name, item.type, item.description, parseProfile$1(item.profile)].filter(Boolean).join("\n")
+    });
+  }
+  for (const world of worldSettings) {
+    docs.push({
+      novelId,
+      sourceType: "worldSetting",
+      sourceId: world.id,
+      title: `World: ${world.name}`,
+      content: [world.name, world.type, world.content].filter(Boolean).join("\n")
+    });
+  }
+  for (const line of plotLines) {
+    docs.push({
+      novelId,
+      sourceType: "plotLine",
+      sourceId: line.id,
+      title: `Plot line: ${line.name}`,
+      content: [line.name, line.description].filter(Boolean).join("\n")
+    });
+    for (const point of line.points || []) {
+      docs.push({
+        novelId,
+        sourceType: "plotPoint",
+        sourceId: point.id,
+        title: `Plot point: ${point.title}`,
+        content: [line.name, point.title, point.type, point.status, point.description].filter(Boolean).join("\n")
+      });
+    }
+  }
+  for (const chapter of chapters) {
+    const plain = extractPlainTextFromLexical$1(chapter.content || "");
+    if (!plain)
+      continue;
+    docs.push({
+      novelId,
+      sourceType: "chapter",
+      sourceId: chapter.id,
+      title: `${((_a = chapter.volume) == null ? void 0 : _a.title) || ""} ${chapter.title || ""}`.trim() || "Chapter",
+      content: plain
+    });
+  }
+  for (const summary of chapterSummaries) {
+    docs.push({
+      novelId,
+      sourceType: "chapterSummary",
+      sourceId: summary.id,
+      title: `Chapter summary: ${summary.chapterId}`,
+      content: [
+        summary.compressedMemory || summary.summaryText,
+        ...parseJsonArray$1(summary.keyFacts),
+        ...parseJsonArray$1(summary.timelineHints),
+        ...parseJsonArray$1(summary.openQuestions)
+      ].filter(Boolean).join("\n")
+    });
+  }
+  for (const summary of narrativeSummaries) {
+    docs.push({
+      novelId,
+      sourceType: "narrativeSummary",
+      sourceId: summary.id,
+      title: `${summary.level || "novel"} summary: ${summary.title || "latest"}`,
+      content: [
+        summary.summaryText,
+        ...parseJsonArray$1(summary.keyFacts),
+        ...parseJsonArray$1(summary.unresolvedThreads),
+        ...parseJsonArray$1(summary.hardConstraints)
+      ].filter(Boolean).join("\n")
+    });
+  }
+  return docs;
+}
+async function embedChunks(input) {
+  const settings = input.settings;
+  if ((settings == null ? void 0 : settings.enabled) && settings.baseUrl.trim()) {
+    try {
+      const client = new EmbeddingClient(settings);
+      const batchSize = Math.max(1, Math.min(64, settings.batchSize || 8));
+      const vectors2 = [];
+      let model = settings.model;
+      let dimensions = settings.dimensions || 0;
+      for (let start = 0; start < input.texts.length; start += batchSize) {
+        const batch = input.texts.slice(start, start + batchSize);
+        const result = await client.embed(batch);
+        vectors2.push(...result.embeddings);
+        model = result.model;
+        dimensions = result.dimensions;
+      }
+      return { vectors: vectors2, provider: "openai-compatible", model, dimensions, fallbackUsed: false };
+    } catch (error) {
+      if (!settings.fallbackToHash)
+        throw error;
+      console.warn("[RAG] Embedding API failed; falling back to local hash vectors:", error);
+      const fallbackError = error instanceof Error ? error.message : String(error);
+      const vectors2 = input.texts.map((text) => embedText(text));
+      return { vectors: vectors2, provider: "hash", model: "local-hash-v1", dimensions: VECTOR_DIM, fallbackUsed: true, fallbackError };
+    }
+  }
+  const vectors = input.texts.map((text) => embedText(text));
+  return { vectors, provider: "hash", model: "local-hash-v1", dimensions: VECTOR_DIM, fallbackUsed: Boolean(settings == null ? void 0 : settings.enabled) };
+}
+async function rebuildRagVectorIndex(novelId, settings) {
+  await ensureRagVectorIndex();
+  const docs = await buildVectorDocuments(novelId);
+  await db.$executeRaw`DELETE FROM rag_vector_chunks WHERE novel_id = ${novelId};`;
+  const chunkRows = [];
+  for (const doc of docs) {
+    const parts = chunkText(doc.content);
+    for (let index = 0; index < parts.length; index += 1) {
+      chunkRows.push({ doc, index, content: parts[index] });
+    }
+  }
+  const embedded = await embedChunks({
+    texts: chunkRows.map((row) => `${row.doc.title}
+${row.content}`),
+    settings
+  });
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  for (let rowIndex = 0; rowIndex < chunkRows.length; rowIndex += 1) {
+    const row = chunkRows[rowIndex];
+    const vector = embedded.vectors[rowIndex] || embedText(`${row.doc.title}
+${row.content}`);
+    const contentHash = hashText(`${row.doc.sourceType}:${row.doc.sourceId}:${row.index}:${row.content}`);
+    const id = hashText(`${row.doc.novelId}:${row.doc.sourceType}:${row.doc.sourceId}:${row.index}`);
+    const embeddingJson = embedded.provider === "hash" ? JSON.stringify(vector) : "[]";
+    const embeddingBlob = vectorToBlob(vector);
+    const dim = vector.length;
+    await db.$executeRaw`
+            INSERT INTO rag_vector_chunks (id, novel_id, source_type, source_id, title, content, embedding_json, embedding_blob, embedding_dim, embedding_provider, embedding_model, content_hash, updated_at)
+            VALUES (${id}, ${row.doc.novelId}, ${row.doc.sourceType}, ${row.doc.sourceId}, ${row.doc.title}, ${row.content}, ${embeddingJson}, ${embeddingBlob}, ${dim}, ${embedded.provider}, ${embedded.model}, ${contentHash}, ${now});
+        `;
+  }
+  return { chunks: chunkRows.length, sources: docs.length, provider: embedded.provider, model: embedded.model, dimensions: embedded.dimensions, fallbackUsed: embedded.fallbackUsed, fallbackError: embedded.fallbackError };
+}
+async function ensureRagVectorIndexForNovel(novelId, settings) {
+  var _a;
+  await ensureRagVectorIndex();
+  const existing = await db.$queryRaw`
+        SELECT COUNT(*) as count FROM rag_vector_chunks WHERE novel_id = ${novelId};
+    `;
+  const count = Number(((_a = existing[0]) == null ? void 0 : _a.count) || 0);
+  if (count > 0)
+    return { rebuilt: false, chunks: count };
+  const result = await rebuildRagVectorIndex(novelId, settings);
+  return { rebuilt: true, chunks: result.chunks, sources: result.sources };
+}
+async function queryRagVectorIndex(input) {
+  var _a, _b;
+  await ensureRagVectorIndexForNovel(input.novelId, input.settings);
+  const rows = await db.$queryRaw`
+        SELECT id, novel_id, source_type, source_id, title, content, embedding_json, embedding_blob, embedding_dim
+        FROM rag_vector_chunks
+        WHERE novel_id = ${input.novelId};
+    `;
+  let queryVector = embedText(input.query);
+  const firstDim = ((_a = rows.find((row) => Number(row.embedding_dim || 0) > 0)) == null ? void 0 : _a.embedding_dim) || 0;
+  const firstHasBlob = rows.some((row) => row.embedding_blob);
+  if (((_b = input.settings) == null ? void 0 : _b.enabled) && input.settings.baseUrl.trim() && firstHasBlob && firstDim !== VECTOR_DIM) {
+    try {
+      const client = new EmbeddingClient(input.settings);
+      const result = await client.embed([input.query]);
+      queryVector = result.embeddings[0] || queryVector;
+    } catch (error) {
+      if (!input.settings.fallbackToHash)
+        throw error;
+      console.warn("[RAG] Query embedding API failed; falling back to local hash vector:", error);
+    }
+  }
+  return rows.map((row) => {
+    let vector = blobToVector(row.embedding_blob, row.embedding_dim);
+    if (vector.length === 0 && row.embedding_json) {
+      try {
+        const parsed = JSON.parse(row.embedding_json);
+        vector = Array.isArray(parsed) ? parsed.map((value) => Number(value) || 0) : [];
+      } catch {
+        vector = [];
+      }
+    }
+    const similarity = cosine(queryVector, vector);
+    return {
+      id: row.id,
+      sourceType: row.source_type,
+      sourceId: row.source_id,
+      title: row.title,
+      excerpt: row.content,
+      metadata: { vectorSimilarity: Number(similarity.toFixed(4)), retrieval: "local_vector_hash" },
+      score: Math.round(similarity * 100)
+    };
+  }).filter((item) => {
+    var _a2;
+    return Number(((_a2 = item.metadata) == null ? void 0 : _a2.vectorSimilarity) || 0) >= MIN_SIMILARITY;
+  }).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, Math.max(1, Math.min(16, input.limit ?? 8)));
+}
+function trimText$1(value, maxLen) {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  if (!text)
+    return "";
+  return text.length > maxLen ? `${text.slice(0, maxLen)}...` : text;
+}
+function parseJsonArray(value) {
+  if (typeof value !== "string" || !value.trim())
+    return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed))
+      return [];
+    return parsed.map((item) => String(item || "").trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+function parseProfile(value) {
+  if (typeof value !== "string" || !value.trim() || value.trim() === "{}")
+    return "";
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object")
+      return "";
+    return Object.entries(parsed).map(([key, val]) => `${key}: ${String(val || "")}`).filter((line) => !line.endsWith(": ")).join("; ");
+  } catch {
+    return value;
+  }
+}
+function hasEntityMatch(text, entityNames) {
+  const haystack = String(text || "").toLowerCase();
+  return entityNames.some((name) => haystack.includes(name.toLowerCase()));
+}
+function scoreForIntent(base, intent, sourceType) {
+  if (intent === "future_plot_for_entity" && sourceType === "plotPoint")
+    return base + 40;
+  if (intent === "outline_next" && (sourceType === "plotPoint" || sourceType === "plotLine"))
+    return base + 35;
+  if (intent === "character_state" && (sourceType === "character" || sourceType === "relationship" || sourceType === "item" || sourceType === "map"))
+    return base + 30;
+  if (intent === "unresolved_threads" && (sourceType === "narrativeSummary" || sourceType === "chapterSummary" || sourceType === "plotPoint"))
+    return base + 25;
+  return base;
+}
+function addEvidence(items, input) {
+  const id = `E${items.length + 1}`;
+  const excerpt = trimText$1(input.excerpt, 900);
+  if (!excerpt)
+    return;
+  items.push({ id, ...input, excerpt });
+}
+async function getKnownRagEntityNames(novelId) {
+  const [characters, items, worldSettings] = await Promise.all([
+    db.character.findMany({ where: { novelId }, select: { name: true } }),
+    db.item.findMany({ where: { novelId }, select: { name: true } }),
+    db.worldSetting.findMany({ where: { novelId }, select: { name: true } })
+  ]);
+  const names = [...characters, ...items, ...worldSettings].map((item) => String((item == null ? void 0 : item.name) || "").trim()).filter(Boolean);
+  return Array.from(new Set(names));
+}
+async function collectRagEvidence(input) {
+  var _a, _b, _c, _d, _e, _f, _g, _h;
+  const maxEvidenceItems = Math.max(4, Math.min(24, input.maxEvidenceItems ?? 12));
+  const entityNames = input.detection.entityNames;
+  const keywords = input.detection.keywords;
+  const intent = input.detection.intent;
+  const evidence = [];
+  const warnings = [];
+  const usedContext = /* @__PURE__ */ new Set();
+  const isZh = (input.locale || "zh").startsWith("zh");
+  const [characters, items, worldSettings, plotLines, narrativeSummaries, chapterSummaries, currentChapter] = await Promise.all([
+    db.character.findMany({
+      where: { novelId: input.novelId },
+      include: {
+        items: { include: { item: true } },
+        relationsAsSource: { include: { target: true } },
+        relationsAsTarget: { include: { source: true } },
+        mapMarkers: { include: { map: true } }
+      },
+      orderBy: [{ isStarred: "desc" }, { sortOrder: "asc" }],
+      take: 100
+    }),
+    db.item.findMany({
+      where: { novelId: input.novelId },
+      include: { owners: { include: { character: true } } },
+      orderBy: { sortOrder: "asc" },
+      take: 120
+    }),
+    db.worldSetting.findMany({
+      where: { novelId: input.novelId },
+      orderBy: { sortOrder: "asc" },
+      take: 80
+    }),
+    db.plotLine.findMany({
+      where: { novelId: input.novelId },
+      include: {
+        points: {
+          include: {
+            anchors: { include: { chapter: { select: { title: true, order: true, volume: { select: { title: true, order: true } } } } } }
+          },
+          orderBy: { order: "asc" }
+        }
+      },
+      orderBy: { sortOrder: "asc" }
+    }),
+    db.narrativeSummary.findMany({
+      where: { novelId: input.novelId, isLatest: true, status: "active" },
+      orderBy: { updatedAt: "desc" },
+      take: 3
+    }),
+    db.chapterSummary.findMany({
+      where: { novelId: input.novelId, isLatest: true, status: "active" },
+      orderBy: { updatedAt: "desc" },
+      take: 12
+    }),
+    input.chapterId ? db.chapter.findUnique({
+      where: { id: input.chapterId },
+      select: { id: true, title: true, order: true, volume: { select: { title: true, order: true } } }
+    }) : null
+  ]);
+  if ((_a = input.selectedText) == null ? void 0 : _a.trim()) {
+    addEvidence(evidence, {
+      sourceType: "currentContext",
+      sourceId: input.chapterId || "selectedText",
+      title: "Selected text",
+      excerpt: input.selectedText,
+      score: 95
+    });
+    usedContext.add("selected_text");
+  }
+  if ((_b = input.currentContent) == null ? void 0 : _b.trim()) {
+    addEvidence(evidence, {
+      sourceType: "currentContext",
+      sourceId: input.chapterId || "currentContent",
+      title: (currentChapter == null ? void 0 : currentChapter.title) ? `Current chapter: ${currentChapter.title}` : "Current chapter context",
+      excerpt: input.currentContent.slice(-1600),
+      metadata: currentChapter ? { chapterOrder: currentChapter.order, volumeTitle: (_c = currentChapter.volume) == null ? void 0 : _c.title } : void 0,
+      score: 55
+    });
+    usedContext.add("current_chapter_context");
+  }
+  if ((_d = input.currentLocation) == null ? void 0 : _d.trim()) {
+    addEvidence(evidence, {
+      sourceType: "currentContext",
+      sourceId: "currentLocation",
+      title: "Current location",
+      excerpt: input.currentLocation,
+      score: 50
+    });
+    usedContext.add("current_location");
+  }
+  const vectorEvidence = await queryRagVectorIndex({
+    novelId: input.novelId,
+    query: input.question,
+    limit: Math.min(8, maxEvidenceItems),
+    settings: input.embeddingSettings
+  });
+  for (const item of vectorEvidence) {
+    addEvidence(evidence, {
+      ...item,
+      score: 90 + Math.max(0, item.score || 0)
+    });
+  }
+  if (vectorEvidence.length > 0) {
+    usedContext.add("vector_chunks");
+  }
+  const relevantCharacters = characters.filter((character) => entityNames.length === 0 ? keywords.some((keyword) => hasEntityMatch(`${character.name} ${character.role} ${character.description} ${character.profile}`, [keyword])) : hasEntityMatch(character.name, entityNames));
+  for (const character of relevantCharacters.slice(0, 8)) {
+    const profile = parseProfile(character.profile);
+    const ownedItems = Array.isArray(character.items) ? character.items.map((owner) => {
+      var _a2;
+      return `${((_a2 = owner.item) == null ? void 0 : _a2.name) || ""}${owner.note ? `(${owner.note})` : ""}`;
+    }).filter(Boolean).join(", ") : "";
+    addEvidence(evidence, {
+      sourceType: "character",
+      sourceId: character.id,
+      title: `Character: ${character.name}`,
+      excerpt: [
+        character.role ? `Role: ${character.role}` : "",
+        character.description ? `Description: ${character.description}` : "",
+        profile ? `Profile: ${profile}` : "",
+        ownedItems ? `Owned items: ${ownedItems}` : ""
+      ].filter(Boolean).join("\n"),
+      metadata: { name: character.name, isStarred: character.isStarred },
+      score: scoreForIntent(100 + (character.isStarred ? 10 : 0), intent, "character")
+    });
+    usedContext.add("characters");
+    for (const relation of [...character.relationsAsSource || [], ...character.relationsAsTarget || []].slice(0, 8)) {
+      const other = ((_e = relation.target) == null ? void 0 : _e.name) || ((_f = relation.source) == null ? void 0 : _f.name) || "";
+      addEvidence(evidence, {
+        sourceType: "relationship",
+        sourceId: relation.id,
+        title: `Relationship: ${character.name} - ${other}`,
+        excerpt: `${relation.relation || ""}${relation.description ? `: ${relation.description}` : ""}`,
+        metadata: { characterName: character.name, relatedName: other },
+        score: scoreForIntent(80, intent, "relationship")
+      });
+    }
+    for (const marker of (character.mapMarkers || []).slice(0, 6)) {
+      addEvidence(evidence, {
+        sourceType: "map",
+        sourceId: marker.id,
+        title: `Map: ${((_g = marker.map) == null ? void 0 : _g.name) || marker.mapId}`,
+        excerpt: `${character.name} marker${marker.label ? `: ${marker.label}` : ""}`,
+        metadata: { characterName: character.name, mapId: marker.mapId, mapType: (_h = marker.map) == null ? void 0 : _h.type },
+        score: scoreForIntent(70, intent, "map")
+      });
+    }
+  }
+  for (const item of items) {
+    const itemText = `${item.name} ${item.type} ${item.description} ${item.profile}`;
+    if (entityNames.length > 0 && !hasEntityMatch(itemText, entityNames))
+      continue;
+    if (entityNames.length === 0 && !keywords.some((keyword) => hasEntityMatch(itemText, [keyword])))
+      continue;
+    const profile = parseProfile(item.profile);
+    const owners = Array.isArray(item.owners) ? item.owners.map((owner) => {
+      var _a2;
+      return `${((_a2 = owner.character) == null ? void 0 : _a2.name) || ""}${owner.note ? `(${owner.note})` : ""}`;
+    }).filter(Boolean).join(", ") : "";
+    addEvidence(evidence, {
+      sourceType: "item",
+      sourceId: item.id,
+      title: `${item.type || "Item"}: ${item.name}`,
+      excerpt: [
+        item.description ? `Description: ${item.description}` : "",
+        profile ? `Profile: ${profile}` : "",
+        owners ? `Owners: ${owners}` : ""
+      ].filter(Boolean).join("\n"),
+      score: scoreForIntent(78, intent, "item")
+    });
+    usedContext.add("items");
+  }
+  for (const world of worldSettings) {
+    const worldText = `${world.name} ${world.content} ${world.type}`;
+    if (entityNames.length > 0 && !hasEntityMatch(worldText, entityNames))
+      continue;
+    if (entityNames.length === 0 && !keywords.some((keyword) => hasEntityMatch(worldText, [keyword])))
+      continue;
+    addEvidence(evidence, {
+      sourceType: "worldSetting",
+      sourceId: world.id,
+      title: `World: ${world.name}`,
+      excerpt: world.content,
+      metadata: { type: world.type },
+      score: 65
+    });
+    usedContext.add("world_settings");
+  }
+  for (const line of plotLines) {
+    const lineMatches = entityNames.length === 0 ? keywords.some((keyword) => hasEntityMatch(`${line.name} ${line.description}`, [keyword])) : hasEntityMatch(`${line.name} ${line.description}`, entityNames);
+    if (lineMatches || intent === "outline_next" || intent === "unresolved_threads") {
+      addEvidence(evidence, {
+        sourceType: "plotLine",
+        sourceId: line.id,
+        title: `Plot line: ${line.name}`,
+        excerpt: line.description || line.name,
+        score: scoreForIntent(lineMatches ? 85 : 45, intent, "plotLine")
+      });
+      usedContext.add("plot_outline");
+    }
+    for (const point of line.points || []) {
+      const pointText = `${line.name} ${line.description || ""} ${point.title} ${point.description || ""}`;
+      const matches = entityNames.length === 0 ? keywords.some((keyword) => hasEntityMatch(pointText, [keyword])) : hasEntityMatch(pointText, entityNames);
+      const includeForOutline = intent === "outline_next" && point.status !== "resolved";
+      const includeForThreads = intent === "unresolved_threads" && point.status !== "resolved";
+      if (!matches && !includeForOutline && !includeForThreads)
+        continue;
+      const anchors = Array.isArray(point.anchors) ? point.anchors.map((anchor) => {
+        var _a2;
+        const chapter = anchor.chapter;
+        return `${anchor.type}: ${((_a2 = chapter == null ? void 0 : chapter.volume) == null ? void 0 : _a2.title) || ""} ${(chapter == null ? void 0 : chapter.title) || anchor.chapterId}`.trim();
+      }).join("; ") : "";
+      addEvidence(evidence, {
+        sourceType: "plotPoint",
+        sourceId: point.id,
+        title: `Plot point: ${point.title}`,
+        excerpt: [
+          `Line: ${line.name}`,
+          `Status: ${point.status || "active"}`,
+          point.description ? `Description: ${point.description}` : "",
+          anchors ? `Anchors: ${anchors}` : ""
+        ].filter(Boolean).join("\n"),
+        metadata: { plotLineId: line.id, status: point.status, type: point.type },
+        score: scoreForIntent((matches ? 105 : 70) + (point.status === "resolved" ? -20 : 20), intent, "plotPoint")
+      });
+      usedContext.add("plot_points");
+    }
+  }
+  for (const summary of narrativeSummaries) {
+    const unresolvedThreads = parseJsonArray(summary.unresolvedThreads);
+    const keyFacts = parseJsonArray(summary.keyFacts);
+    const hardConstraints = parseJsonArray(summary.hardConstraints);
+    const summaryText = [
+      summary.summaryText,
+      keyFacts.length ? `Key facts: ${keyFacts.join("; ")}` : "",
+      unresolvedThreads.length ? `Unresolved threads: ${unresolvedThreads.join("; ")}` : "",
+      hardConstraints.length ? `Hard constraints: ${hardConstraints.join("; ")}` : ""
+    ].filter(Boolean).join("\n");
+    const matches = entityNames.length === 0 ? keywords.some((keyword) => hasEntityMatch(summaryText, [keyword])) : hasEntityMatch(summaryText, entityNames);
+    if (!matches && !["outline_next", "unresolved_threads", "general_qa"].includes(intent))
+      continue;
+    addEvidence(evidence, {
+      sourceType: "narrativeSummary",
+      sourceId: summary.id,
+      title: `${summary.level || "novel"} summary: ${summary.title || "latest"}`,
+      excerpt: summaryText,
+      score: scoreForIntent(matches ? 90 : 55, intent, "narrativeSummary")
+    });
+    usedContext.add("narrative_summaries");
+  }
+  for (const summary of chapterSummaries) {
+    const openQuestions = parseJsonArray(summary.openQuestions);
+    const timelineHints = parseJsonArray(summary.timelineHints);
+    const keyFacts = parseJsonArray(summary.keyFacts);
+    const summaryText = [
+      summary.compressedMemory || summary.summaryText,
+      keyFacts.length ? `Key facts: ${keyFacts.join("; ")}` : "",
+      timelineHints.length ? `Timeline hints: ${timelineHints.join("; ")}` : "",
+      openQuestions.length ? `Open questions: ${openQuestions.join("; ")}` : ""
+    ].filter(Boolean).join("\n");
+    const matches = entityNames.length === 0 ? keywords.some((keyword) => hasEntityMatch(summaryText, [keyword])) : hasEntityMatch(summaryText, entityNames);
+    if (!matches && intent !== "unresolved_threads")
+      continue;
+    addEvidence(evidence, {
+      sourceType: "chapterSummary",
+      sourceId: summary.id,
+      title: `Chapter summary: ${summary.chapterId}`,
+      excerpt: summaryText,
+      metadata: { chapterId: summary.chapterId, chapterOrder: summary.chapterOrder },
+      score: scoreForIntent(matches ? 85 : 60, intent, "chapterSummary")
+    });
+    usedContext.add("chapter_summaries");
+  }
+  const searchTerms = Array.from(/* @__PURE__ */ new Set([...entityNames, ...keywords])).slice(0, 6);
+  for (const term of searchTerms) {
+    const hits = await search(input.novelId, term, 5, 0);
+    for (const hit of hits.slice(0, 4)) {
+      addEvidence(evidence, {
+        sourceType: hit.entityType === "idea" ? "idea" : "searchHit",
+        sourceId: hit.entityId,
+        title: hit.title || term,
+        excerpt: hit.preview || hit.snippet,
+        metadata: {
+          keyword: term,
+          chapterId: hit.chapterId,
+          volumeTitle: hit.volumeTitle,
+          matchType: hit.matchType
+        },
+        score: hit.matchType === "title" ? 62 : 42
+      });
+      usedContext.add("search_hits");
+    }
+  }
+  const deduped = /* @__PURE__ */ new Map();
+  for (const item of evidence) {
+    const key = `${item.sourceType}:${item.sourceId}:${item.title}`;
+    const existing = deduped.get(key);
+    if (!existing || (item.score || 0) > (existing.score || 0)) {
+      deduped.set(key, item);
+    }
+  }
+  const ranked = Array.from(deduped.values()).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, maxEvidenceItems).map((item, index) => ({ ...item, id: `E${index + 1}` }));
+  if (ranked.length === 0) {
+    warnings.push(isZh ? "未找到相关证据，本次回答应视为低置信度。" : "No relevant evidence found. The answer should be treated as low confidence.");
+  }
+  return {
+    evidence: ranked,
+    warnings,
+    usedContext: Array.from(usedContext)
+  };
+}
+function buildRawPromptPreview$1(systemPrompt, userPrompt) {
+  const sections = [];
+  if (systemPrompt == null ? void 0 : systemPrompt.trim()) {
+    sections.push(`[System Prompt]
+${systemPrompt.trim()}`);
+  }
+  sections.push(`[User Prompt]
+${userPrompt.trim()}`);
+  return sections.join("\n\n");
+}
+function parseConfidence(text, evidenceCount) {
+  const lower = text.toLowerCase();
+  if (/不足以判断|资料不足|无法判断|insufficient|not enough/.test(lower))
+    return "low";
+  if (/confidence\s*[:：]\s*high|置信度\s*[:：]\s*高/.test(lower))
+    return "high";
+  if (/confidence\s*[:：]\s*low|置信度\s*[:：]\s*低/.test(lower))
+    return "low";
+  if (evidenceCount >= 5)
+    return "high";
+  if (evidenceCount >= 2)
+    return "medium";
+  return "low";
+}
+function extractCitations(answer, evidenceIds) {
+  const found = /* @__PURE__ */ new Set();
+  for (const match of answer.matchAll(/\[?(E\d+)\]?/g)) {
+    const id = match[1];
+    if (evidenceIds.includes(id))
+      found.add(id);
+  }
+  return Array.from(found).map((id) => ({ evidenceId: id, label: `[${id}]` }));
+}
+class NovelRagService {
+  async buildPromptBundle(payload, embeddingSettings) {
+    var _a, _b, _c, _d;
+    const question = String(payload.question || "").trim();
+    if (!((_a = payload.novelId) == null ? void 0 : _a.trim())) {
+      throw new Error("novelId is required");
+    }
+    if (!question) {
+      throw new Error("question is required");
+    }
+    const knownEntityNames = await getKnownRagEntityNames(payload.novelId);
+    const detection = detectRagQuestion(question, knownEntityNames);
+    const collected = await collectRagEvidence({
+      novelId: payload.novelId,
+      chapterId: payload.chapterId,
+      currentContent: payload.currentContent,
+      selectedText: payload.selectedText,
+      currentLocation: payload.currentLocation,
+      detection,
+      question,
+      maxEvidenceItems: payload.maxEvidenceItems,
+      locale: payload.locale,
+      embeddingSettings
+    });
+    const evidenceBlock = collected.evidence.map((item) => `[${item.id}] ${item.sourceType} | ${item.title}
+${item.excerpt}`).join("\n\n");
+    const isZh = (payload.locale || "zh").startsWith("zh");
+    const systemPrompt = isZh ? "你是小说编辑器中的 RAG 问答助手。你只能基于 Evidence 中提供的资料回答。如果资料不足，请明确说明不足以判断。请区分“已写事实”“大纲计划”“写作建议”。涉及剧情判断时必须引用证据标签，例如 [E1]。不要编造未提供的设定、章节或人物状态。" : "You are a RAG Q&A assistant inside a novel editor. Answer only from the provided Evidence. If evidence is insufficient, say so clearly. Separate written facts, outline plans, and writing suggestions. Cite evidence labels such as [E1]. Do not invent missing lore, chapters, or character state.";
+    const defaultUserPrompt = [
+      `Question=${question}`,
+      `Intent=${detection.intent}`,
+      detection.entityNames.length ? `DetectedEntities=${detection.entityNames.join(", ")}` : "DetectedEntities=none",
+      detection.keywords.length ? `Keywords=${detection.keywords.join(", ")}` : "Keywords=none",
+      ((_b = payload.selectedText) == null ? void 0 : _b.trim()) ? `SelectedTextProvided=true` : "SelectedTextProvided=false",
+      ((_c = payload.currentLocation) == null ? void 0 : _c.trim()) ? `CurrentLocation=${payload.currentLocation.trim()}` : "",
+      "Evidence=",
+      evidenceBlock || "(no relevant evidence found)",
+      isZh ? "Output=用简洁中文回答。若能回答，请按“已写事实 / 大纲计划 / 写作建议 / 置信度”组织；没有对应内容可省略该小节。必须引用证据标签。" : "Output=Answer concisely. Organize as Written facts / Outline plans / Writing suggestions / Confidence when applicable. Omit empty sections. Cite evidence labels."
+    ].filter(Boolean).join("\n\n");
+    const effectiveUserPrompt = ((_d = payload.overrideUserPrompt) == null ? void 0 : _d.trim()) ? payload.overrideUserPrompt.trim() : defaultUserPrompt;
+    return {
+      systemPrompt,
+      defaultUserPrompt,
+      effectiveUserPrompt,
+      intent: detection.intent,
+      evidence: collected.evidence,
+      citations: collected.evidence.map((item) => ({ evidenceId: item.id, label: `[${item.id}]` })),
+      warnings: collected.warnings,
+      usedContext: collected.usedContext
+    };
+  }
+  async preview(payload, embeddingSettings) {
+    const bundle = await this.buildPromptBundle(payload, embeddingSettings);
+    return {
+      ok: true,
+      question: payload.question,
+      intent: bundle.intent,
+      answer: "",
+      confidence: bundle.evidence.length > 0 ? "medium" : "low",
+      evidence: bundle.evidence,
+      citations: bundle.citations,
+      warnings: bundle.warnings,
+      usedContext: bundle.usedContext,
+      rawPrompt: buildRawPromptPreview$1(bundle.systemPrompt, bundle.effectiveUserPrompt),
+      editableUserPrompt: bundle.defaultUserPrompt
+    };
+  }
+  async ask(payload, provider, settings) {
+    const bundle = await this.buildPromptBundle(payload, settings.embeddingSettings);
+    const response = await provider.generate({
+      systemPrompt: bundle.systemPrompt,
+      prompt: bundle.effectiveUserPrompt,
+      maxTokens: settings.maxTokens,
+      temperature: settings.temperature ?? 0.2
+    });
+    const evidenceIds = bundle.evidence.map((item) => item.id);
+    const citations = extractCitations(response.text, evidenceIds);
+    return {
+      ok: true,
+      question: payload.question,
+      intent: bundle.intent,
+      answer: response.text,
+      confidence: parseConfidence(response.text, bundle.evidence.length),
+      evidence: bundle.evidence,
+      citations: citations.length > 0 ? citations : bundle.citations.slice(0, 3),
+      warnings: bundle.warnings,
+      usedContext: bundle.usedContext,
+      rawPrompt: buildRawPromptPreview$1(bundle.systemPrompt, bundle.effectiveUserPrompt),
+      editableUserPrompt: bundle.defaultUserPrompt
     };
   }
 }
@@ -2578,6 +3785,16 @@ const DEFAULT_AI_SETTINGS = {
     summaryFinalizeStableMs: 6e5,
     summaryFinalizeMinWords: 1200,
     recentChapterRawCount: 2
+  },
+  embedding: {
+    enabled: false,
+    baseUrl: "",
+    apiKey: "",
+    model: "bge-large-zh-v1.5",
+    dimensions: 1024,
+    batchSize: 8,
+    timeoutMs: 6e4,
+    fallbackToHash: true
   }
 };
 function toProfileJson(profile) {
@@ -2677,14 +3894,18 @@ class AiService {
     __publicField(this, "capabilityDefinitions");
     __publicField(this, "capabilityRegistry");
     __publicField(this, "contextBuilder");
+    __publicField(this, "novelRagService");
     this.userDataPath = userDataPathGetter();
     this.settingsFilePath = path.join(this.userDataPath, "ai-settings.json");
     this.mapImageStatsPath = path.join(this.userDataPath, "ai-map-image-stats.json");
     this.settingsCache = this.loadSettings();
     this.mapImageStatsCache = this.loadMapImageStats();
     this.contextBuilder = new ContextBuilder();
+    this.novelRagService = new NovelRagService();
     this.capabilityDefinitions = createCapabilityDefinitions({
-      continueWriting: (payload) => this.continueWriting(payload)
+      continueWriting: (payload) => this.continueWriting(payload),
+      askNovel: (payload) => this.askNovel(payload),
+      rebuildRagIndex: (novelId) => this.rebuildRagIndex(novelId)
     });
     this.capabilityRegistry = new Map(
       this.capabilityDefinitions.map((definition) => [definition.actionId, definition.handler])
@@ -2769,7 +3990,8 @@ class AiService {
       http: { ...this.settingsCache.http, ...partial.http ?? {} },
       mcpCli: { ...this.settingsCache.mcpCli, ...partial.mcpCli ?? {} },
       proxy: { ...this.settingsCache.proxy, ...partial.proxy ?? {} },
-      summary: { ...this.settingsCache.summary, ...partial.summary ?? {} }
+      summary: { ...this.settingsCache.summary, ...partial.summary ?? {} },
+      embedding: { ...this.settingsCache.embedding, ...partial.embedding ?? {} }
     };
     this.persistSettings();
     return this.settingsCache;
@@ -3106,6 +4328,44 @@ class AiService {
       issues.push("Generated text is too short.");
     }
     return { ok: issues.length === 0, issues };
+  }
+  async previewNovelAskPrompt(payload) {
+    var _a;
+    devLog("INFO", "AiService.previewNovelAskPrompt.start", "Preview novel RAG prompt start", {
+      novelId: payload.novelId,
+      questionLength: ((_a = payload.question) == null ? void 0 : _a.length) ?? 0
+    });
+    const result = await this.novelRagService.preview(payload, this.settingsCache.embedding);
+    devLog("INFO", "AiService.previewNovelAskPrompt.success", "Preview novel RAG prompt success", {
+      novelId: payload.novelId,
+      intent: result.intent,
+      evidenceCount: result.evidence.length
+    });
+    return result;
+  }
+  async askNovel(payload) {
+    var _a;
+    devLog("INFO", "AiService.askNovel.start", "Novel RAG ask start", {
+      novelId: payload.novelId,
+      questionLength: ((_a = payload.question) == null ? void 0 : _a.length) ?? 0,
+      providerType: this.settingsCache.providerType
+    });
+    const provider = this.getProvider();
+    const result = await this.novelRagService.ask(payload, provider, {
+      maxTokens: Math.min(2048, this.settingsCache.http.maxTokens || 2048),
+      temperature: 0.2,
+      embeddingSettings: this.settingsCache.embedding
+    });
+    devLog("INFO", "AiService.askNovel.success", "Novel RAG ask success", {
+      novelId: payload.novelId,
+      intent: result.intent,
+      confidence: result.confidence,
+      evidenceCount: result.evidence.length
+    });
+    return result;
+  }
+  async rebuildRagIndex(novelId) {
+    return rebuildRagVectorIndex(novelId, this.settingsCache.embedding);
   }
   async previewCreativeAssetsPrompt(payload) {
     var _a;
@@ -4176,7 +5436,8 @@ ${JSON.stringify(writeParamsForPrompt, null, 2)}`,
         http: { ...DEFAULT_AI_SETTINGS.http, ...parsed.http ?? {} },
         mcpCli: { ...DEFAULT_AI_SETTINGS.mcpCli, ...parsed.mcpCli ?? {} },
         proxy: { ...DEFAULT_AI_SETTINGS.proxy, ...parsed.proxy ?? {} },
-        summary: { ...DEFAULT_AI_SETTINGS.summary, ...parsed.summary ?? {} }
+        summary: { ...DEFAULT_AI_SETTINGS.summary, ...parsed.summary ?? {} },
+        embedding: { ...DEFAULT_AI_SETTINGS.embedding, ...parsed.embedding ?? {} }
       };
     } catch (error) {
       console.error("[AI] Failed to load settings, fallback to defaults:", error);
@@ -9140,6 +10401,24 @@ ipcMain.handle("ai:check-consistency", async (_, payload) => {
     throw e;
   }
 });
+ipcMain.handle("ai:ask-novel", async (_, payload) => {
+  try {
+    return await aiService.askNovel(payload);
+  } catch (e) {
+    logAiIpcError("ai:ask-novel", payload, e);
+    console.error("[Main] ai:ask-novel failed:", e);
+    throw e;
+  }
+});
+ipcMain.handle("ai:preview-novel-ask-prompt", async (_, payload) => {
+  try {
+    return await aiService.previewNovelAskPrompt(payload);
+  } catch (e) {
+    logAiIpcError("ai:preview-novel-ask-prompt", payload, e);
+    console.error("[Main] ai:preview-novel-ask-prompt failed:", e);
+    throw e;
+  }
+});
 ipcMain.handle("ai:generate-creative-assets", async (_, payload) => {
   try {
     return await aiService.generateCreativeAssets(payload);
@@ -9597,7 +10876,11 @@ ipcMain.handle("db:upload-character-image", async (_, { characterId, type }) => 
 });
 ipcMain.handle("db:delete-character-image", async (_, { characterId, imagePath, type }) => {
   try {
-    const fullPath = path.join(app.getPath("userData"), imagePath);
+    const userDataDir = app.getPath("userData");
+    const fullPath = path.resolve(path.join(userDataDir, imagePath));
+    if (!fullPath.startsWith(userDataDir + path.sep)) {
+      throw new Error("Invalid image path: path traversal detected");
+    }
     if (fs$2.existsSync(fullPath))
       fs$2.unlinkSync(fullPath);
     if (type === "avatar") {
@@ -10271,9 +11554,13 @@ app.whenReady().then(async () => {
   if ((_b = aiDiagParse.command) == null ? void 0 : _b.userDataPath) {
     console.log("[AI-Diag] userData override:", resolvedUserDataPath);
   }
+  const userDataRoot = path.resolve(app.getPath("userData"));
   protocol.handle("local-resource", (request) => {
     const relativePath = decodeURIComponent(request.url.replace("local-resource://", ""));
-    const fullPath = path.join(app.getPath("userData"), relativePath);
+    const fullPath = path.resolve(path.join(userDataRoot, relativePath));
+    if (!fullPath.startsWith(userDataRoot + path.sep) && fullPath !== userDataRoot) {
+      return new Response("Forbidden", { status: 403 });
+    }
     return net.fetch("file:///" + fullPath.replace(/\\/g, "/"));
   });
   let dataPath;

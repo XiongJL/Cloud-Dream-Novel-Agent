@@ -89,7 +89,7 @@ export function useTitleGeneration({
             titleGenStatusTimerRef.current = window.setTimeout(() => setTitleGenStatus(''), 2600);
         } catch (error) {
             console.error('[Editor] AI title generation failed:', error);
-            setTitleGenStatus(formatAiErrorFromUnknown(error, t('editor.titleGenFailed', '标题生成失败，请稍后重试')));
+            setTitleGenStatus(formatAiErrorFromUnknown(error, t, t('editor.titleGenFailed', '标题生成失败，请稍后重试')));
             clearTitleGenStatusTimer();
             titleGenStatusTimerRef.current = window.setTimeout(() => setTitleGenStatus(''), 4200);
         } finally {

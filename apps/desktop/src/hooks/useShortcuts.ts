@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import i18next from 'i18next';
 
 export type ShortcutAction = 'undo' | 'redo' | 'save' | 'format' | 'enter_focus' | 'toggle_sidebar' | 'create_idea';
 
@@ -24,7 +25,7 @@ const DEFAULT_SHORTCUTS: ShortcutMap = {
 
 // Helper to format binding string like "Ctrl+S"
 export function formatShortcut(binding: KeyBinding | null): string {
-    if (!binding) return '无';
+    if (!binding) return i18next.t('settings.shortcuts.none');
     const parts = [];
     if (binding.ctrl) parts.push('Ctrl');
     if (binding.meta) parts.push('Cmd');

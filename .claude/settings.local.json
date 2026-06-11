@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:v for k,v in d.items\\(\\) if 'backup' in k.lower\\(\\) or 'sync' in k.lower\\(\\)}, ensure_ascii=False, indent=2\\)\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(git *)",
+      "Bash(npx tsc *)",
+      "Bash(pnpm --filter novel-editor-desktop run tsc)",
+      "Bash(pnpm exec *)",
+      "Bash(/d/aiproject/novalEditor/apps/desktop/node_modules/.bin/tsc --noEmit --project /d/aiproject/novalEditor/apps/desktop/tsconfig.json)",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('src/i18n/locales/zh.json','utf8'\\)\\); console.log\\('zh.json: valid'\\)\")",
+      "Bash(node -e \"JSON.parse\\(require\\('fs'\\).readFileSync\\('src/i18n/locales/en.json','utf8'\\)\\); console.log\\('en.json: valid'\\)\")",
+      "Bash(node -e \"const fs=require\\('fs'\\); try { const data=fs.readFileSync\\('src/i18n/locales/zh.json','utf8'\\); const clean=data.charCodeAt\\(0\\)===0xFEFF ? data.slice\\(1\\) : data; JSON.parse\\(clean\\); console.log\\('zh.json: valid'\\); } catch\\(e\\) { console.error\\('zh.json:', e.message\\); }\")",
+      "Bash(node -e \"const fs=require\\('fs'\\); try { const data=fs.readFileSync\\('src/i18n/locales/en.json','utf8'\\); const clean=data.charCodeAt\\(0\\)===0xFEFF ? data.slice\\(1\\) : data; JSON.parse\\(clean\\); console.log\\('en.json: valid'\\); } catch\\(e\\) { console.error\\('en.json:', e.message\\); }\")",
+      "Bash(node *)",
+      "Bash(rm -rf /c/Users/SCHROD~1/AppData/Local/Temp/claude/D--aiproject-novalEditor/ae5657b2-62fb-4a00-8a7e-ef8f69f4bc8e/tasks/)",
+      "Bash(rm -rf /c/Users/SCHROD~1/AppData/Local/Temp/claude/D--aiproject-novalEditor/ae5657b2-62fb-4a00-8a7e-ef8f69f4bc8e/tasks/*.output)",
+      "Bash(./node_modules/.bin/tsc --noEmit)",
+      "Bash(echo \"exit: $?\")",
+      "Read(//tmp/**)",
+      "Bash(pnpm --filter novel-editor-desktop exec tsc --noEmit)",
+      "Bash(echo \"Exit code: $?\")"
+    ]
+  }
+}

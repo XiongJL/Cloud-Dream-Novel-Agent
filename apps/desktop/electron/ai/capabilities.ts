@@ -35,6 +35,18 @@ export interface CapabilityDeps {
         currentLocation?: string;
         overrideUserPrompt?: string;
     }) => Promise<{ text: string; usedContext: string[]; consistency: { ok: boolean; issues: string[] } }>;
+    askNovel: (payload: {
+        novelId: string;
+        question: string;
+        chapterId?: string;
+        currentContent?: string;
+        selectedText?: string;
+        currentLocation?: string;
+        locale?: string;
+        maxEvidenceItems?: number;
+        overrideUserPrompt?: string;
+    }) => Promise<unknown>;
+    rebuildRagIndex: (novelId: string) => Promise<unknown>;
 }
 
 export function createCapabilityDefinitions(deps: CapabilityDeps): CapabilityDefinition[] {
@@ -643,6 +655,80 @@ export function createCapabilityDefinitions(deps: CapabilityDeps): CapabilityDef
                 }
 
                 return searchIndex.search(input.novelId, input.keyword, input.limit ?? 20, input.offset ?? 0);
+            },
+        },
+        {
+            actionId: 'rag.ask',
+            title: 'Ask novel RAG',
+            description: 'Answer a novel-aware question using structured story data, summaries, and search evidence.',
+            permission: 'read',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    novelId: { type: 'string' },
+                    question: { type: 'string' },
+                    chapterId: { type: 'string' },
+                    currentContent: { type: 'string' },
+                    selectedText: { type: 'string' },
+                    currentLocation: { type: 'string' },
+                    locale: { type: 'string' },
+                    maxEvidenceItems: { type: 'number' },
+                    overrideUserPrompt: { type: 'string' },
+                },
+                required: ['novelId', 'question'],
+            },
+            outputSchema: { type: 'object' },
+            handler: async (payload) => {
+                const input = payload as {
+                    novelId?: string;
+                    question?: string;
+                    chapterId?: string;
+                    currentContent?: string;
+                    selectedText?: string;
+                    currentLocation?: string;
+                    locale?: string;
+                    maxEvidenceItems?: number;
+                    overrideUserPrompt?: string;
+                };
+                if (!input?.novelId || !input.question?.trim()) {
+                    throw new AiActionError('INVALID_INPUT', 'novelId and question are required');
+                }
+                try {
+                    return await deps.askNovel({
+                        novelId: input.novelId,
+                        question: input.question,
+                        chapterId: input.chapterId,
+                        currentContent: input.currentContent,
+                        selectedText: input.selectedText,
+                        currentLocation: input.currentLocation,
+                        locale: input.locale,
+                        maxEvidenceItems: input.maxEvidenceItems,
+                        overrideUserPrompt: input.overrideUserPrompt,
+                    });
+                } catch (error) {
+                    throw normalizeAiError(error);
+                }
+            },
+        },
+        {
+            actionId: 'rag.rebuild_index',
+            title: 'Rebuild RAG vector index',
+            description: 'Rebuild the local vector chunk index for a novel.',
+            permission: 'read',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    novelId: { type: 'string' },
+                },
+                required: ['novelId'],
+            },
+            outputSchema: { type: 'object' },
+            handler: async (payload) => {
+                const input = payload as { novelId?: string };
+                if (!input?.novelId) {
+                    throw new AiActionError('INVALID_INPUT', 'novelId is required');
+                }
+                return deps.rebuildRagIndex(input.novelId);
             },
         },
     ];

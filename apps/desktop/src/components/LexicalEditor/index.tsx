@@ -7,9 +7,11 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { LexicalErrorBoundary } from '@lexical/react/LexicalErrorBoundary';
 import { EditorState, LexicalEditor, $createParagraphNode, $createTextNode, $getRoot } from 'lexical';
 import { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import theme from './theme';
 import { IdeaMarkNode } from './nodes/IdeaMarkNode';
 import { PlotAnchorNode } from './nodes/PlotAnchorNode';
+import { MentionNode } from './nodes/MentionNode';
 
 // Plugins
 import ToolbarPlugin from './plugins/ToolbarPlugin';
@@ -170,12 +172,14 @@ export default function LexicalChapterEditor({
     onPlotAnchorClick
 }: LexicalChapterEditorProps) {
 
+    const { t } = useTranslation();
+
     const initialConfig = {
         namespace,
         theme,
         onError: (error: Error) => console.error(error),
         editable: !readOnly,
-        nodes: [IdeaMarkNode, PlotAnchorNode]
+        nodes: [IdeaMarkNode, PlotAnchorNode, MentionNode]
     };
 
     const isMobile = preferences.maxWidth === 'mobile';
@@ -203,7 +207,7 @@ export default function LexicalChapterEditor({
                             }}
                         />
                     }
-                    placeholder={<div className={`absolute top-0 left-0 pointer-events-none ${isMobile ? 'text-gray-400' : 'text-gray-500'}`}>开始写作...</div>}
+                    placeholder={<div className={`absolute top-0 left-0 pointer-events-none ${isMobile ? 'text-gray-400' : 'text-gray-500'}`}>{t('editor.startWriting')}</div>}
                     ErrorBoundary={LexicalErrorBoundary}
                 />
             </div>
@@ -270,12 +274,7 @@ export default function LexicalChapterEditor({
 
                 <FloatingTextFormatToolbarPlugin onAddIdea={onAddIdea} />
                 <IdeaInteractionPlugin onIdeaClick={onIdeaClick} />
-                {onPlotAnchorClick && (
-                    <>
-                        {console.log('[LexicalChapterEditor] Rendering PlotAnchorInteractionPlugin')}
-                        <PlotAnchorInteractionPlugin onAnchorClick={onPlotAnchorClick} />
-                    </>
-                )}
+                {onPlotAnchorClick && <PlotAnchorInteractionPlugin onAnchorClick={onPlotAnchorClick} />}
                 {onPlotContextMenu && <PlotContextMenuPlugin onOpenMenu={onPlotContextMenu} />}
                 <EditorSearchToolbar />
             </div>

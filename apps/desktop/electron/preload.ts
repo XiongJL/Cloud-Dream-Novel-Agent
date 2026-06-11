@@ -139,6 +139,8 @@ contextBridge.exposeInMainWorld('ai', {
     continueWriting: (payload: any) => ipcRenderer.invoke('ai:continue-writing', payload),
     previewContinuePrompt: (payload: any) => ipcRenderer.invoke('ai:preview-continue-prompt', payload),
     checkConsistency: (payload: any) => ipcRenderer.invoke('ai:check-consistency', payload),
+    askNovel: (payload: any) => ipcRenderer.invoke('ai:ask-novel', payload),
+    previewNovelAskPrompt: (payload: any) => ipcRenderer.invoke('ai:preview-novel-ask-prompt', payload),
     generateCreativeAssets: (payload: any) => ipcRenderer.invoke('ai:generate-creative-assets', payload),
     previewCreativeAssetsPrompt: (payload: any) => ipcRenderer.invoke('ai:preview-creative-assets-prompt', payload),
     validateCreativeAssetsDraft: (payload: any) => ipcRenderer.invoke('ai:validate-creative-assets', payload),

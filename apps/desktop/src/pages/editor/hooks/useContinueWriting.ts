@@ -109,7 +109,7 @@ export function useContinueWriting({
                 setContinuePromptOverride(nextDefault);
             }
         } catch (error) {
-            setContinuePromptError(formatAiErrorFromUnknown(error, t('editor.promptPreviewFailed')));
+            setContinuePromptError(formatAiErrorFromUnknown(error, t, t('editor.promptPreviewFailed')));
         } finally {
             setContinuePromptLoading(false);
         }
@@ -216,7 +216,7 @@ export function useContinueWriting({
             }
         } catch (error) {
             console.error('[Editor] continue writing failed:', error);
-            setContinueStatus(formatAiErrorFromUnknown(error, t('editor.continueFailed')));
+            setContinueStatus(formatAiErrorFromUnknown(error, t, t('editor.continueFailed')));
         } finally {
             setIsContinuing(false);
             window.setTimeout(() => setContinueStatus(''), 6000);

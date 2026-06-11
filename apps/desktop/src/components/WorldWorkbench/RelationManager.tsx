@@ -79,9 +79,9 @@ export default function RelationManager({ characterId, novelId, theme }: Relatio
 
     const getRelatedCharacter = (rel: Relationship) => {
         if (rel.sourceId === characterId) {
-            return rel.target || { name: '未知', id: rel.targetId };
+            return rel.target || { name: t('world.unknownCharacter'), id: rel.targetId };
         }
-        return rel.source || { name: '未知', id: rel.sourceId };
+        return rel.source || { name: t('world.unknownCharacter'), id: rel.sourceId };
     };
 
     const getDirection = (rel: Relationship) => {
@@ -110,7 +110,7 @@ export default function RelationManager({ characterId, novelId, theme }: Relatio
                     )}
                 >
                     <Plus className="w-3 h-3" />
-                    {t('world.addRelation', '添加关系')}
+                    {t('world.addRelation')}
                 </button>
             </div>
 
@@ -123,13 +123,13 @@ export default function RelationManager({ characterId, novelId, theme }: Relatio
                     )}>
                         <div>
                             <label className={clsx("text-xs font-medium mb-1 block", isDark ? "text-neutral-400" : "text-neutral-500")}>
-                                {t('world.selectTarget', '选择目标角色')}
+                                {t('world.selectTarget')}
                             </label>
                             <Combobox
                                 options={characters}
                                 value={targetId}
                                 onChange={setTargetId}
-                                placeholder={t('world.selectTarget', '选择目标角色')}
+                                placeholder={t('world.selectTarget')}
                                 theme={theme}
                                 className="relative z-20" // Ensure dropdown is above other elements
                                 renderOption={(c) => (
@@ -156,27 +156,27 @@ export default function RelationManager({ characterId, novelId, theme }: Relatio
                         {/* Relation Name */}
                         <div>
                             <label className={clsx("text-xs font-medium mb-1 block", isDark ? "text-neutral-400" : "text-neutral-500")}>
-                                {t('world.relationName', '关系名称')}
+                                {t('world.relationName')}
                             </label>
                             <input
                                 value={relationName}
                                 onChange={e => setRelationName(e.target.value)}
                                 className={clsx(inputClass, "w-full")}
-                                placeholder={t('world.relationNamePlaceholder', '如：父亲、师长、敌人...')}
+                                placeholder={t('world.relationNamePlaceholder')}
                             />
                         </div>
 
                         {/* Description */}
                         <div>
                             <label className={clsx("text-xs font-medium mb-1 block", isDark ? "text-neutral-400" : "text-neutral-500")}>
-                                {t('world.relationDesc', '关系描述')}
+                                {t('world.relationDesc')}
                             </label>
                             <textarea
                                 value={relationDesc}
                                 onChange={e => setRelationDesc(e.target.value)}
                                 rows={2}
                                 className={clsx(inputClass, "w-full resize-none")}
-                                placeholder={t('world.relationDescPlaceholder', '描述两人之间的关系...')}
+                                placeholder={t('world.relationDescPlaceholder')}
                             />
                         </div>
 
@@ -208,8 +208,8 @@ export default function RelationManager({ characterId, novelId, theme }: Relatio
                 {relations.length === 0 && !isAdding ? (
                     <div className={clsx("text-center py-8", isDark ? "text-neutral-600" : "text-neutral-400")}>
                         <Users className="w-7 h-7 mx-auto mb-2 opacity-50" />
-                        <p className="text-xs">{t('world.noRelations', '暂无人际关系')}</p>
-                        <p className="text-[10px] mt-1 opacity-60">{t('world.addRelationHint', '点击上方按钮添加')}</p>
+                        <p className="text-xs">{t('world.noRelations')}</p>
+                        <p className="text-[10px] mt-1 opacity-60">{t('world.addRelationHint')}</p>
                     </div>
                 ) : (
                     <div className="space-y-1.5">
@@ -256,7 +256,7 @@ export default function RelationManager({ characterId, novelId, theme }: Relatio
                     onClose={() => setDeleteTarget(null)}
                     onConfirm={() => { if (deleteTarget) { handleDelete(deleteTarget); setDeleteTarget(null); } }}
                     title={t('common.delete')}
-                    message={t('world.confirmDeleteRelation', '确定删除此关系？')}
+                    message={t('world.confirmDeleteRelation')}
                     theme={theme}
                 />
             </div>

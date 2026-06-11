@@ -196,7 +196,7 @@ export default function SearchResultsList({ results, onJump, onUpdateIdea, onDel
                                                     "p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 transition-colors",
                                                     idea.isStarred ? "text-amber-500" : (isDark ? "text-neutral-500" : "text-gray-400")
                                                 )}
-                                                title={idea.isStarred ? "Unstar" : "Star"}
+                                                title={idea.isStarred ? t('idea.unstar') : t('idea.star')}
                                             >
                                                 <Star className={clsx("w-3.5 h-3.5", idea.isStarred && "fill-amber-500")} />
                                             </button>

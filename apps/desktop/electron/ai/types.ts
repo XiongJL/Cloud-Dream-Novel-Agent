@@ -41,12 +41,24 @@ export interface AiSummarySettings {
     recentChapterRawCount: number;
 }
 
+export interface AiEmbeddingSettings {
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    dimensions?: number;
+    batchSize: number;
+    timeoutMs: number;
+    fallbackToHash: boolean;
+}
+
 export interface AiSettings {
     providerType: AiProviderType;
     http: AiHttpSettings;
     mcpCli: AiMcpCliSettings;
     proxy: AiProxySettings;
     summary: AiSummarySettings;
+    embedding: AiEmbeddingSettings;
 }
 
 export interface AiHealthCheckResult {

@@ -19,12 +19,14 @@ import {
 } from 'lexical';
 import { $createMentionNode, MentionType } from '../nodes/MentionNode';
 import { MentionableItem } from '../../../types';
+import { useTranslation } from 'react-i18next';
 
 interface MentionsPluginProps {
     novelId: string;
 }
 
 export default function MentionsPlugin({ novelId }: MentionsPluginProps) {
+    const { t } = useTranslation();
     const [editor] = useLexicalComposerContext();
     const [queryString, setQueryString] = useState<string | null>(null);
     const [results, setResults] = useState<MentionableItem[]>([]);
@@ -42,11 +44,11 @@ export default function MentionsPlugin({ novelId }: MentionsPluginProps) {
     };
 
     const FILTER_TABS: { key: 'all' | MentionableItem['type']; label: string }[] = [
-        { key: 'all', label: '全部' },
-        { key: 'character', label: '角色' },
-        { key: 'item', label: '物品' },
-        { key: 'world', label: '世界观' },
-        { key: 'map', label: '地图' },
+        { key: 'all', label: t('search.category.all') },
+        { key: 'character', label: t('world.characters') },
+        { key: 'item', label: t('world.items') },
+        { key: 'world', label: t('world.worldview') },
+        { key: 'map', label: t('map.title') },
     ];
 
     // Load mentionables once
@@ -279,7 +281,7 @@ export default function MentionsPlugin({ novelId }: MentionsPluginProps) {
             </div>
             {/* Results list */}
             {results.length === 0 ? (
-                <div className="mention-menu-empty">无匹配结果</div>
+                <div className="mention-menu-empty">{t('common.noResults')}</div>
             ) : (
                 results.map((item, i) => (
                     <div

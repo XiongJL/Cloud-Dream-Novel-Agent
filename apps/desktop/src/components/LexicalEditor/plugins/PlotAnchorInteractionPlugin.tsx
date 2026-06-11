@@ -22,7 +22,6 @@ export default function PlotAnchorInteractionPlugin({ onAnchorClick }: PlotAncho
                 const anchorElement = target.closest('[data-plot-anchor-id]');
                 if (anchorElement) {
                     const id = anchorElement.getAttribute('data-plot-anchor-id');
-                    console.log('[PlotAnchorInteractionPlugin] Click detected on anchor:', id);
                     if (id && onAnchorClick) {
                         onAnchorClick(id);
                         return true; // Stop propagation if handled

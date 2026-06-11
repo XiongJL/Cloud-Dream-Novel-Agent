@@ -1,8 +1,8 @@
-import { motion } from 'framer-motion';
 import { X, Book, type LucideIcon, Settings as SettingsIcon, Keyboard, Bot } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
+import { BaseModal } from './ui/BaseModal';
 import { formatShortcut, useShortcuts, KeyBinding, ShortcutAction } from '../hooks/useShortcuts';
 
 import { useEditorPreferences } from '../hooks/useEditorPreferences';
@@ -61,19 +61,6 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
         setActiveTab('general');
     }, [isOpen, initialTab]);
 
-    // ESC to close
-    useEffect(() => {
-        if (!isOpen) return;
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                e.stopPropagation();
-                onClose();
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown, { capture: true });
-        return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
-    }, [isOpen, onClose]);
-
     const handleSaveFormatting = async () => {
         if (novelContext) {
             await novelContext.onSaveFormatting(JSON.stringify(config));
@@ -126,22 +113,11 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
 
     const isDark = preferences.theme === 'dark';
 
-    if (!isOpen) return null;
-
     return (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-            <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                className={clsx(
-                    "w-full max-w-4xl h-[600px] rounded-2xl shadow-2xl flex overflow-hidden border",
-                    isDark ? "bg-[#1a1a20] border-white/5" : "bg-white border-gray-200"
-                )}
-            >
+        <BaseModal isOpen={isOpen} onClose={onClose} theme={preferences.theme} maxWidth="max-w-4xl" className="!p-0 h-[600px] overflow-hidden !flex !flex-row rounded-2xl">
                 {/* Sidebar */}
                 <div className={clsx(
-                    "w-64 border-r flex flex-col",
+                    "w-64 shrink-0 border-r flex flex-col",
                     isDark ? "bg-[#14141a] border-white/5" : "bg-gray-50 border-gray-200"
                 )}>
                     <div className="p-6">
@@ -169,7 +145,7 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 flex flex-col min-w-0">
+                <div className="flex-1 flex flex-col min-w-0 min-h-0">
                     <div className={clsx(
                         "flex items-center justify-between p-6 border-b",
                         isDark ? "border-white/5" : "border-gray-200"
@@ -375,7 +351,6 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
                         )}
                     </div>
                 </div>
-            </motion.div>
-        </div>
+        </BaseModal>
     );
 }

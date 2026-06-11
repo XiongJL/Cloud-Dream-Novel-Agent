@@ -19,8 +19,6 @@ export const EntityInfoCard: React.FC<EntityInfoCardProps> = ({
     isDark
 }) => {
     const { t } = useTranslation();
-    if (!entity) return null;
-
     const cardRef = useRef<HTMLDivElement>(null);
     const [adjustedPos, setAdjustedPos] = useState(position);
 
@@ -42,6 +40,8 @@ export const EntityInfoCard: React.FC<EntityInfoCardProps> = ({
             setAdjustedPos({ top, left });
         });
     }, [position]);
+
+    if (!entity) return null;
 
     return (
         <div

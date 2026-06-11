@@ -348,6 +348,86 @@ interface AISettings {
         summaryFinalizeMinWords: number
         recentChapterRawCount: number
     }
+    embedding: {
+        enabled: boolean
+        baseUrl: string
+        apiKey: string
+        model: string
+        dimensions?: number
+        batchSize: number
+        timeoutMs: number
+        fallbackToHash: boolean
+    }
+}
+
+type RagIntent =
+    | 'character_state'
+    | 'future_plot_for_entity'
+    | 'outline_next'
+    | 'unresolved_threads'
+    | 'consistency_check'
+    | 'general_qa'
+
+type RagEvidenceSourceType =
+    | 'character'
+    | 'relationship'
+    | 'item'
+    | 'map'
+    | 'plotPoint'
+    | 'plotLine'
+    | 'worldSetting'
+    | 'chapter'
+    | 'chapterSummary'
+    | 'narrativeSummary'
+    | 'searchHit'
+    | 'idea'
+    | 'currentContext'
+
+interface RagAskPayload {
+    novelId: string
+    question: string
+    chapterId?: string
+    currentContent?: string
+    selectedText?: string
+    currentLocation?: string
+    locale?: string
+    maxEvidenceItems?: number
+    overrideUserPrompt?: string
+}
+
+interface RagEvidenceItem {
+    id: string
+    sourceType: RagEvidenceSourceType
+    sourceId: string
+    title: string
+    excerpt: string
+    metadata?: Record<string, unknown>
+    score?: number
+}
+
+interface RagAskResult {
+    ok: boolean
+    question: string
+    intent: RagIntent
+    answer: string
+    confidence: 'high' | 'medium' | 'low'
+    evidence: RagEvidenceItem[]
+    citations: Array<{ evidenceId: string; label: string }>
+    warnings: string[]
+    usedContext: string[]
+    rawPrompt?: string
+    editableUserPrompt?: string
+    error?: string
+}
+
+interface RagRebuildIndexResult {
+    chunks: number
+    sources: number
+    provider: string
+    model: string
+    dimensions: number
+    fallbackUsed: boolean
+    fallbackError?: string
 }
 
 interface McpCliSetupPayload {
@@ -441,6 +521,8 @@ interface AIAPI {
         }
     }>
     checkConsistency: (payload: { novelId: string; text: string }) => Promise<{ ok: boolean; issues: string[] }>
+    askNovel: (payload: RagAskPayload) => Promise<RagAskResult>
+    previewNovelAskPrompt: (payload: RagAskPayload) => Promise<RagAskResult>
     previewCreativeAssetsPrompt: (payload: {
         locale?: string;
         brief: string;
