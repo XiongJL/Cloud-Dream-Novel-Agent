@@ -558,7 +558,8 @@
         "dimensions": "向量维度",
         "batchSize": "批量大小",
         "timeoutMs": "超时（毫秒）",
-        "notice": "启用后，重建向量索引会调用该接口生成语义向量，并以 BLOB 存入 SQLite。未启用或失败回退时使用本地 Hash 向量。"
+        "notice": "启用后，重建向量索引会调用该接口生成语义向量，并以 BLOB 存入 SQLite。未启用或失败回退时使用本地 Hash 向量。",
+        "privacyNotice": "隐私提示：如果 Base URL 指向云端，章节、角色、大纲、摘要等切片会在重建索引时发送到该 Embedding 服务；如果指向本机 Ollama 或本地服务，则不离开本机。手动重建索引为全量重建；首次建好索引后，章节、角色、物品、世界设定、大纲与摘要会按单个来源增量更新。"
       },
       "openclawSmokeResult": "OpenClaw 冒烟结果",
       "smokePassed": "通过",
@@ -884,6 +885,7 @@
       "needQuestion": "请先输入问题",
       "ask": "提问",
       "askFailed": "问答失败，请检查模型配置后重试",
+      "privacyNotice": "隐私提示：提问时只会把筛选后的证据片段发送给当前文本模型，不会发送所有命中章节；如果文本模型是云端 API，这些证据仍会外发。首次重建索引后，章节、角色、物品、世界设定、大纲与摘要会自动做来源级增量更新。",
       "rebuildIndex": "重建向量索引",
       "rebuildIndexFailed": "向量索引重建失败",
       "rebuildIndexSuccess": "向量索引已重建：{{chunks}} 个片段，模型 {{model}}，维度 {{dimensions}}。",

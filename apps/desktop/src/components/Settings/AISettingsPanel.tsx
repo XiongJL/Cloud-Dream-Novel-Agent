@@ -521,7 +521,10 @@ export function AISettingsPanel({ isDark }: Props) {
                                     <input type="number" value={settings.embedding.timeoutMs} onChange={(e) => setSettings({ ...settings, embedding: { ...settings.embedding, timeoutMs: Number(e.target.value) || 60000 } })} placeholder="60000" className={inputClass} />
                                 </SettingField>
                             </div>
-                            <p className={clsx('text-xs leading-5', isDark ? 'text-sky-100/80' : 'text-sky-800')}>{t('settings.ai.embedding.notice')}</p>
+                            <div className={clsx('rounded-lg border px-3 py-2 space-y-1 text-xs leading-5', isDark ? 'border-sky-300/20 bg-sky-400/5 text-sky-100/85' : 'border-sky-200 bg-sky-50 text-sky-900')}>
+                                <p>{t('settings.ai.embedding.notice')}</p>
+                                <p>{t('settings.ai.embedding.privacyNotice')}</p>
+                            </div>
                         </div>
                     </div>
 

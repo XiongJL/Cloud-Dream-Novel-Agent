@@ -9,7 +9,7 @@ const MAX_CHUNK_CHARS = 900;
 const CHUNK_OVERLAP_CHARS = 120;
 const MIN_SIMILARITY = 0.08;
 
-type VectorChunkInput = {
+export type VectorChunkInput = {
     novelId: string;
     sourceType: RagEvidenceSourceType;
     sourceId: string;
@@ -27,6 +27,16 @@ type StoredVectorChunk = {
     embedding_json?: string | null;
     embedding_blob?: Buffer | Uint8Array | null;
     embedding_dim?: number | null;
+};
+
+type RagVectorIndexResult = {
+    chunks: number;
+    sources: number;
+    provider: string;
+    model: string;
+    dimensions: number;
+    fallbackUsed: boolean;
+    fallbackError?: string;
 };
 
 function hashText(text: string): string {
@@ -193,6 +203,14 @@ export async function ensureRagVectorIndex(): Promise<void> {
     await db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS idx_rag_vector_chunks_source ON rag_vector_chunks(source_type, source_id);');
 }
 
+export async function getRagVectorChunkCount(novelId: string): Promise<number> {
+    await ensureRagVectorIndex();
+    const existing = await db.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*) as count FROM rag_vector_chunks WHERE novel_id = ${novelId};
+    `;
+    return Number(existing[0]?.count || 0);
+}
+
 async function buildVectorDocuments(novelId: string): Promise<VectorChunkInput[]> {
     const [characters, items, worldSettings, plotLines, chapters, chapterSummaries, narrativeSummaries] = await Promise.all([
         (db as any).character.findMany({
@@ -328,6 +346,149 @@ async function buildVectorDocuments(novelId: string): Promise<VectorChunkInput[]
     return docs;
 }
 
+async function buildChapterVectorDocument(chapterId: string): Promise<VectorChunkInput | null> {
+    const chapter = await db.chapter.findUnique({
+        where: { id: chapterId },
+        select: {
+            id: true,
+            title: true,
+            content: true,
+            volume: { select: { novelId: true, title: true } },
+        },
+    });
+    if (!chapter?.volume) return null;
+    const plain = extractPlainTextFromLexical(chapter.content || '');
+    if (!plain) {
+        return {
+            novelId: chapter.volume.novelId,
+            sourceType: 'chapter',
+            sourceId: chapter.id,
+            title: `${chapter.volume.title || ''} ${chapter.title || ''}`.trim() || 'Chapter',
+            content: '',
+        };
+    }
+    return {
+        novelId: chapter.volume.novelId,
+        sourceType: 'chapter',
+        sourceId: chapter.id,
+        title: `${chapter.volume.title || ''} ${chapter.title || ''}`.trim() || 'Chapter',
+        content: plain,
+    };
+}
+
+export async function buildVectorDocumentForSource(sourceType: RagEvidenceSourceType, sourceId: string): Promise<VectorChunkInput | null> {
+    switch (sourceType) {
+        case 'chapter':
+            return buildChapterVectorDocument(sourceId);
+        case 'character': {
+            const character = await (db as any).character.findUnique({
+                where: { id: sourceId },
+                include: { items: { include: { item: true } } },
+            });
+            if (!character) return null;
+            const profile = parseProfile(character.profile);
+            const ownedItems = Array.isArray(character.items)
+                ? character.items.map((owner: any) => `${owner.item?.name || ''}${owner.note ? ` ${owner.note}` : ''}`).filter(Boolean).join('; ')
+                : '';
+            return {
+                novelId: character.novelId,
+                sourceType: 'character',
+                sourceId: character.id,
+                title: `Character: ${character.name}`,
+                content: [
+                    character.name,
+                    character.role,
+                    character.description,
+                    profile,
+                    ownedItems ? `Owned items: ${ownedItems}` : '',
+                    character.isStarred ? 'starred important' : '',
+                ].filter(Boolean).join('\n'),
+            };
+        }
+        case 'item': {
+            const item = await (db as any).item.findUnique({ where: { id: sourceId } });
+            if (!item) return null;
+            return {
+                novelId: item.novelId,
+                sourceType: 'item',
+                sourceId: item.id,
+                title: `${item.type || 'Item'}: ${item.name}`,
+                content: [item.name, item.type, item.description, parseProfile(item.profile)].filter(Boolean).join('\n'),
+            };
+        }
+        case 'worldSetting': {
+            const world = await (db as any).worldSetting.findUnique({ where: { id: sourceId } });
+            if (!world) return null;
+            return {
+                novelId: world.novelId,
+                sourceType: 'worldSetting',
+                sourceId: world.id,
+                title: `World: ${world.name}`,
+                content: [world.name, world.type, world.content].filter(Boolean).join('\n'),
+            };
+        }
+        case 'plotLine': {
+            const line = await (db as any).plotLine.findUnique({ where: { id: sourceId } });
+            if (!line) return null;
+            return {
+                novelId: line.novelId,
+                sourceType: 'plotLine',
+                sourceId: line.id,
+                title: `Plot line: ${line.name}`,
+                content: [line.name, line.description].filter(Boolean).join('\n'),
+            };
+        }
+        case 'plotPoint': {
+            const point = await (db as any).plotPoint.findUnique({
+                where: { id: sourceId },
+                include: { plotLine: { select: { name: true } } },
+            });
+            if (!point) return null;
+            return {
+                novelId: point.novelId,
+                sourceType: 'plotPoint',
+                sourceId: point.id,
+                title: `Plot point: ${point.title}`,
+                content: [point.plotLine?.name, point.title, point.type, point.status, point.description].filter(Boolean).join('\n'),
+            };
+        }
+        case 'chapterSummary': {
+            const summary = await (db as any).chapterSummary.findUnique({ where: { id: sourceId } });
+            if (!summary || summary.status !== 'active') return null;
+            return {
+                novelId: summary.novelId,
+                sourceType: 'chapterSummary',
+                sourceId: summary.id,
+                title: `Chapter summary: ${summary.chapterId}`,
+                content: [
+                    summary.compressedMemory || summary.summaryText,
+                    ...parseJsonArray(summary.keyFacts),
+                    ...parseJsonArray(summary.timelineHints),
+                    ...parseJsonArray(summary.openQuestions),
+                ].filter(Boolean).join('\n'),
+            };
+        }
+        case 'narrativeSummary': {
+            const summary = await (db as any).narrativeSummary.findUnique({ where: { id: sourceId } });
+            if (!summary || summary.status !== 'active') return null;
+            return {
+                novelId: summary.novelId,
+                sourceType: 'narrativeSummary',
+                sourceId: summary.id,
+                title: `${summary.level || 'novel'} summary: ${summary.title || 'latest'}`,
+                content: [
+                    summary.summaryText,
+                    ...parseJsonArray(summary.keyFacts),
+                    ...parseJsonArray(summary.unresolvedThreads),
+                    ...parseJsonArray(summary.hardConstraints),
+                ].filter(Boolean).join('\n'),
+            };
+        }
+        default:
+            return null;
+    }
+}
+
 async function embedChunks(input: {
     texts: string[];
     settings?: AiEmbeddingSettings;
@@ -360,11 +521,7 @@ async function embedChunks(input: {
     return { vectors, provider: 'hash', model: 'local-hash-v1', dimensions: VECTOR_DIM, fallbackUsed: Boolean(settings?.enabled) };
 }
 
-export async function rebuildRagVectorIndex(novelId: string, settings?: AiEmbeddingSettings): Promise<{ chunks: number; sources: number; provider: string; model: string; dimensions: number; fallbackUsed: boolean; fallbackError?: string }> {
-    await ensureRagVectorIndex();
-    const docs = await buildVectorDocuments(novelId);
-    await db.$executeRaw`DELETE FROM rag_vector_chunks WHERE novel_id = ${novelId};`;
-
+async function writeVectorDocuments(docs: VectorChunkInput[], settings?: AiEmbeddingSettings): Promise<RagVectorIndexResult> {
     const chunkRows: Array<{ doc: VectorChunkInput; index: number; content: string }> = [];
     for (const doc of docs) {
         const parts = chunkText(doc.content);
@@ -395,12 +552,81 @@ export async function rebuildRagVectorIndex(novelId: string, settings?: AiEmbedd
     return { chunks: chunkRows.length, sources: docs.length, provider: embedded.provider, model: embedded.model, dimensions: embedded.dimensions, fallbackUsed: embedded.fallbackUsed, fallbackError: embedded.fallbackError };
 }
 
-export async function ensureRagVectorIndexForNovel(novelId: string, settings?: AiEmbeddingSettings): Promise<{ rebuilt: boolean; chunks: number; sources?: number }> {
+export async function rebuildRagVectorIndex(novelId: string, settings?: AiEmbeddingSettings): Promise<RagVectorIndexResult> {
     await ensureRagVectorIndex();
-    const existing = await db.$queryRaw<Array<{ count: bigint }>>`
-        SELECT COUNT(*) as count FROM rag_vector_chunks WHERE novel_id = ${novelId};
+    const docs = await buildVectorDocuments(novelId);
+    await db.$executeRaw`DELETE FROM rag_vector_chunks WHERE novel_id = ${novelId};`;
+    return writeVectorDocuments(docs, settings);
+}
+
+export async function deleteRagVectorSource(input: {
+    novelId?: string;
+    sourceType: RagEvidenceSourceType;
+    sourceId: string;
+}): Promise<{ deleted: number }> {
+    await ensureRagVectorIndex();
+    if (input.novelId) {
+        const result = await db.$executeRaw`
+            DELETE FROM rag_vector_chunks
+            WHERE novel_id = ${input.novelId}
+              AND source_type = ${input.sourceType}
+              AND source_id = ${input.sourceId};
+        `;
+        return { deleted: Number(result || 0) };
+    }
+    const result = await db.$executeRaw`
+        DELETE FROM rag_vector_chunks
+        WHERE source_type = ${input.sourceType}
+          AND source_id = ${input.sourceId};
     `;
-    const count = Number(existing[0]?.count || 0);
+    return { deleted: Number(result || 0) };
+}
+
+export async function upsertRagVectorSource(doc: VectorChunkInput, settings?: AiEmbeddingSettings): Promise<RagVectorIndexResult> {
+    await ensureRagVectorIndex();
+    await deleteRagVectorSource({
+        novelId: doc.novelId,
+        sourceType: doc.sourceType,
+        sourceId: doc.sourceId,
+    });
+    if (!doc.content.trim()) {
+        return {
+            chunks: 0,
+            sources: 1,
+            provider: 'none',
+            model: 'empty-source',
+            dimensions: 0,
+            fallbackUsed: false,
+        };
+    }
+    return writeVectorDocuments([doc], settings);
+}
+
+export async function upsertRagSourceIndex(sourceType: RagEvidenceSourceType, sourceId: string, settings?: AiEmbeddingSettings): Promise<RagVectorIndexResult & { novelId?: string; sourceType: RagEvidenceSourceType; sourceId: string }> {
+    const doc = await buildVectorDocumentForSource(sourceType, sourceId);
+    if (!doc) {
+        return {
+            chunks: 0,
+            sources: 0,
+            provider: 'none',
+            model: 'missing-source',
+            dimensions: 0,
+            fallbackUsed: false,
+            sourceType,
+            sourceId,
+        };
+    }
+    const result = await upsertRagVectorSource(doc, settings);
+    return { ...result, novelId: doc.novelId, sourceType: doc.sourceType, sourceId: doc.sourceId };
+}
+
+export async function upsertRagChapterIndex(chapterId: string, settings?: AiEmbeddingSettings): Promise<RagVectorIndexResult & { novelId?: string; sourceId: string }> {
+    const result = await upsertRagSourceIndex('chapter', chapterId, settings);
+    return { ...result, sourceId: result.sourceId };
+}
+
+export async function ensureRagVectorIndexForNovel(novelId: string, settings?: AiEmbeddingSettings): Promise<{ rebuilt: boolean; chunks: number; sources?: number }> {
+    const count = await getRagVectorChunkCount(novelId);
     if (count > 0) return { rebuilt: false, chunks: count };
     const result = await rebuildRagVectorIndex(novelId, settings);
     return { rebuilt: true, chunks: result.chunks, sources: result.sources };

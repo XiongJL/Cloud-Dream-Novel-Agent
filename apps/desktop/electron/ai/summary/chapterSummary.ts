@@ -66,6 +66,21 @@ const finalizeTimers = new Map<string, NodeJS.Timeout>();
 const narrativeTimers = new Map<string, NodeJS.Timeout>();
 let dbPathLogged = false;
 
+type RagSummaryIndexRefresh = (sourceType: 'chapterSummary' | 'narrativeSummary', sourceId: string, reason: string) => void;
+let ragSummaryIndexRefresh: RagSummaryIndexRefresh | null = null;
+
+export function registerRagSummaryIndexRefresh(callback: RagSummaryIndexRefresh): void {
+    ragSummaryIndexRefresh = callback;
+}
+
+function notifyRagSummaryIndexRefresh(sourceType: 'chapterSummary' | 'narrativeSummary', sourceId: string, reason: string): void {
+    try {
+        ragSummaryIndexRefresh?.(sourceType, sourceId, reason);
+    } catch (error) {
+        console.warn(`${LOG_PREFIX} failed to notify RAG summary index refresh:`, error);
+    }
+}
+
 type SummaryResult = {
     summaryText: string;
     keyFacts: string[];
@@ -366,8 +381,8 @@ async function upsertNarrativeSummary(
     novelId: string,
     payload: NarrativeSummaryPayload,
     volumeId?: string | null,
-): Promise<void> {
-    await db.$transaction(async (tx) => {
+): Promise<string | null> {
+    return db.$transaction(async (tx) => {
         await (tx as any).narrativeSummary.updateMany({
             where: {
                 novelId,
@@ -420,12 +435,14 @@ async function upsertNarrativeSummary(
         };
 
         if (existing?.id) {
-            await (tx as any).narrativeSummary.update({
+            const updated = await (tx as any).narrativeSummary.update({
                 where: { id: existing.id },
                 data,
             });
+            return updated.id;
         } else {
-            await (tx as any).narrativeSummary.create({ data });
+            const created = await (tx as any).narrativeSummary.create({ data });
+            return created.id;
         }
     });
 }
@@ -438,12 +455,14 @@ async function rebuildNarrativeSummaries(novelId: string, volumeId: string): Pro
         ]);
 
         if (volumePayload) {
-            await upsertNarrativeSummary('volume', novelId, volumePayload, volumeId);
+            const summaryId = await upsertNarrativeSummary('volume', novelId, volumePayload, volumeId);
             console.log(`${LOG_PREFIX} [novel=${novelId}] narrative summary updated (level=volume, volume=${volumeId})`);
+            if (summaryId) notifyRagSummaryIndexRefresh('narrativeSummary', summaryId, 'narrative-summary-volume');
         }
         if (novelPayload) {
-            await upsertNarrativeSummary('novel', novelId, novelPayload, null);
+            const summaryId = await upsertNarrativeSummary('novel', novelId, novelPayload, null);
             console.log(`${LOG_PREFIX} [novel=${novelId}] narrative summary updated (level=novel)`);
+            if (summaryId) notifyRagSummaryIndexRefresh('narrativeSummary', summaryId, 'narrative-summary-novel');
         }
     } catch (error) {
         console.error(`${LOG_PREFIX} [novel=${novelId}] narrative summary rebuild failed:`, error);
@@ -554,7 +573,7 @@ export async function rebuildChapterSummary(chapterId: string, options?: { force
         }
     }
 
-    await db.$transaction(async (tx) => {
+    const summaryId = await db.$transaction(async (tx) => {
         await (tx as any).chapterSummary.updateMany({
             where: { chapterId: chapter.id, isLatest: true },
             data: { isLatest: false, status: 'stale' },
@@ -599,19 +618,23 @@ export async function rebuildChapterSummary(chapterId: string, options?: { force
         };
 
         if (existing?.id) {
-            await (tx as any).chapterSummary.update({
+            const updated = await (tx as any).chapterSummary.update({
                 where: { id: existing.id },
                 data: payload,
             });
             console.log(`${LOG_PREFIX} [${chapterId}] done: updated existing summary`);
-            return;
+            return updated.id;
         }
 
-        await (tx as any).chapterSummary.create({
+        const created = await (tx as any).chapterSummary.create({
             data: payload,
         });
         console.log(`${LOG_PREFIX} [${chapterId}] done: created new summary`);
+        return created.id;
     });
+    if (summaryId) {
+        notifyRagSummaryIndexRefresh('chapterSummary', summaryId, 'chapter-summary');
+    }
 
     scheduleNarrativeSummaryRebuild(chapter.volume.novelId, chapter.volumeId);
 }

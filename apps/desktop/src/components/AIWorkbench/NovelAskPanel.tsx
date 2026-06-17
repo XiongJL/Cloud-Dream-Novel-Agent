@@ -208,6 +208,10 @@ export default function NovelAskPanel({ novelId, theme, currentChapterId, curren
           </label>
         </div>
 
+        <div className={clsx('rounded-lg border px-3 py-2 text-[11px] leading-5', isDark ? 'border-sky-300/20 bg-sky-400/5 text-sky-100/85' : 'border-sky-200 bg-sky-50 text-sky-900')}>
+          {t('aiWorkbench.rag.privacyNotice')}
+        </div>
+
         <div className="grid grid-cols-2 gap-2">
           <button
             type="button"

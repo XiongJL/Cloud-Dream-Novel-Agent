@@ -32,7 +32,8 @@ import {
 import { ContextBuilder } from './context/ContextBuilder';
 import { NovelRagService } from './rag/NovelRagService';
 import type { RagAskPayload, RagAskResult } from './rag/types';
-import { rebuildRagVectorIndex } from './rag/vectorIndex';
+import { buildVectorDocumentForSource, deleteRagVectorSource, getRagVectorChunkCount, rebuildRagVectorIndex, upsertRagChapterIndex, upsertRagSourceIndex } from './rag/vectorIndex';
+import type { RagEvidenceSourceType } from './rag/types';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
 
 const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -836,6 +837,116 @@ export class AiService {
         return rebuildRagVectorIndex(novelId, this.settingsCache.embedding);
     }
 
+    async upsertRagChapterIndex(chapterId: string, options?: { skipIfNovelNotIndexed?: boolean }): Promise<{ chunks: number; sources: number; provider: string; model: string; dimensions: number; fallbackUsed: boolean; fallbackError?: string; novelId?: string; sourceId: string; skipped?: boolean }> {
+        if (options?.skipIfNovelNotIndexed) {
+            const chapter = await db.chapter.findUnique({
+                where: { id: chapterId },
+                select: { volume: { select: { novelId: true } } },
+            });
+            const novelId = chapter?.volume?.novelId;
+            if (!novelId || await getRagVectorChunkCount(novelId) === 0) {
+                return {
+                    chunks: 0,
+                    sources: 0,
+                    provider: 'none',
+                    model: 'not-indexed',
+                    dimensions: 0,
+                    fallbackUsed: false,
+                    sourceId: chapterId,
+                    novelId,
+                    skipped: true,
+                };
+            }
+        }
+        return upsertRagChapterIndex(chapterId, this.settingsCache.embedding);
+    }
+
+    async upsertRagSourceIndex(sourceType: RagEvidenceSourceType, sourceId: string, options?: { skipIfNovelNotIndexed?: boolean }): Promise<{ chunks: number; sources: number; provider: string; model: string; dimensions: number; fallbackUsed: boolean; fallbackError?: string; novelId?: string; sourceType: RagEvidenceSourceType; sourceId: string; skipped?: boolean }> {
+        if (sourceType === 'chapter') {
+            const result = await this.upsertRagChapterIndex(sourceId, options);
+            return { ...result, sourceType };
+        }
+        if (options?.skipIfNovelNotIndexed) {
+            const doc = await buildVectorDocumentForSource(sourceType, sourceId);
+            const novelId = doc?.novelId;
+            if (!novelId || await getRagVectorChunkCount(novelId) === 0) {
+                return {
+                    chunks: 0,
+                    sources: 0,
+                    provider: 'none',
+                    model: 'not-indexed',
+                    dimensions: 0,
+                    fallbackUsed: false,
+                    sourceType,
+                    sourceId,
+                    novelId,
+                    skipped: true,
+                };
+            }
+        }
+        return upsertRagSourceIndex(sourceType, sourceId, this.settingsCache.embedding);
+    }
+
+    async deleteRagChapterIndex(novelId: string, chapterId: string): Promise<{ deleted: number }> {
+        return deleteRagVectorSource({
+            novelId,
+            sourceType: 'chapter',
+            sourceId: chapterId,
+        });
+    }
+
+    async deleteRagSourceIndex(novelId: string, sourceType: RagEvidenceSourceType, sourceId: string): Promise<{ deleted: number }> {
+        return deleteRagVectorSource({ novelId, sourceType, sourceId });
+    }
+
+    private refreshRagSourceIndexInBackground(sourceType: RagEvidenceSourceType, sourceId: string, reason: string): void {
+        void this.upsertRagSourceIndex(sourceType, sourceId, { skipIfNovelNotIndexed: true }).catch((error) => {
+            console.warn('[RAG] Failed to refresh source index:', { sourceType, sourceId, reason, error });
+        });
+    }
+
+    private async refreshLatestCreativeAssetIndexes(novelId: string, draft: CreativeAssetsDraft): Promise<void> {
+        const findByNames = async (model: any, names: string[]) => {
+            if (names.length === 0) return [];
+            return model.findMany({
+                where: { novelId, name: { in: names } },
+                select: { id: true },
+            });
+        };
+        const plotLineNames = (draft.plotLines ?? []).map((item) => item.name).filter(Boolean);
+        const characterNames = (draft.characters ?? []).map((item) => item.name).filter(Boolean);
+        const itemNames = [
+            ...(draft.items ?? []).map((item) => item.name),
+            ...(draft.skills ?? []).map((item) => item.name),
+        ].filter(Boolean);
+
+        const [plotLines, characters, items] = await Promise.all([
+            findByNames((db as any).plotLine, plotLineNames),
+            findByNames((db as any).character, characterNames),
+            findByNames((db as any).item, itemNames),
+        ]);
+        for (const row of plotLines) this.refreshRagSourceIndexInBackground('plotLine', row.id, 'confirm-creative-assets');
+        for (const row of characters) this.refreshRagSourceIndexInBackground('character', row.id, 'confirm-creative-assets');
+        for (const row of items) this.refreshRagSourceIndexInBackground('item', row.id, 'confirm-creative-assets');
+
+        const plotPoints = await (db as any).plotPoint.findMany({
+            where: { novelId },
+            orderBy: { createdAt: 'desc' },
+            take: Math.max(0, (draft.plotPoints?.length ?? 0) + (draft.plotLines ?? []).reduce((sum, line) => sum + (line.points?.length ?? 0), 0)),
+            select: { id: true },
+        });
+        for (const row of plotPoints) this.refreshRagSourceIndexInBackground('plotPoint', row.id, 'confirm-creative-assets');
+    }
+
+    private refreshRagAfterAction(actionId: string, result: unknown): void {
+        const row = result && typeof result === 'object' ? result as { id?: unknown } : null;
+        const id = typeof row?.id === 'string' ? row.id : '';
+        if (!id) return;
+        if (actionId === 'worldsetting.create' || actionId === 'worldsetting.update') {
+            this.refreshRagSourceIndexInBackground('worldSetting', id, actionId);
+        }
+    }
+
     async previewCreativeAssetsPrompt(payload: CreativeAssetsGeneratePayload): Promise<PromptPreviewResult> {
         devLog('INFO', 'AiService.previewCreativeAssetsPrompt.start', 'Preview creative assets prompt start', {
             novelId: payload.novelId,
@@ -1416,6 +1527,9 @@ export class AiService {
                 warnings: validation.warnings,
                 transactionMode: 'atomic' as const,
             };
+            void this.refreshLatestCreativeAssetIndexes(payload.novelId, draft).catch((error) => {
+                console.warn('[RAG] Failed to refresh creative asset indexes:', error);
+            });
             devLog('INFO', 'AiService.confirmCreativeAssets.success', 'Confirm creative assets success', {
                 novelId: payload.novelId,
                 created: committedCreated,
@@ -1582,7 +1696,9 @@ export class AiService {
             throw new AiActionError('INVALID_INPUT', `Unknown actionId: ${input.actionId}`);
         }
         try {
-            return await handler(input.payload);
+            const result = await handler(input.payload);
+            this.refreshRagAfterAction(input.actionId, result);
+            return result;
         } catch (error) {
             throw normalizeAiError(error);
         }

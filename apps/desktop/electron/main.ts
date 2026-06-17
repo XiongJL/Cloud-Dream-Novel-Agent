@@ -8,7 +8,8 @@ import { execSync } from 'child_process'
 import fs from 'fs'
 import * as searchIndex from './search/searchIndex'
 import { AiService } from './ai/AiService'
-import { scheduleChapterSummaryRebuild } from './ai/summary/chapterSummary'
+import type { RagEvidenceSourceType } from './ai/rag/types'
+import { registerRagSummaryIndexRefresh, scheduleChapterSummaryRebuild } from './ai/summary/chapterSummary'
 import { formatAiErrorForDisplay, normalizeAiError } from './ai/errors'
 import { devLog, devLogError, initDevLogger, isDevDebugEnabled, redactForLog } from './debug/devLogger'
 import { AutomationService } from './automation/AutomationService'
@@ -779,6 +780,7 @@ ipcMain.handle('db:create-chapter', async (_, { volumeId, title, order }: { volu
 
         // Update search index
         await searchIndex.indexChapter({ ...chapter, novelId: chapter.volume.novelId });
+        void refreshRagChapterIndex(chapter.id, 'create-chapter');
 
         return chapter;
     } catch (e) {
@@ -821,6 +823,7 @@ ipcMain.handle('db:rename-volume', async (_, { volumeId, title }: { volumeId: st
                 volumeTitle: chapter.volume.title,
                 volumeOrder: chapter.volume.order
             });
+            void refreshRagChapterIndex(chapter.id, 'rename-volume');
         }
 
         return updated;
@@ -844,6 +847,7 @@ ipcMain.handle('db:rename-chapter', async (_, { chapterId, title }: { chapterId:
         });
         if (chapterData && chapterData.volume) {
             await searchIndex.indexChapter({ ...chapterData, novelId: chapterData.volume.novelId });
+            void refreshRagChapterIndex(chapterId, 'rename-chapter');
         }
 
         return updated;
@@ -938,6 +942,7 @@ ipcMain.handle('db:delete-chapter', async (_, { chapterId }: { chapterId: string
                 volumeTitle: chapter.volume.title,
                 volumeOrder: chapter.volume.order,
             });
+            void refreshRagChapterIndex(chapterId, 'reset-only-chapter');
 
             return {
                 mode: 'reset' as const,
@@ -976,6 +981,7 @@ ipcMain.handle('db:delete-chapter', async (_, { chapterId }: { chapterId: string
         ]);
 
         await searchIndex.removeFromIndex('chapter', chapterId);
+        void removeRagChapterIndex(novelId, chapterId, 'delete-chapter');
 
         for (const item of siblingsNeedingReorder) {
             await searchIndex.indexChapter({
@@ -1079,6 +1085,7 @@ ipcMain.handle('db:save-chapter', async (_, { chapterId, content }: { chapterId:
         });
         if (chapterData) {
             await searchIndex.indexChapter({ ...chapterData, novelId });
+            void refreshRagChapterIndex(chapterId, 'save-chapter');
         }
 
         // Async chapter summary refresh (non-blocking)
@@ -1252,6 +1259,35 @@ const syncManager = new SyncManager();
 let aiService!: AiService;
 let automationService!: AutomationService;
 let automationServer: AutomationServer | null = null;
+
+async function refreshRagChapterIndex(chapterId: string, reason: string): Promise<void> {
+    return refreshRagSourceIndex('chapter', chapterId, reason);
+}
+
+async function refreshRagSourceIndex(sourceType: RagEvidenceSourceType, sourceId: string, reason: string): Promise<void> {
+    try {
+        const result = await aiService.upsertRagSourceIndex(sourceType, sourceId, { skipIfNovelNotIndexed: true });
+        if (result.skipped) {
+            return;
+        }
+        console.log('[RAG] Source index refreshed:', { sourceType, sourceId, reason, chunks: result.chunks, provider: result.provider, model: result.model });
+    } catch (error) {
+        console.warn('[RAG] Failed to refresh source index:', { sourceType, sourceId, reason, error });
+    }
+}
+
+async function removeRagChapterIndex(novelId: string, chapterId: string, reason: string): Promise<void> {
+    return removeRagSourceIndex(novelId, 'chapter', chapterId, reason);
+}
+
+async function removeRagSourceIndex(novelId: string, sourceType: RagEvidenceSourceType, sourceId: string, reason: string): Promise<void> {
+    try {
+        const result = await aiService.deleteRagSourceIndex(novelId, sourceType, sourceId);
+        console.log('[RAG] Source index removed:', { novelId, sourceType, sourceId, reason, deleted: result.deleted });
+    } catch (error) {
+        console.warn('[RAG] Failed to remove source index:', { novelId, sourceType, sourceId, reason, error });
+    }
+}
 
 // --- AI IPC ---
 ipcMain.handle('ai:get-settings', async () => {
@@ -1802,9 +1838,11 @@ ipcMain.handle('db:create-plot-line', async (_, data: { novelId: string; name: s
         });
         const order = (maxOrder._max.sortOrder || 0) + 1;
 
-        return await (db as any).plotLine.create({
+        const created = await (db as any).plotLine.create({
             data: { ...data, sortOrder: order }
         });
+        void refreshRagSourceIndex('plotLine', created.id, 'create-plot-line');
+        return created;
     } catch (e) {
         console.error('[Main] db:create-plot-line failed. Data:', data, 'Error:', e);
         throw e;
@@ -1813,10 +1851,12 @@ ipcMain.handle('db:create-plot-line', async (_, data: { novelId: string; name: s
 
 ipcMain.handle('db:update-plot-line', async (_, data: { id: string; data: any }) => {
     try {
-        return await (db as any).plotLine.update({
+        const updated = await (db as any).plotLine.update({
             where: { id: data.id },
             data: data.data
         });
+        void refreshRagSourceIndex('plotLine', updated.id, 'update-plot-line');
+        return updated;
     } catch (e) {
         console.error('[Main] db:update-plot-line failed. ID:', data.id, 'Error:', e);
         throw e;
@@ -1825,7 +1865,12 @@ ipcMain.handle('db:update-plot-line', async (_, data: { id: string; data: any })
 
 ipcMain.handle('db:delete-plot-line', async (_, id: string) => {
     try {
-        return await (db as any).plotLine.delete({ where: { id } });
+        const line = await (db as any).plotLine.findUnique({ where: { id }, select: { novelId: true } });
+        const deleted = await (db as any).plotLine.delete({ where: { id } });
+        if (line?.novelId) {
+            void removeRagSourceIndex(line.novelId, 'plotLine', id, 'delete-plot-line');
+        }
+        return deleted;
     } catch (e) {
         console.error('[Main] db:delete-plot-line failed. ID:', id, 'Error:', e);
         throw e;
@@ -1842,9 +1887,11 @@ ipcMain.handle('db:create-plot-point', async (_, data: any) => {
         });
         const order = (maxOrder._max.order || 0) + 1;
 
-        return await (db as any).plotPoint.create({
+        const created = await (db as any).plotPoint.create({
             data: { ...data, order }
         });
+        void refreshRagSourceIndex('plotPoint', created.id, 'create-plot-point');
+        return created;
     } catch (e) {
         console.error('[Main] db:create-plot-point failed. Data:', data, 'Error:', e);
         throw e;
@@ -1853,10 +1900,12 @@ ipcMain.handle('db:create-plot-point', async (_, data: any) => {
 
 ipcMain.handle('db:update-plot-point', async (_, data: { id: string; data: any }) => {
     try {
-        return await (db as any).plotPoint.update({
+        const updated = await (db as any).plotPoint.update({
             where: { id: data.id },
             data: data.data
         });
+        void refreshRagSourceIndex('plotPoint', updated.id, 'update-plot-point');
+        return updated;
     } catch (e) {
         console.error('[Main] db:update-plot-point failed. ID:', data.id, 'Error:', e);
         throw e;
@@ -1865,7 +1914,12 @@ ipcMain.handle('db:update-plot-point', async (_, data: { id: string; data: any }
 
 ipcMain.handle('db:delete-plot-point', async (_, id: string) => {
     try {
-        return await (db as any).plotPoint.delete({ where: { id } });
+        const point = await (db as any).plotPoint.findUnique({ where: { id }, select: { novelId: true } });
+        const deleted = await (db as any).plotPoint.delete({ where: { id } });
+        if (point?.novelId) {
+            void removeRagSourceIndex(point.novelId, 'plotPoint', id, 'delete-plot-point');
+        }
+        return deleted;
     } catch (e) {
         console.error('[Main] db:delete-plot-point failed. ID:', id, 'Error:', e);
         throw e;
@@ -1916,6 +1970,9 @@ ipcMain.handle('db:reorder-plot-points', async (_, { plotLineId, pointIds }: { p
             })
         );
         await (db as any).$transaction(updates);
+        for (const id of pointIds) {
+            void refreshRagSourceIndex('plotPoint', id, 'reorder-plot-points');
+        }
         return { success: true };
     } catch (e) {
         console.error('[Main] db:reorder-plot-points failed:', e);
@@ -2072,9 +2129,11 @@ ipcMain.handle('db:create-character', async (_, data: any) => {
     try {
         // Ensure profile is stringified if it's an object
         const profileData = typeof data.profile === 'object' ? JSON.stringify(data.profile) : data.profile;
-        return await (db as any).character.create({
+        const created = await (db as any).character.create({
             data: { ...data, profile: profileData }
         });
+        void refreshRagSourceIndex('character', created.id, 'create-character');
+        return created;
     } catch (e) {
         console.error('[Main] db:create-character failed:', e);
         throw e;
@@ -2084,10 +2143,12 @@ ipcMain.handle('db:create-character', async (_, data: any) => {
 ipcMain.handle('db:update-character', async (_, { id, data }: { id: string, data: any }) => {
     try {
         const profileData = typeof data.profile === 'object' ? JSON.stringify(data.profile) : data.profile;
-        return await (db as any).character.update({
+        const updated = await (db as any).character.update({
             where: { id },
             data: { ...data, profile: profileData }
         });
+        void refreshRagSourceIndex('character', id, 'update-character');
+        return updated;
     } catch (e) {
         console.error('[Main] db:update-character failed:', e);
         throw e;
@@ -2096,7 +2157,11 @@ ipcMain.handle('db:update-character', async (_, { id, data }: { id: string, data
 
 ipcMain.handle('db:delete-character', async (_, id: string) => {
     try {
+        const character = await (db as any).character.findUnique({ where: { id }, select: { novelId: true } });
         await (db as any).character.delete({ where: { id } });
+        if (character?.novelId) {
+            void removeRagSourceIndex(character.novelId, 'character', id, 'delete-character');
+        }
     } catch (e) {
         console.error('[Main] db:delete-character failed:', e);
         throw e;
@@ -2132,9 +2197,11 @@ ipcMain.handle('db:create-item', async (_, data: any) => {
         });
         const sortOrder = (maxOrder._max.sortOrder || 0) + 1;
 
-        return await (db as any).item.create({
+        const created = await (db as any).item.create({
             data: { ...data, sortOrder }
         });
+        void refreshRagSourceIndex('item', created.id, 'create-item');
+        return created;
     } catch (e) {
         console.error('[Main] db:create-item failed:', e);
         throw e;
@@ -2143,10 +2210,12 @@ ipcMain.handle('db:create-item', async (_, data: any) => {
 
 ipcMain.handle('db:update-item', async (_, { id, data }: { id: string; data: any }) => {
     try {
-        return await (db as any).item.update({
+        const updated = await (db as any).item.update({
             where: { id },
             data: { ...data, updatedAt: new Date() }
         });
+        void refreshRagSourceIndex('item', id, 'update-item');
+        return updated;
     } catch (e) {
         console.error('[Main] db:update-item failed:', e);
         throw e;
@@ -2155,7 +2224,12 @@ ipcMain.handle('db:update-item', async (_, { id, data }: { id: string; data: any
 
 ipcMain.handle('db:delete-item', async (_, id: string) => {
     try {
-        return await (db as any).item.delete({ where: { id } });
+        const item = await (db as any).item.findUnique({ where: { id }, select: { novelId: true } });
+        const deleted = await (db as any).item.delete({ where: { id } });
+        if (item?.novelId) {
+            void removeRagSourceIndex(item.novelId, 'item', id, 'delete-item');
+        }
+        return deleted;
     } catch (e) {
         console.error('[Main] db:delete-item failed:', e);
         throw e;
@@ -2221,7 +2295,7 @@ ipcMain.handle('db:create-world-setting', async (_, data: { novelId: string; nam
             where: { novelId: data.novelId },
             orderBy: { sortOrder: 'desc' }
         });
-        return await (db as any).worldSetting.create({
+        const created = await (db as any).worldSetting.create({
             data: {
                 novelId: data.novelId,
                 name: data.name,
@@ -2229,6 +2303,8 @@ ipcMain.handle('db:create-world-setting', async (_, data: { novelId: string; nam
                 sortOrder: (last?.sortOrder || 0) + 1
             }
         });
+        void refreshRagSourceIndex('worldSetting', created.id, 'create-world-setting');
+        return created;
     } catch (e) {
         console.error('[Main] db:create-world-setting failed:', e);
         throw e;
@@ -2237,10 +2313,12 @@ ipcMain.handle('db:create-world-setting', async (_, data: { novelId: string; nam
 
 ipcMain.handle('db:update-world-setting', async (_, id: string, data: any) => {
     try {
-        return await (db as any).worldSetting.update({
+        const updated = await (db as any).worldSetting.update({
             where: { id },
             data
         });
+        void refreshRagSourceIndex('worldSetting', id, 'update-world-setting');
+        return updated;
     } catch (e) {
         console.error('[Main] db:update-world-setting failed:', e);
         throw e;
@@ -2249,7 +2327,12 @@ ipcMain.handle('db:update-world-setting', async (_, id: string, data: any) => {
 
 ipcMain.handle('db:delete-world-setting', async (_, id: string) => {
     try {
-        return await (db as any).worldSetting.delete({ where: { id } });
+        const world = await (db as any).worldSetting.findUnique({ where: { id }, select: { novelId: true } });
+        const deleted = await (db as any).worldSetting.delete({ where: { id } });
+        if (world?.novelId) {
+            void removeRagSourceIndex(world.novelId, 'worldSetting', id, 'delete-world-setting');
+        }
+        return deleted;
     } catch (e) {
         console.error('[Main] db:delete-world-setting failed:', e);
         throw e;
@@ -2513,10 +2596,12 @@ ipcMain.handle('db:get-character-items', async (_, characterId: string) => {
 
 ipcMain.handle('db:add-item-to-character', async (_, data: { characterId: string; itemId: string; note?: string }) => {
     try {
-        return await (db as any).itemOwnership.create({
+        const created = await (db as any).itemOwnership.create({
             data,
             include: { item: true }
         });
+        void refreshRagSourceIndex('character', data.characterId, 'add-item-to-character');
+        return created;
     } catch (e) {
         console.error('[Main] db:add-item-to-character failed:', e);
         throw e;
@@ -2525,7 +2610,12 @@ ipcMain.handle('db:add-item-to-character', async (_, data: { characterId: string
 
 ipcMain.handle('db:remove-item-from-character', async (_, id: string) => {
     try {
-        return await (db as any).itemOwnership.delete({ where: { id } });
+        const ownership = await (db as any).itemOwnership.findUnique({ where: { id }, select: { characterId: true } });
+        const deleted = await (db as any).itemOwnership.delete({ where: { id } });
+        if (ownership?.characterId) {
+            void refreshRagSourceIndex('character', ownership.characterId, 'remove-item-from-character');
+        }
+        return deleted;
     } catch (e) {
         console.error('[Main] db:remove-item-from-character failed:', e);
         throw e;
@@ -2534,11 +2624,13 @@ ipcMain.handle('db:remove-item-from-character', async (_, id: string) => {
 
 ipcMain.handle('db:update-item-ownership', async (_, id: string, data: { note?: string }) => {
     try {
-        return await (db as any).itemOwnership.update({
+        const updated = await (db as any).itemOwnership.update({
             where: { id },
             data,
             include: { item: true }
         });
+        void refreshRagSourceIndex('character', updated.characterId, 'update-item-ownership');
+        return updated;
     } catch (e) {
         console.error('[Main] db:update-item-ownership failed:', e);
         throw e;
@@ -2854,6 +2946,9 @@ app.whenReady().then(async () => {
         throw error;
     }
     aiService = new AiService(() => app.getPath('userData'));
+    registerRagSummaryIndexRefresh((sourceType, sourceId, reason) => {
+        void refreshRagSourceIndex(sourceType, sourceId, reason);
+    });
     automationService = new AutomationService(aiService, () => app.getPath('userData'));
     automationServer = new AutomationServer(
         automationService,

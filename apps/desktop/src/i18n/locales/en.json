@@ -558,7 +558,8 @@
         "dimensions": "Dimensions",
         "batchSize": "Batch Size",
         "timeoutMs": "Timeout (ms)",
-        "notice": "When enabled, rebuilding the vector index calls this endpoint and stores semantic vectors as SQLite BLOBs. If disabled or fallback is used, local hash vectors are used."
+        "notice": "When enabled, rebuilding the vector index calls this endpoint and stores semantic vectors as SQLite BLOBs. If disabled or fallback is used, local hash vectors are used.",
+        "privacyNotice": "Privacy note: if the Base URL points to a cloud service, chapter, character, outline, and summary chunks are sent to that Embedding service during index rebuild. If it points to local Ollama or another local service, they stay on this machine. Manual index rebuild is a full rebuild; after the first index exists, chapters, characters, items, world settings, outlines, and summaries update incrementally per source."
       },
       "openclawSmokeResult": "OpenClaw Smoke Result",
       "smokePassed": "Passed",
@@ -884,6 +885,7 @@
       "needQuestion": "Enter a question first",
       "ask": "Ask",
       "askFailed": "Q&A failed. Check model settings and retry.",
+      "privacyNotice": "Privacy note: asking sends only the selected evidence chunks to the current text model, not every matching chapter. If the text model is a cloud API, those evidence chunks still leave this machine. After the first index rebuild, chapters, characters, items, world settings, outlines, and summaries update incrementally per source.",
       "rebuildIndex": "Rebuild Vector Index",
       "rebuildIndexFailed": "Vector index rebuild failed",
       "rebuildIndexSuccess": "Vector index rebuilt: {{chunks}} chunks, model {{model}}, dimensions {{dimensions}}.",
