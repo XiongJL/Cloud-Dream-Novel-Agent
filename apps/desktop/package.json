@@ -27,7 +27,9 @@
   },
   "dependencies": {
     "@novel-editor/core": "workspace:*",
-    "adm-zip": "^0.5.16"
+    "adm-zip": "^0.5.16",
+    "mammoth": "^1.12.0",
+    "pdf-parse": "^2.4.5"
   },
   "devDependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -60,8 +62,8 @@
     "react-i18next": "^16.5.4",
     "react-konva": "^18.2.14",
     "sonner": "^2.0.7",
-    "tailwindcss": "^3.4.1",
     "tailwind-merge": "^2.2.1",
+    "tailwindcss": "^3.4.1",
     "typescript": "^5.4.2",
     "vite": "^5.1.5",
     "vite-plugin-electron": "^0.28.2",

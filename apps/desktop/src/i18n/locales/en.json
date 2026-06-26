@@ -29,6 +29,7 @@
     "refresh": "Refresh",
     "on": "On",
     "off": "Off",
+    "unknownError": "Unknown error",
     "plotLine": "Plot Line",
     "chapters": "Chapters",
     "plotLines": "Plot Lines",
@@ -114,6 +115,10 @@
     "newNovelPrefix": "New Novel",
     "create": "Create New Novel",
     "createShort": "New Work",
+    "importNovel": "Import Novel",
+    "createFailed": "Create failed",
+    "importFailed": "Import failed",
+    "saveFailed": "Save failed",
     "editNovel": "Edit Novel",
     "editNovelShort": "Edit Work",
     "title": "Title",
@@ -952,5 +957,4 @@
     "UNKNOWN": "Unknown error. Please try again later."
   }
 }
-
 

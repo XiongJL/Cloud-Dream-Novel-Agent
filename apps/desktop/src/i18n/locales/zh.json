@@ -32,6 +32,7 @@
     "refresh": "刷新",
     "on": "开启",
     "off": "关闭",
+    "unknownError": "未知错误",
     "clear": "清除",
     "chars": "字",
     "add": "添加",
@@ -114,6 +115,10 @@
     "newNovelPrefix": "新作品",
     "create": "创建新作品",
     "createShort": "创建作品",
+    "importNovel": "导入小说",
+    "createFailed": "创建失败",
+    "importFailed": "导入失败",
+    "saveFailed": "保存失败",
     "editNovel": "编辑作品信息",
     "editNovelShort": "编辑作品",
     "title": "标题",
@@ -952,4 +957,3 @@
     "UNKNOWN": "未知错误，请稍后重试。"
   }
 }
-

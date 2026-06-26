@@ -16,6 +16,7 @@ contextBridge.exposeInMainWorld('db', {
     updateNovel: (data: { id: string; data: { title?: string; coverUrl?: string; description?: string; formatting?: string } }) => ipcRenderer.invoke('db:update-novel', data),
     deleteNovel: (novelId: string) => ipcRenderer.invoke('db:delete-novel', novelId),
     uploadNovelCover: (novelId: string) => ipcRenderer.invoke('db:upload-novel-cover', novelId),
+    importNovelFile: () => ipcRenderer.invoke('db:import-novel-file'),
 
     // Idea
     getIdeas: (novelId: string) => ipcRenderer.invoke('db:get-ideas', novelId),

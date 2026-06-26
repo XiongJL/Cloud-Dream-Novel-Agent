@@ -19,6 +19,7 @@ interface DBAPI {
     updateNovel: (data: { id: string; data: { title?: string; coverUrl?: string; description?: string; formatting?: string } }) => Promise<Novel>
     deleteNovel: (novelId: string) => Promise<{ ok: boolean }>
     uploadNovelCover: (novelId: string) => Promise<{ path: string } | null>
+    importNovelFile: () => Promise<{ novelId: string; title: string; volumeCount: number; chapterCount: number } | null>
     getIdeas: (novelId: string) => Promise<Idea[]>
     createIdea: (data: Idea) => Promise<Idea>
     deleteIdea: (id: string) => Promise<void>

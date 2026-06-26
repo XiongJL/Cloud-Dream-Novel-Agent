@@ -117,6 +117,10 @@ function parseFormatting(formatting?: string): Record<string, any> {
     }
 }
 
+function getErrorMessage(error: unknown, fallback: string): string {
+    return error instanceof Error && error.message ? error.message : fallback;
+}
+
 function readNovelAuthor(novel?: any): string {
     if (!novel) return '';
     const formatting = parseFormatting(novel.formatting);
@@ -450,9 +454,23 @@ export default function Home() {
         try {
             const createdNovel = await window.db.createNovel(title);
             await loadNovels({ preserveFrontNovelId: createdNovel.id });
-        } catch (error: any) {
+        } catch (error) {
             console.error('[Home] create novel failed:', error);
-            alert(`Create failed: ${error.message || 'Unknown error'}`);
+            const fallback = t('common.unknownError', { defaultValue: 'Unknown error' });
+            alert(`${t('home.createFailed', { defaultValue: 'Create failed' })}: ${getErrorMessage(error, fallback)}`);
+        }
+    }
+
+    async function handleImportNovel() {
+        try {
+            const imported = await window.db.importNovelFile();
+            if (!imported?.novelId) return;
+            await loadNovels({ preserveFrontNovelId: imported.novelId });
+            setSelectedNovelId(imported.novelId);
+        } catch (error) {
+            console.error('[Home] import novel failed:', error);
+            const fallback = t('common.unknownError', { defaultValue: 'Unknown error' });
+            alert(`${t('home.importFailed', { defaultValue: 'Import failed' })}: ${getErrorMessage(error, fallback)}`);
         }
     }
 
@@ -482,8 +500,9 @@ export default function Home() {
             });
             setIsEditorOpen(false);
             await loadNovels({ preserveFrontNovelId: editingNovelId });
-        } catch (error: any) {
-            alert(`Save failed: ${error.message || 'Unknown error'}`);
+        } catch (error) {
+            const fallback = t('common.unknownError', { defaultValue: 'Unknown error' });
+            alert(`${t('home.saveFailed', { defaultValue: 'Save failed' })}: ${getErrorMessage(error, fallback)}`);
         }
     }
 
@@ -539,9 +558,10 @@ export default function Home() {
             } else {
                 setActiveDeckIndex(Math.min(removingIndex, data.length - 1));
             }
-        } catch (error: any) {
+        } catch (error) {
             console.error('[Home] delete novel failed:', error);
-            alert(`${t('home.deleteNovelFailed', { defaultValue: 'Delete failed' })}: ${error.message || 'Unknown error'}`);
+            const fallback = t('common.unknownError', { defaultValue: 'Unknown error' });
+            alert(`${t('home.deleteNovelFailed', { defaultValue: 'Delete failed' })}: ${getErrorMessage(error, fallback)}`);
         } finally {
             setDroppingNovelId(null);
             setPendingDeleteNovelId(null);
@@ -858,6 +878,25 @@ export default function Home() {
                                         <Plus className={clsx(layoutPreset.actionCompact ? 'h-4.5 w-4.5' : 'h-4 w-4')} />
                                         <span className={clsx(layoutPreset.actionCompact ? 'whitespace-nowrap leading-none' : '')}>
                                             {t(layoutPreset.actionCompact ? 'home.createShort' : 'home.create')}
+                                        </span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={handleImportNovel}
+                                        disabled={isDeletingNovel || isDeleteConfirmOpen}
+                                        className={clsx(
+                                            'inline-flex rounded-xl text-sm font-bold transition',
+                                            layoutPreset.actionCompact
+                                                ? 'h-[96px] flex-col items-center justify-center gap-2 px-3 text-center text-[15px]'
+                                                : 'items-center justify-center gap-2 px-4 py-3.5',
+                                            isDarkTheme
+                                                ? 'bg-white/[0.04] text-neutral-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] hover:bg-white/[0.08] disabled:cursor-not-allowed disabled:opacity-60'
+                                                : 'bg-[#f5f5f5] hover:bg-[#ececec] disabled:cursor-not-allowed disabled:opacity-60'
+                                        )}
+                                    >
+                                        <Upload className={clsx(layoutPreset.actionCompact ? 'h-4.5 w-4.5' : 'h-4 w-4')} />
+                                        <span className={clsx(layoutPreset.actionCompact ? 'whitespace-nowrap leading-none' : '')}>
+                                            {t('home.importNovel', { defaultValue: '导入小说' })}
                                         </span>
                                     </button>
                                     <button

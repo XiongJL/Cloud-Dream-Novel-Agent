@@ -14,6 +14,7 @@ import { formatAiErrorForDisplay, normalizeAiError } from './ai/errors'
 import { devLog, devLogError, initDevLogger, isDevDebugEnabled, redactForLog } from './debug/devLogger'
 import { AutomationService } from './automation/AutomationService'
 import { AutomationServer } from './automation/AutomationServer'
+import { readNovelFileAsStructure } from './importers/novelImport'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -1034,6 +1035,95 @@ ipcMain.handle('db:create-novel', async (_, title: string) => {
         return novel;
     } catch (e) {
         console.error('[Main] db:create-novel failed:', e);
+        throw e;
+    }
+})
+
+ipcMain.handle('db:import-novel-file', async () => {
+    try {
+        const result = await dialog.showOpenDialog(win!, {
+            title: 'Import Novel File',
+            filters: [
+                { name: 'Novel Files', extensions: ['txt', 'docx', 'pdf'] },
+                { name: 'Text', extensions: ['txt'] },
+                { name: 'Word', extensions: ['docx'] },
+                { name: 'PDF', extensions: ['pdf'] },
+            ],
+            properties: ['openFile']
+        });
+
+        if (result.canceled || result.filePaths.length === 0) return null;
+
+        const filePath = result.filePaths[0];
+        const imported = await readNovelFileAsStructure(filePath);
+        const importedAt = new Date().toISOString();
+        const formatting = JSON.stringify({
+            importSource: path.basename(filePath),
+            importExtension: path.extname(filePath).replace(/^\./, '').toLowerCase(),
+            importedAt,
+        });
+
+        const createdNovel = await db.$transaction(async (tx) => {
+            const novel = await tx.novel.create({
+                data: {
+                    title: imported.title,
+                    wordCount: imported.wordCount,
+                    formatting,
+                }
+            });
+
+            for (const volumeDraft of imported.volumes) {
+                const volume = await tx.volume.create({
+                    data: {
+                        novelId: novel.id,
+                        title: volumeDraft.title,
+                        order: volumeDraft.order,
+                    }
+                });
+
+                for (const chapterDraft of volumeDraft.chapters) {
+                    await tx.chapter.create({
+                        data: {
+                            volumeId: volume.id,
+                            title: chapterDraft.title,
+                            content: chapterDraft.lexicalContent,
+                            wordCount: chapterDraft.wordCount,
+                            order: chapterDraft.order,
+                        }
+                    });
+                }
+            }
+
+            return novel;
+        });
+
+        const chapters = await db.chapter.findMany({
+            where: { volume: { novelId: createdNovel.id } },
+            include: {
+                volume: { select: { novelId: true, title: true, order: true } }
+            },
+            orderBy: [{ volume: { order: 'asc' } }, { order: 'asc' }]
+        });
+
+        for (const chapter of chapters) {
+            await searchIndex.indexChapter({
+                ...chapter,
+                novelId: chapter.volume.novelId,
+                volumeTitle: chapter.volume.title,
+                volumeOrder: chapter.volume.order,
+            });
+            void refreshRagChapterIndex(chapter.id, 'import-novel-file');
+            scheduleChapterSummaryRebuild(chapter.id);
+        }
+
+        return {
+            novelId: createdNovel.id,
+            title: createdNovel.title,
+            volumeCount: imported.volumes.length,
+            chapterCount: chapters.length,
+        };
+    } catch (e) {
+        console.error('[Main] db:import-novel-file failed:', e);
         throw e;
     }
 })
@@ -2987,6 +3077,5 @@ app.whenReady().then(async () => {
     // 6. Create Window
     createWindow();
 })
-
 
 
