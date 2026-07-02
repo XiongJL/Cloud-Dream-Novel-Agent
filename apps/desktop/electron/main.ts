@@ -622,28 +622,8 @@ ipcMain.handle('app:get-user-data-path', () => {
 ipcMain.handle('db:get-novels', async () => {
     console.log('[Main] Received db:get-novels');
     try {
-        const novels = await db.novel.findMany({
-            include: {
-                volumes: {
-                    select: {
-                        chapters: { select: { content: true } }
-                    }
-                }
-            },
+        return await db.novel.findMany({
             orderBy: { updatedAt: 'desc' }
-        });
-
-        // Calculate real word count from visible plain text (Lexical JSON -> plain text)
-        return novels.map(n => {
-            const totalWords = n.volumes.reduce((acc, v) =>
-                acc + v.chapters.reduce((cAcc, c) => cAcc + extractTextFromLexical(c.content || '').length, 0), 0
-            );
-            // Remove volumes from result to keep payload clean, but return correct wordCount
-            const { volumes, ...rest } = n;
-            return {
-                ...rest,
-                wordCount: totalWords
-            };
         });
     } catch (e) {
         console.error('[Main] db:get-novels failed:', e);
@@ -739,8 +719,25 @@ ipcMain.handle('db:get-volumes', async (_, novelId: string) => {
     try {
         return await db.volume.findMany({
             where: { novelId },
-            include: {
-                chapters: { orderBy: { order: 'asc' } }
+            select: {
+                id: true,
+                title: true,
+                order: true,
+                novelId: true,
+                version: true,
+                deleted: true,
+                createdAt: true,
+                updatedAt: true,
+                chapters: {
+                    select: {
+                        id: true,
+                        title: true,
+                        order: true,
+                        wordCount: true,
+                        updatedAt: true,
+                    },
+                    orderBy: { order: 'asc' }
+                }
             },
             orderBy: { order: 'asc' }
         });
@@ -1056,6 +1053,7 @@ ipcMain.handle('db:import-novel-file', async () => {
 
         const filePath = result.filePaths[0];
         const imported = await readNovelFileAsStructure(filePath);
+        const chapterCount = imported.volumes.reduce((sum, volume) => sum + volume.chapters.length, 0);
         const importedAt = new Date().toISOString();
         const formatting = JSON.stringify({
             importSource: path.basename(filePath),
@@ -1097,30 +1095,36 @@ ipcMain.handle('db:import-novel-file', async () => {
             return novel;
         });
 
-        const chapters = await db.chapter.findMany({
-            where: { volume: { novelId: createdNovel.id } },
-            include: {
-                volume: { select: { novelId: true, title: true, order: true } }
-            },
-            orderBy: [{ volume: { order: 'asc' } }, { order: 'asc' }]
-        });
+        void (async () => {
+            try {
+                const chapters = await db.chapter.findMany({
+                    where: { volume: { novelId: createdNovel.id } },
+                    include: {
+                        volume: { select: { novelId: true, title: true, order: true } }
+                    },
+                    orderBy: [{ volume: { order: 'asc' } }, { order: 'asc' }]
+                });
 
-        for (const chapter of chapters) {
-            await searchIndex.indexChapter({
-                ...chapter,
-                novelId: chapter.volume.novelId,
-                volumeTitle: chapter.volume.title,
-                volumeOrder: chapter.volume.order,
-            });
-            void refreshRagChapterIndex(chapter.id, 'import-novel-file');
-            scheduleChapterSummaryRebuild(chapter.id);
-        }
+                for (const chapter of chapters) {
+                    await searchIndex.indexChapter({
+                        ...chapter,
+                        novelId: chapter.volume.novelId,
+                        volumeTitle: chapter.volume.title,
+                        volumeOrder: chapter.volume.order,
+                    });
+                    void refreshRagChapterIndex(chapter.id, 'import-novel-file');
+                    scheduleChapterSummaryRebuild(chapter.id);
+                }
+            } catch (indexError) {
+                console.error('[Main] import post-processing failed:', indexError);
+            }
+        })();
 
         return {
             novelId: createdNovel.id,
             title: createdNovel.title,
             volumeCount: imported.volumes.length,
-            chapterCount: chapters.length,
+            chapterCount,
         };
     } catch (e) {
         console.error('[Main] db:import-novel-file failed:', e);

@@ -157,6 +157,7 @@ export default function Home() {
     const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
     const [pendingDeleteNovelId, setPendingDeleteNovelId] = useState<string | null>(null);
     const [isDeletingNovel, setIsDeletingNovel] = useState(false);
+    const [isImportingNovel, setIsImportingNovel] = useState(false);
     const [droppingNovelId, setDroppingNovelId] = useState<string | null>(null);
     const [editForm, setEditForm] = useState({ title: '', coverUrl: '', description: '', author: '' });
 
@@ -462,17 +463,21 @@ export default function Home() {
     }
 
     async function handleImportNovel() {
+        if (isImportingNovel) return;
+        setIsImportingNovel(true);
         try {
             const imported = await window.db.importNovelFile();
             if (!imported?.novelId) return;
             await loadNovels({ preserveFrontNovelId: imported.novelId });
             setSelectedNovelId(imported.novelId);
-        } catch (error) {
+        } catch (error: any) {
             console.error('[Home] import novel failed:', error);
-            const fallback = t('common.unknownError', { defaultValue: 'Unknown error' });
-            alert(`${t('home.importFailed', { defaultValue: 'Import failed' })}: ${getErrorMessage(error, fallback)}`);
+            alert(`Import failed: ${error.message || 'Unknown error'}`);
+        } finally {
+            setIsImportingNovel(false);
         }
     }
+
 
     async function saveEdit() {
         if (!activeNovel || isDeletingNovel) return;
@@ -883,7 +888,7 @@ export default function Home() {
                                     <button
                                         type="button"
                                         onClick={handleImportNovel}
-                                        disabled={isDeletingNovel || isDeleteConfirmOpen}
+                                        disabled={isDeletingNovel || isDeleteConfirmOpen || isImportingNovel}
                                         className={clsx(
                                             'inline-flex rounded-xl text-sm font-bold transition',
                                             layoutPreset.actionCompact
@@ -1072,6 +1077,14 @@ export default function Home() {
                                 isDarkTheme ? 'border border-white/10 bg-[#17171f]/90 text-neutral-300' : 'bg-white/85 text-neutral-600'
                             )}>
                                 {t('common.loading')}
+                            </div>
+                        )}
+                        {isImportingNovel && (
+                            <div className={clsx(
+                                'fixed bottom-20 left-1/2 z-40 -translate-x-1/2 rounded-full px-4 py-2 text-sm shadow',
+                                isDarkTheme ? 'border border-white/10 bg-[#17171f]/90 text-neutral-300' : 'bg-white/85 text-neutral-600'
+                            )}>
+                                {t('home.importingNovel', { defaultValue: '正在导入小说，请稍候…' })}
                             </div>
                         )}
                     </motion.div>

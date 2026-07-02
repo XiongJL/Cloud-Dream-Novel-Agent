@@ -87,6 +87,19 @@ test('readNovelFileAsStructure imports txt and uses filename as fallback title',
   assert.match(result.volumes[0].chapters[0].plainText, /风起了/);
 });
 
+test('readNovelFileAsStructure decodes gbk txt content before chapter splitting', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'novel-import-'));
+  const filePath = path.join(tempDir, '繁体旧稿.txt');
+  const gbkHex = 'b5da31d5c220bfaacabc0ab7e7b4b5b9fdc9bdb8daa1a30ab5dab6fed5c220d2b9c9ab0ad2b9c0efd6bbd3d0b3e6c3f9a1a3';
+  await fs.writeFile(filePath, Buffer.from(gbkHex, 'hex'));
+
+  const result = await readNovelFileAsStructure(filePath);
+
+  assert.equal(result.volumes[0].chapters.length, 2);
+  assert.equal(result.volumes[0].chapters[0].title, '第1章 开始');
+  assert.match(result.volumes[0].chapters[0].plainText, /风吹过山岗/);
+});
+
 test('readNovelFileAsStructure rejects legacy doc files with a helpful error', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'novel-import-'));
   const filePath = path.join(tempDir, '旧稿.doc');

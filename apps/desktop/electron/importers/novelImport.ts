@@ -49,8 +49,37 @@ function deriveNovelTitleFromPath(filePath: string): string {
   return parsed.name.trim() || '导入作品';
 }
 
+function looksLikeMisdecodedText(text: string): boolean {
+  if (!text) return false;
+  const replacementCount = (text.match(/�/g) || []).length;
+  if (replacementCount > 0) return true;
+  const suspiciousCount = (text.match(/[�]/g) || []).length;
+  return suspiciousCount > 0;
+}
+
+function decodeTxtBuffer(buffer: Buffer): string {
+  const utf8 = new TextDecoder('utf-8').decode(buffer);
+  if (!looksLikeMisdecodedText(utf8)) {
+    return utf8;
+  }
+
+  for (const encoding of ['gb18030', 'gbk', 'big5'] as const) {
+    try {
+      const decoded = new TextDecoder(encoding).decode(buffer);
+      if (!looksLikeMisdecodedText(decoded)) {
+        return decoded;
+      }
+    } catch {
+      // ignore unsupported encoding and continue fallback chain
+    }
+  }
+
+  return utf8;
+}
+
 async function extractTextFromTxt(filePath: string): Promise<string> {
-  return await fs.readFile(filePath, 'utf8');
+  const buffer = await fs.readFile(filePath);
+  return decodeTxtBuffer(buffer);
 }
 
 async function extractTextFromDocx(filePath: string): Promise<string> {
