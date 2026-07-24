@@ -57,7 +57,17 @@ jobs:
         run: npm install -g pnpm@8.15.9
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "pnpm install failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: Build Core and Prisma client
         run: pnpm run build:core

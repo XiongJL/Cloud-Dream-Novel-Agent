@@ -76,7 +76,18 @@ jobs:
         run: uv sync --frozen --project agent_runtime --extra dev --extra build
 
       - name: Install JavaScript dependencies
-        run: pnpm install --frozen-lockfile
+        shell: pwsh
+        run: |
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            pnpm install --frozen-lockfile
+            if ($LASTEXITCODE -eq 0) {
+              break
+            }
+            if ($attempt -eq 3) {
+              throw "pnpm install failed after 3 attempts"
+            }
+            Start-Sleep -Seconds ($attempt * 15)
+          }
 
       - name: Test Python Runtime
         run: uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime
@@ -194,7 +205,17 @@ jobs:
         run: uv sync --frozen --project agent_runtime --extra dev --extra build
 
       - name: Install JavaScript dependencies
-        run: pnpm install --frozen-lockfile
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "pnpm install failed after 3 attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: Test Python Runtime
         run: uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime
