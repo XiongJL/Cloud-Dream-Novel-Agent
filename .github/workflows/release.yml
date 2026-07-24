@@ -81,6 +81,9 @@ jobs:
       - name: Test Python Runtime
         run: uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime
 
+      - name: Build Core and Prisma client
+        run: pnpm run build:core
+
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
@@ -195,6 +198,9 @@ jobs:
 
       - name: Test Python Runtime
         run: uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime
+
+      - name: Build Core and Prisma client
+        run: pnpm run build:core
 
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
