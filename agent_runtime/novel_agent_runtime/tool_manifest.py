@@ -46,6 +46,103 @@ AGENT_TOOL_MANIFEST: tuple[AgentToolDefinition, ...] = (
     ),
     AgentToolDefinition("chapter.get", "读取指定章节内容。", _object_schema({"chapterId": _ID}, ["chapterId"]), True),
     AgentToolDefinition(
+        "attachment.list",
+        "列出当前小说、当前会话中用户已经发送的文档附件；只返回元数据。",
+        _object_schema({"novelId": _ID, "conversationId": _ID}, ["novelId", "conversationId"]),
+        True,
+    ),
+    AgentToolDefinition(
+        "attachment.get",
+        "兼容接口：按字符窗口读取当前会话附件。优先使用 attachment.read；同时接受 offset/limit 或 startOffset/endOffset。",
+        _object_schema(
+            {
+                "novelId": _ID,
+                "conversationId": _ID,
+                "attachmentId": _ID,
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 12000},
+                "startOffset": {"type": "integer", "minimum": 0},
+                "endOffset": {"type": "integer", "minimum": 0},
+            },
+            ["novelId", "conversationId", "attachmentId"],
+        ),
+        True,
+    ),
+    AgentToolDefinition(
+        "attachment.read",
+        "按通用选择器读取附件。可按任意标题章节、字符范围、页码范围或块范围定位；长范围会按块边界分页并返回 nextSelector。",
+        _object_schema(
+            {
+                "novelId": _ID,
+                "conversationId": _ID,
+                "attachmentId": _ID,
+                "selector": {
+                    "oneOf": [
+                        _object_schema(
+                            {
+                                "kind": {"type": "string", "const": "section"},
+                                "title": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "occurrence": {"type": "integer", "minimum": 1},
+                                "includeSubsections": {"type": "boolean"},
+                            },
+                            ["kind", "title"],
+                        ),
+                        _object_schema(
+                            {
+                                "kind": {"type": "string", "const": "offset_range"},
+                                "startOffset": {"type": "integer", "minimum": 0},
+                                "endOffset": {"type": "integer", "minimum": 0},
+                            },
+                            ["kind", "startOffset", "endOffset"],
+                        ),
+                        _object_schema(
+                            {
+                                "kind": {"type": "string", "const": "page_range"},
+                                "startPage": {"type": "integer", "minimum": 1},
+                                "endPage": {"type": "integer", "minimum": 1},
+                            },
+                            ["kind", "startPage", "endPage"],
+                        ),
+                        _object_schema(
+                            {
+                                "kind": {"type": "string", "const": "block_range"},
+                                "startBlockId": _ID,
+                                "endBlockId": _ID,
+                            },
+                            ["kind", "startBlockId"],
+                        ),
+                    ],
+                },
+            },
+            ["novelId", "conversationId", "attachmentId", "selector"],
+        ),
+        True,
+    ),
+    AgentToolDefinition(
+        "attachment.outline",
+        "读取当前会话附件的标题、页码和块范围目录，不返回完整正文。",
+        _object_schema(
+            {"novelId": _ID, "conversationId": _ID, "attachmentId": _ID},
+            ["novelId", "conversationId", "attachmentId"],
+        ),
+        True,
+    ),
+    AgentToolDefinition(
+        "attachment.search",
+        "在当前会话已发送的附件中搜索关键词，返回少量命中片段和字符偏移；需要完整范围时调用 attachment.read。",
+        _object_schema(
+            {
+                "novelId": _ID,
+                "conversationId": _ID,
+                "query": {"type": "string", "minLength": 1, "maxLength": 200},
+                "attachmentId": _ID,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            ["novelId", "conversationId", "query"],
+        ),
+        True,
+    ),
+    AgentToolDefinition(
         "draft.get",
         "读取指定待审核草稿及其当前版本。",
         _object_schema({"draftSessionId": _ID}, ["draftSessionId"]),

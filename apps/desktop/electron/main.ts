@@ -16,6 +16,8 @@ import { AutomationService } from './automation/AutomationService'
 import { AutomationServer } from './automation/AutomationServer'
 import { PythonRuntimeClient } from './agent/PythonRuntimeClient'
 import { AgentConversationStore, type AgentConversationRecord } from './agent/AgentConversationStore'
+import { AgentAttachmentStore } from './agent/AgentAttachmentStore'
+import { DocumentExtractorClient } from './agent/DocumentExtractorClient'
 import { readNovelFileAsStructure } from './importers/novelImport'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -796,6 +798,53 @@ ipcMain.handle('db:delete-agent-conversation', async (_, conversationId: string)
     }
 });
 
+ipcMain.handle('agent-attachment:select', async (_, payload: { novelId: string; conversationId: string }) => {
+    const result = await dialog.showOpenDialog({
+        title: '添加文档',
+        properties: ['openFile'],
+        filters: [
+            { name: '支持的文档', extensions: ['txt', 'md', 'markdown', 'docx', 'pdf'] },
+            { name: '文本', extensions: ['txt', 'md', 'markdown'] },
+            { name: 'Word 文档', extensions: ['docx'] },
+            { name: 'PDF 文档', extensions: ['pdf'] },
+        ],
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const extracted = await documentExtractorClient.extractFile(result.filePaths[0]);
+    return agentAttachmentStore.create({
+        id: `attachment_${randomUUID().replace(/-/g, '')}`,
+        novelId: payload.novelId,
+        conversationId: payload.conversationId,
+        ...extracted,
+    });
+});
+
+ipcMain.handle('agent-attachment:list', async (_, payload: { novelId: string; conversationId: string }) => (
+    agentAttachmentStore.list(payload.novelId, payload.conversationId)
+));
+
+ipcMain.handle('agent-attachment:get', async (_, payload: { novelId: string; conversationId: string; attachmentId: string }) => (
+    agentAttachmentStore.getContent(payload.novelId, payload.conversationId, payload.attachmentId)
+));
+
+ipcMain.handle('agent-attachment:bind', async (_, payload: {
+    novelId: string;
+    conversationId: string;
+    messageId: string;
+    attachmentIds: string[];
+}) => agentAttachmentStore.bindToMessage(
+    payload.novelId,
+    payload.conversationId,
+    payload.messageId,
+    payload.attachmentIds,
+));
+
+ipcMain.handle('agent-attachment:remove-pending', async (_, payload: {
+    novelId: string;
+    conversationId: string;
+    attachmentId: string;
+}) => agentAttachmentStore.removePending(payload.novelId, payload.conversationId, payload.attachmentId));
+
 ipcMain.handle('db:create-volume', async (_, { novelId, title }: { novelId: string, title: string }) => {
     try {
         const lastVol = await db.volume.findFirst({
@@ -1404,6 +1453,8 @@ let automationService!: AutomationService;
 let automationServer: AutomationServer | null = null;
 let agentRuntimeClient: PythonRuntimeClient | null = null;
 const agentConversationStore = new AgentConversationStore(db);
+const agentAttachmentStore = new AgentAttachmentStore(db);
+const documentExtractorClient = new DocumentExtractorClient();
 const agentRunSubscriptions = new Map<string, () => void>();
 
 async function refreshRagChapterIndex(chapterId: string, reason: string): Promise<void> {
@@ -1887,17 +1938,32 @@ ipcMain.handle('agent:invoke', async (_, payload: {
     method: string;
     params?: Record<string, unknown>;
     context?: Record<string, unknown>;
+    requestId?: string;
 }) => {
     if (!agentRuntimeClient) {
         throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
     }
+    const requestId = String(payload.requestId || '').trim() || randomUUID();
     return agentRuntimeClient.invoke({
-        requestId: randomUUID(),
+        requestId,
         method: payload.method,
         params: payload.params || {},
         context: payload.context || {},
-    });
+    }, payload.method === 'agent.chat' ? (progress) => {
+        win?.webContents.send('agent:chat-progress', { requestId, ...progress });
+    } : undefined);
 });
+
+ipcMain.handle('agent:cancel-chat', async (_, payload: { requestId?: string }) => {
+    if (!agentRuntimeClient) {
+        throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
+    }
+    const requestId = String(payload?.requestId || '').trim();
+    if (!requestId) {
+        throw Object.assign(new Error('requestId is required'), { code: 'INVALID_INPUT' });
+    }
+    return { ok: true, cancelled: await agentRuntimeClient.cancelRequest(requestId) };
+    });
 
 ipcMain.handle('agent:subscribe-run', async (_, payload: { runId: string; afterSequence?: number }) => {
     if (!agentRuntimeClient) {
@@ -3210,6 +3276,7 @@ app.whenReady().then(async () => {
             console.log('[Main] Bundled database schema applied successfully.');
         }
         await agentConversationStore.ensureSchema();
+        await agentAttachmentStore.ensureSchema();
     } catch (error) {
         console.error('[Main] Failed to ensure bundled database schema:', error);
         throw error;
@@ -3218,7 +3285,7 @@ app.whenReady().then(async () => {
     registerRagSummaryIndexRefresh((sourceType, sourceId, reason) => {
         void refreshRagSourceIndex(sourceType, sourceId, reason);
     });
-    automationService = new AutomationService(aiService, () => app.getPath('userData'));
+    automationService = new AutomationService(aiService, () => app.getPath('userData'), agentAttachmentStore);
     automationServer = new AutomationServer(
         automationService,
         () => app.getPath('userData'),

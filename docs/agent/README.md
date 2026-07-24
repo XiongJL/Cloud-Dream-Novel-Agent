@@ -33,6 +33,7 @@ CloudDream Novel Agent 的 Agent 化目标不是把现有编辑器改成聊天�
 | [agent-skill-requirements.md](./agent-skill-requirements.md) | Agent Skill、用户自定义 Skill、版本、解析、Prompt 与安全边界 |
 | [toolchain-requirements.md](./toolchain-requirements.md) | 领域 Toolchain 定义、首批链路、运行约束与验收标准 |
 | [multi-chapter-processing-requirements.md](./multi-chapter-processing-requirements.md) | 多章节统一范围、分层上下文、专家处理、三层审批与批次草稿契约 |
+| [file-import-requirements.md](./file-import-requirements.md) | 首页确定性小说导入、Agent 会话附件、正文追加与创作素材审核导入 |
 | [retry-failover-resilience-requirements.md](./retry-failover-resilience-requirements.md) | 网络请求重试、熔断、Provider/模型切换、Run 恢复与多 Agent 失败恢复 |
 | [ui-and-prototype.md](./ui-and-prototype.md) | Stitch 原型、UI 模块、写作/Agent 数据流 |
 | [sse-event-stream.md](./sse-event-stream.md) | SSE 事件流 v1 设计、事件模型、断线恢复、取消逻辑 |

@@ -16,6 +16,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Paperclip,
   Save,
   RotateCcw,
   Play,
@@ -28,6 +29,7 @@ import {
   UserRound,
   Users,
   Wrench,
+  X,
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'sonner';
@@ -73,6 +75,7 @@ import type {
 import { getExpertReport } from '../../../shared/agentExpertReportProjection';
 import type { DraftBatchRecord } from '../../../shared/draftBatch';
 import type { ReviewCommentRecord } from '../../../shared/reviewComments';
+import type { AgentAttachmentContent, AgentAttachmentRecord } from '../../../shared/agentAttachment';
 import { formatReviewCommentsForConversation } from '../../../shared/reviewComments';
 import {
   pendingAgentStatusLabel,
@@ -123,6 +126,7 @@ type ConversationMessage = {
   createdAt: string;
   contextReads?: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>;
   contextDiagnostics?: AgentContextDiagnostics;
+  attachmentIds?: string[];
 };
 
 const CONTEXT_COMPRESSION_MESSAGE_KIND = 'agent_context_compression_v1';
@@ -436,6 +440,11 @@ function toErrorMessage(error: unknown): string {
   return message;
 }
 
+function isCancelledError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'code' in error && String((error as { code?: unknown }).code) === 'CANCELLED') return true;
+  return /cancelled|canceled|已取消/i.test(error instanceof Error ? error.message : String(error || ''));
+}
+
 function nowId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -554,9 +563,14 @@ export default function AgentWorkspace({
   const [revisionTaskCount, setRevisionTaskCount] = useState(0);
   const [revisionTaskRefreshKey, setRevisionTaskRefreshKey] = useState(0);
   const [pendingAgentStatus, setPendingAgentStatus] = useState<AgentPendingStatus | null>(null);
+  const [activeChatRequestId, setActiveChatRequestId] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<AgentAttachmentRecord[]>([]);
+  const [isAddingAttachment, setIsAddingAttachment] = useState(false);
+  const [viewingAttachment, setViewingAttachment] = useState<AgentAttachmentContent | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
   const runtimeRecoveryRequestRef = useRef<Promise<AgentHealthResult> | null>(null);
   const sendInFlightRef = useRef(false);
+  const activeChatRequestRef = useRef<{ requestId: string; conversationId: string; cancelled: boolean } | null>(null);
   const subscribedRunIdRef = useRef<string | null>(null);
   const lastSequenceRef = useRef(0);
   const consumedInitialGoalRef = useRef<string | null>(null);
@@ -636,6 +650,73 @@ export default function AgentWorkspace({
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0],
     [activeConversationId, conversations],
   );
+  const pendingAttachments = useMemo(
+    () => attachments.filter((attachment) => !attachment.messageId),
+    [attachments],
+  );
+
+  useEffect(() => {
+    const conversationId = activeConversation?.id;
+    if (!conversationId) {
+      setAttachments([]);
+      return;
+    }
+    let cancelled = false;
+    void window.agentAttachments.list({ novelId, conversationId })
+      .then((records) => {
+        if (!cancelled) setAttachments(records);
+      })
+      .catch((error) => {
+        console.warn('[AgentWorkspace] Failed to load attachments:', error);
+        if (!cancelled) setAttachments([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeConversation?.id, novelId]);
+
+  const addAttachment = useCallback(async () => {
+    if (!activeConversation || isAddingAttachment || isWorking) return;
+    if (pendingAttachments.length >= 5) {
+      toast.error('单次最多添加 5 个附件。');
+      return;
+    }
+    setIsAddingAttachment(true);
+    try {
+      await window.db.upsertAgentConversation(activeConversation);
+      const attachment = await window.agentAttachments.select({
+        novelId,
+        conversationId: activeConversation.id,
+      });
+      if (attachment) {
+        setAttachments((current) => [...current.filter((item) => item.id !== attachment.id), attachment]);
+      }
+    } catch (error) {
+      toast.error(toErrorMessage(error));
+    } finally {
+      setIsAddingAttachment(false);
+    }
+  }, [activeConversation, isAddingAttachment, isWorking, novelId, pendingAttachments.length]);
+
+  const removePendingAttachment = useCallback(async (attachmentId: string) => {
+    if (!activeConversation) return;
+    try {
+      await window.agentAttachments.removePending({ novelId, conversationId: activeConversation.id, attachmentId });
+      setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    } catch (error) {
+      toast.error(toErrorMessage(error));
+    }
+  }, [activeConversation, novelId]);
+
+  const openAttachment = useCallback(async (attachmentId: string) => {
+    if (!activeConversation) return;
+    try {
+      const content = await window.agentAttachments.get({ novelId, conversationId: activeConversation.id, attachmentId });
+      setViewingAttachment(content);
+    } catch (error) {
+      toast.error(toErrorMessage(error));
+    }
+  }, [activeConversation, novelId]);
 
   useEffect(() => {
     setSelectedReviewRunId(null);
@@ -692,6 +773,23 @@ export default function AgentWorkspace({
   const clearPendingStatus = useCallback((conversationId: string) => {
     setPendingAgentStatus((current) => current?.conversationId === conversationId ? null : current);
   }, []);
+
+  useEffect(() => window.agent.onChatProgress((progress) => {
+    const active = activeChatRequestRef.current;
+    if (!active || progress.requestId !== active.requestId || active.cancelled) return;
+    if (progress.phase === 'cancelled') {
+      clearPendingStatus(active.conversationId);
+      return;
+    }
+    const phase = progress.phase as AgentPendingPhase;
+    const selector = progress.selector && typeof progress.selector === 'object'
+      ? progress.selector as { kind?: string; title?: string }
+      : null;
+    const detail = selector?.kind === 'section' && selector.title
+      ? `“${selector.title}”`
+      : progress.attachmentId || undefined;
+    setPendingAgentStatus({ conversationId: active.conversationId, phase, detail });
+  }), [clearPendingStatus]);
 
   useEffect(() => {
     if (pendingAgentStatus?.phase !== 'thinking') return;
@@ -1532,8 +1630,9 @@ export default function AgentWorkspace({
 
   const sendChat = async (messageOverride?: string) => {
     if (!activeConversation) return;
-    const message = (messageOverride ?? input).trim();
-    if (!message || isWorking || isRuntimeRecoveryPending || sendInFlightRef.current) return;
+    const rawMessage = (messageOverride ?? input).trim();
+    if ((!rawMessage && pendingAttachments.length === 0) || isWorking || isRuntimeRecoveryPending || sendInFlightRef.current) return;
+    const message = rawMessage || '请读取并分析附件。';
     const conversationId = activeConversation.id;
     if (!chapterScopeReady) {
       updateConversation(conversationId, (conversation) => ({ ...conversation, error: '请先完成章节范围选择。' }));
@@ -1553,18 +1652,47 @@ export default function AgentWorkspace({
     const runtimeConversationId = activeConversation.runtimeConversationId;
     const userMessageId = nowId('msg');
     const userCreatedAt = new Date().toISOString();
+    let sentAttachments: AgentAttachmentRecord[] = [];
+    if (pendingAttachments.length) {
+      try {
+        sentAttachments = await window.agentAttachments.bind({
+          novelId,
+          conversationId,
+          messageId: userMessageId,
+          attachmentIds: pendingAttachments.map((attachment) => attachment.id),
+        });
+        setAttachments((current) => current.map((attachment) => (
+          sentAttachments.find((sent) => sent.id === attachment.id) ?? attachment
+        )));
+      } catch (error) {
+        updateConversation(conversationId, (conversation) => ({ ...conversation, error: toErrorMessage(error) }));
+        sendInFlightRef.current = false;
+        return;
+      }
+    }
     if (messageOverride === undefined) setInput('');
     scrollToLatest();
-    appendMessage(conversationId, { role: 'user', content: message }, {
+    appendMessage(conversationId, {
+      role: 'user',
+      content: message,
+      attachmentIds: sentAttachments.map((attachment) => attachment.id),
+    }, {
       startNewTurnAfterTerminal: true,
       messageId: userMessageId,
       createdAt: userCreatedAt,
     });
     setIsWorking(true);
     setPendingPhase(conversationId, 'thinking');
+    const chatRequestId = nowId('chat_request');
+    activeChatRequestRef.current = { requestId: chatRequestId, conversationId, cancelled: false };
+    setActiveChatRequestId(chatRequestId);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
     let startedRetryRun = false;
     try {
+      const availableAttachments = [
+        ...attachments.filter((attachment) => Boolean(attachment.messageId)),
+        ...sentAttachments,
+      ].filter((attachment, index, items) => items.findIndex((item) => item.id === attachment.id) === index);
       const response = await window.agent.chat({
         novelId,
         novelTitle: novel?.title,
@@ -1573,6 +1701,12 @@ export default function AgentWorkspace({
         chapterTitle: currentChapter?.title,
         message,
         conversationId: runtimeConversationId,
+        agentConversationId: conversationId,
+        attachments: availableAttachments.map((attachment) => ({
+          attachmentId: attachment.id,
+          fileName: attachment.originalFileName,
+          characterCount: attachment.characterCount,
+        })),
         currentContent,
         currentContentText,
         locale,
@@ -1608,7 +1742,7 @@ export default function AgentWorkspace({
           })),
         },
         context: contextPayload,
-      });
+      }, { requestId: chatRequestId });
       const shouldDraftPlan = !response.awaitingUserInput
         && (response.suggestedActions?.some((action) => action.method === 'agent.plan') ?? false);
       const recovery = response.intentDecision?.route === 'retry_failed_run'
@@ -1659,16 +1793,32 @@ export default function AgentWorkspace({
       }
     } catch (err) {
       clearPendingStatus(conversationId);
-      updateConversation(conversationId, (conversation) => ({
-        ...conversation,
-        error: toErrorMessage(err),
-      }));
+      if (!activeChatRequestRef.current?.cancelled && !isCancelledError(err)) {
+        updateConversation(conversationId, (conversation) => ({
+          ...conversation,
+          error: toErrorMessage(err),
+        }));
+      }
     } finally {
       clearPendingStatus(conversationId);
       if (!startedRetryRun) setIsWorking(false);
       sendInFlightRef.current = false;
+      if (activeChatRequestRef.current?.requestId === chatRequestId) activeChatRequestRef.current = null;
+      setActiveChatRequestId((current) => current === chatRequestId ? null : current);
     }
   };
+
+  const cancelActiveChat = useCallback(async () => {
+    const active = activeChatRequestRef.current;
+    if (!active || active.cancelled) return;
+    active.cancelled = true;
+    clearPendingStatus(active.conversationId);
+    try {
+      await window.agent.cancelChat({ requestId: active.requestId });
+    } catch (error) {
+      if (!isCancelledError(error)) toast.error(toErrorMessage(error));
+    }
+  }, [clearPendingStatus]);
 
   const submitApproval = async (approval: AgentApprovalRequest, selectedOptionIds: string[], freeText: string) => {
     if (!activeConversation || !activeRun) return;
@@ -2368,7 +2518,15 @@ export default function AgentWorkspace({
             <div className="mx-auto w-full max-w-[880px] space-y-4">
             {activeTimeline.map((entry) => {
               if (entry.kind === 'message') {
-                return <MessageBubble key={entry.key} message={entry.message} isDark={isDark} />;
+                return (
+                  <MessageBubble
+                    key={entry.key}
+                    message={entry.message}
+                    attachments={attachments.filter((attachment) => entry.message.attachmentIds?.includes(attachment.id))}
+                    isDark={isDark}
+                    onOpenAttachment={openAttachment}
+                  />
+                );
               }
               const timelineRun = entry.run as AgentRun | null;
               const timelinePlan = entry.plan as AgentPlan;
@@ -2509,6 +2667,33 @@ export default function AgentWorkspace({
 
         <div className={clsx('border-t p-4', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
           <div className={clsx('mx-auto max-w-[880px] rounded-lg border p-2', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
+            {pendingAttachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5 px-1">
+                {pendingAttachments.map((attachment) => (
+                  <div
+                    key={attachment.id}
+                    className={clsx(
+                      'inline-flex h-7 max-w-full items-center gap-1.5 rounded border px-2 text-xs',
+                      isDark ? 'border-white/10 bg-white/5 text-neutral-300' : 'border-[var(--ui-border)] bg-[var(--ui-surface-muted)] text-[var(--ui-text-secondary)]',
+                    )}
+                  >
+                    <FileText className="h-3.5 w-3.5 shrink-0" />
+                    <button type="button" className="truncate" onClick={() => void openAttachment(attachment.id)}>
+                      {attachment.originalFileName}
+                    </button>
+                    <span className="shrink-0 opacity-60">{attachment.characterCount.toLocaleString()} 字</span>
+                    <button
+                      type="button"
+                      className="grid h-5 w-5 shrink-0 place-items-center rounded hover:bg-black/10"
+                      onClick={() => void removePendingAttachment(attachment.id)}
+                      title="移除附件"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <textarea
               ref={chatInputRef}
               value={input}
@@ -2526,6 +2711,18 @@ export default function AgentWorkspace({
             />
             <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
               <div className="min-w-0 flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void addAttachment()}
+                  disabled={isWorking || isRuntimeRecoveryPending || isAddingAttachment}
+                  title="添加文档"
+                  className={clsx(
+                    'grid h-8 w-8 shrink-0 place-items-center rounded-md border disabled:opacity-40',
+                    isDark ? 'border-white/10 text-neutral-400 hover:bg-white/10' : 'border-[var(--ui-border)] text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]',
+                  )}
+                >
+                  {isAddingAttachment ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
+                </button>
                 <ChapterScopeSelector
                   isDark={isDark}
                   value={chapterScope}
@@ -2603,17 +2800,17 @@ export default function AgentWorkspace({
               </div>
               <button
                 type="button"
-                onClick={() => void sendChat()}
-                disabled={isWorking || isRuntimeRecoveryPending || !input.trim() || !chapterScopeReady}
-                title={!chapterScopeReady ? '请先完成章节范围选择' : '发送'}
+                onClick={() => activeChatRequestId ? void cancelActiveChat() : void sendChat()}
+                disabled={!activeChatRequestId && (isWorking || isRuntimeRecoveryPending || (!input.trim() && pendingAttachments.length === 0) || !chapterScopeReady)}
+                title={activeChatRequestId ? '停止生成' : !chapterScopeReady ? '请先完成章节范围选择' : '发送'}
                 className={clsx(
                   'h-8 min-w-[64px] shrink-0 whitespace-nowrap rounded-md px-2.5 inline-flex items-center justify-center gap-1.5 text-xs text-white disabled:opacity-40',
                   'max-[640px]:w-8 max-[640px]:min-w-8 max-[640px]:px-0',
                   isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600',
                 )}
               >
-                <Send className="h-4 w-4" />
-                <span className="max-[640px]:sr-only">发送</span>
+                {activeChatRequestId ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+                <span className="max-[640px]:sr-only">{activeChatRequestId ? '停止' : '发送'}</span>
               </button>
             </div>
           </div>
@@ -2626,6 +2823,13 @@ export default function AgentWorkspace({
           className="absolute inset-0 z-30 bg-black/20 min-[1041px]:hidden"
           onClick={() => setInspectorVisibility(false)}
           aria-label="关闭 Inspector"
+        />
+      )}
+      {viewingAttachment && (
+        <AttachmentViewer
+          attachment={viewingAttachment}
+          isDark={isDark}
+          onClose={() => setViewingAttachment(null)}
         />
       )}
       {inspectorVisible && <InspectorPanel
@@ -2662,7 +2866,17 @@ export default function AgentWorkspace({
   );
 }
 
-function MessageBubble({ message, isDark }: { message: ConversationMessage; isDark: boolean }) {
+function MessageBubble({
+  message,
+  attachments,
+  isDark,
+  onOpenAttachment,
+}: {
+  message: ConversationMessage;
+  attachments: AgentAttachmentRecord[];
+  isDark: boolean;
+  onOpenAttachment: (attachmentId: string) => void;
+}) {
   if (message.role === 'system') {
     return <ContextCompressionNotice message={message} isDark={isDark} />;
   }
@@ -2678,6 +2892,24 @@ function MessageBubble({ message, isDark }: { message: ConversationMessage; isDa
         ? (isDark ? 'border-white/10 bg-white/10' : 'border-[var(--ui-border)] bg-white')
         : (isDark ? 'border-white/10 bg-[#111827]' : 'border-[var(--ui-border)] bg-[var(--ui-surface-muted)]'))}
       >
+        {attachments.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {attachments.map((attachment) => (
+              <button
+                key={attachment.id}
+                type="button"
+                onClick={() => onOpenAttachment(attachment.id)}
+                className={clsx(
+                  'inline-flex max-w-full items-center gap-1.5 rounded border px-2 py-1 text-xs',
+                  isDark ? 'border-white/10 bg-black/15 text-neutral-300' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)] text-[var(--ui-text-secondary)]',
+                )}
+              >
+                <FileText className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate">{attachment.originalFileName}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {!isUser && message.contextReads && message.contextReads.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {message.contextReads.map((read, index) => (
@@ -2704,6 +2936,47 @@ function MessageBubble({ message, isDark }: { message: ConversationMessage; isDa
           <UserRound className="h-4 w-4" />
         </div>
       )}
+    </div>
+  );
+}
+
+function AttachmentViewer({
+  attachment,
+  isDark,
+  onClose,
+}: {
+  attachment: AgentAttachmentContent;
+  isDark: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-50 grid place-items-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label={attachment.originalFileName}>
+      <div className={clsx(
+        'flex h-[min(82vh,760px)] w-[min(880px,94vw)] flex-col overflow-hidden rounded-lg border shadow-2xl',
+        isDark ? 'border-white/10 bg-[#17171c] text-neutral-200' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-primary)]',
+      )}>
+        <div className={clsx('flex items-center gap-3 border-b px-4 py-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+          <FileText className="h-4 w-4 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold">{attachment.originalFileName}</div>
+            <div className={clsx('text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+              {attachment.extension.toUpperCase()} · {attachment.characterCount.toLocaleString()} 字
+              {attachment.pageCount ? ` · ${attachment.pageCount} 页` : ''}
+            </div>
+          </div>
+          <button type="button" onClick={onClose} title="关闭" className="grid h-8 w-8 place-items-center rounded-md hover:bg-black/10">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        {attachment.warnings.length > 0 && (
+          <div className={clsx('border-b px-4 py-2 text-xs', isDark ? 'border-white/10 bg-amber-500/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800')}>
+            {attachment.warnings.map((warning) => warning.message).join('；')}
+          </div>
+        )}
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-7">{attachment.plainText}</pre>
+        </div>
+      </div>
     </div>
   );
 }

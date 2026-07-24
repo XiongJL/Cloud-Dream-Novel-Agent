@@ -187,3 +187,129 @@ def test_cancellation_interrupts_retry_backoff(tmp_path: Path) -> None:
         assert calls == 1
 
     asyncio.run(scenario())
+
+
+def test_fourth_model_turn_tool_call_executes_before_forced_finalization(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        model_calls = 0
+        executed: list[int] = []
+        phases: list[str] = []
+
+        async def model_call(state: ExplorationState) -> dict[str, Any]:
+            nonlocal model_calls
+            model_calls += 1
+            if state.get("force_finalization"):
+                return {"content": "已汇总全部四段。", "toolCalls": []}
+            return {
+                "content": f"已累计到第 {model_calls - 1} 段，继续读取。",
+                "toolCalls": [{"name": "attachment.read", "args": {"chunk": model_calls}}],
+            }
+
+        async def tool_call(_name: str, args: dict[str, Any]) -> Any:
+            executed.append(int(args["chunk"]))
+            return {"text": f"chunk-{args['chunk']}"}
+
+        async def progress(phase: str, _details: dict[str, Any]) -> None:
+            phases.append(phase)
+
+        graph = AgentExplorationGraph(
+            tmp_path / "fourth-turn.db",
+            ["attachment.read"],
+            max_iterations=4,
+            max_tool_calls=8,
+            retry_policy=fast_retry_policy(),
+        )
+        result = await graph.run(
+            "thread-fourth-turn",
+            initial_state(),
+            model_call,
+            tool_call,
+            on_progress=progress,
+            soft_iterations=4,
+        )
+
+        assert executed == [1, 2, 3, 4]
+        assert model_calls == 5
+        assert result["decision"]["content"] == "已汇总全部四段。"
+        assert result["decision"]["toolCalls"] == []
+        assert "extending" in phases
+        assert phases[-1] == "finalizing"
+
+    asyncio.run(scenario())
+
+
+def test_successful_attachment_read_prunes_discovery_and_old_raw_chunks(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        turn = 0
+
+        async def model_call(state: ExplorationState) -> dict[str, Any]:
+            nonlocal turn
+            turn += 1
+            if turn == 1:
+                return {"content": "定位", "toolCalls": [{"name": "attachment.search", "args": {}}]}
+            if turn == 2:
+                return {"content": "发现甲", "toolCalls": [{"name": "attachment.read", "args": {"chunk": 1}}]}
+            if turn == 3:
+                assert all(item["toolName"] != "attachment.search" for item in state["observations"])
+                return {"content": "发现甲、乙", "toolCalls": [{"name": "attachment.read", "args": {"chunk": 2}}]}
+            previous_reads = [item for item in state["observations"] if item["toolName"] == "attachment.read"]
+            assert previous_reads[0]["result"]["superseded"] is True
+            assert "text" not in previous_reads[0]["result"]
+            assert previous_reads[-1]["result"]["text"] == "raw-2"
+            assert state["exploration_notes"][-1] == "发现甲、乙"
+            return {"content": "完成", "toolCalls": []}
+
+        async def tool_call(name: str, args: dict[str, Any]) -> Any:
+            if name == "attachment.search":
+                return {"matches": [1]}
+            return {"attachmentId": "a", "status": "resolved", "actualRange": args, "text": f"raw-{args['chunk']}"}
+
+        graph = AgentExplorationGraph(
+            tmp_path / "compact.db",
+            ["attachment.search", "attachment.read"],
+            retry_policy=fast_retry_policy(),
+        )
+        result = await graph.run("thread-compact", initial_state(), model_call, tool_call)
+        assert len(result["audit_observations"]) == 3
+        assert result["decision"]["content"] == "完成"
+
+    asyncio.run(scenario())
+
+
+def test_soft_limit_only_extends_for_a_new_tool_read(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        model_calls = 0
+        tool_calls = 0
+
+        async def model_call(state: ExplorationState) -> dict[str, Any]:
+            nonlocal model_calls
+            model_calls += 1
+            if state.get("force_finalization"):
+                return {"content": "重复读取没有新增信息，按已覆盖范围总结。", "toolCalls": []}
+            return {
+                "content": "继续读取",
+                "toolCalls": [{"name": "attachment.read", "args": {"selector": {"kind": "offset_range", "startOffset": 0, "endOffset": 10}}}],
+            }
+
+        async def tool_call(_name: str, _args: dict[str, Any]) -> Any:
+            nonlocal tool_calls
+            tool_calls += 1
+            return {"text": "same"}
+
+        graph = AgentExplorationGraph(
+            tmp_path / "no-progress.db",
+            ["attachment.read"],
+            retry_policy=fast_retry_policy(),
+        )
+        result = await graph.run(
+            "thread-no-progress",
+            initial_state(),
+            model_call,
+            tool_call,
+            soft_iterations=2,
+        )
+        assert tool_calls == 1
+        assert model_calls == 3
+        assert result["decision"]["content"].startswith("重复读取没有新增信息")
+
+    asyncio.run(scenario())

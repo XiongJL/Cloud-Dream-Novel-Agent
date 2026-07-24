@@ -52,6 +52,7 @@ import type {
     ReviewCommentRecord,
     ReviewCommentSaveInput,
 } from '../../shared/reviewComments';
+import { AgentAttachmentStore } from '../agent/AgentAttachmentStore';
 
 const EMPTY_CREATIVE_DRAFT: CreativeAssetsDraft = {
     plotLines: [],
@@ -67,6 +68,11 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'volume.list': 15000,
     'chapter.list': 15000,
     'chapter.get': 15000,
+    'attachment.list': 15000,
+    'attachment.get': 15000,
+    'attachment.read': 15000,
+    'attachment.outline': 15000,
+    'attachment.search': 15000,
     'chapter.scope_context.build': 60000,
     'plotline.list': 15000,
     'character.list': 15000,
@@ -259,13 +265,15 @@ export class AutomationService {
     private readonly draftStore: DraftSessionStore;
     private readonly reviewStore: AgentReviewStore;
     private readonly reviewCommentStore: ReviewCommentStore;
+    private readonly attachmentStore: AgentAttachmentStore;
     private draftBatchCommitTail: Promise<void> = Promise.resolve();
 
-    constructor(aiService: AiService, getUserDataPath: () => string) {
+    constructor(aiService: AiService, getUserDataPath: () => string, attachmentStore = new AgentAttachmentStore(db)) {
         this.aiService = aiService;
         this.draftStore = new DraftSessionStore(getUserDataPath);
         this.reviewStore = new AgentReviewStore(db);
         this.reviewCommentStore = new ReviewCommentStore(getUserDataPath);
+        this.attachmentStore = attachmentStore;
     }
 
     private async createRevisionTaskPlan(
@@ -1546,6 +1554,40 @@ export class AutomationService {
                     return this.reviewStore.syncRevisionTasksFromRun(params as import('../../shared/expertReport').RevisionTaskSyncRunInput);
                 case 'rag.ask':
                     return this.aiService.askNovel(params, context.signal);
+                case 'attachment.list':
+                    return (await this.attachmentStore.list(
+                        assertRequiredString(params?.novelId, 'novelId'),
+                        assertRequiredString(params?.conversationId, 'conversationId'),
+                    )).filter((attachment) => Boolean(attachment.messageId));
+                case 'attachment.get':
+                    return this.attachmentStore.readWindow({
+                        novelId: assertRequiredString(params?.novelId, 'novelId'),
+                        conversationId: assertRequiredString(params?.conversationId, 'conversationId'),
+                        attachmentId: assertRequiredString(params?.attachmentId, 'attachmentId'),
+                        offset: params?.offset,
+                        limit: params?.limit,
+                    });
+                case 'attachment.read':
+                    return this.attachmentStore.read({
+                        novelId: assertRequiredString(params?.novelId, 'novelId'),
+                        conversationId: assertRequiredString(params?.conversationId, 'conversationId'),
+                        attachmentId: assertRequiredString(params?.attachmentId, 'attachmentId'),
+                        selector: params?.selector,
+                    });
+                case 'attachment.outline':
+                    return this.attachmentStore.outline(
+                        assertRequiredString(params?.novelId, 'novelId'),
+                        assertRequiredString(params?.conversationId, 'conversationId'),
+                        assertRequiredString(params?.attachmentId, 'attachmentId'),
+                    );
+                case 'attachment.search':
+                    return this.attachmentStore.search({
+                        novelId: assertRequiredString(params?.novelId, 'novelId'),
+                        conversationId: assertRequiredString(params?.conversationId, 'conversationId'),
+                        query: assertRequiredString(params?.query, 'query'),
+                        attachmentId: typeof params?.attachmentId === 'string' ? params.attachmentId : undefined,
+                        limit: params?.limit,
+                    });
                 case 'draft.list':
                     return this.listDrafts(params);
                 case 'draft.get':

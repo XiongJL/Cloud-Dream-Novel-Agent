@@ -85,6 +85,7 @@ export type AgentConversationRecord = {
         createdAt: string;
         contextReads?: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>;
         contextDiagnostics?: Record<string, unknown>;
+        attachmentIds?: string[];
     }>;
 };
 
@@ -396,6 +397,9 @@ export class AgentConversationStore {
                         ...(record.contextDiagnostics && typeof record.contextDiagnostics === 'object'
                             ? { contextDiagnostics: record.contextDiagnostics as Record<string, unknown> }
                             : {}),
+                        ...(Array.isArray(record.attachmentIds)
+                            ? { attachmentIds: record.attachmentIds.filter((id): id is string => typeof id === 'string') }
+                            : {}),
                     };
                 }),
             });
@@ -431,6 +435,7 @@ export class AgentConversationStore {
                 const metadata = {
                     ...(message.contextReads?.length ? { contextReads: message.contextReads } : {}),
                     ...(message.contextDiagnostics ? { contextDiagnostics: message.contextDiagnostics } : {}),
+                    ...(message.attachmentIds?.length ? { attachmentIds: message.attachmentIds } : {}),
                 };
                 await this.db.$executeRawUnsafe(`
                     INSERT INTO AgentMessage (id, conversationId, role, content, metadataJson, createdAt) VALUES (?, ?, ?, ?, ?, ?)

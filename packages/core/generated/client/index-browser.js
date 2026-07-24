@@ -166,6 +166,28 @@ exports.Prisma.AgentMessageScalarFieldEnum = {
   createdAt: 'createdAt'
 };
 
+exports.Prisma.AgentAttachmentScalarFieldEnum = {
+  id: 'id',
+  novelId: 'novelId',
+  conversationId: 'conversationId',
+  messageId: 'messageId',
+  originalFileName: 'originalFileName',
+  extension: 'extension',
+  mimeType: 'mimeType',
+  sizeBytes: 'sizeBytes',
+  characterCount: 'characterCount',
+  contentHash: 'contentHash',
+  plainText: 'plainText',
+  extractedContentJson: 'extractedContentJson',
+  extractionMetaJson: 'extractionMetaJson',
+  extractorVersion: 'extractorVersion',
+  status: 'status',
+  errorCode: 'errorCode',
+  errorMessage: 'errorMessage',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
 exports.Prisma.AgentRunScalarFieldEnum = {
   runId: 'runId',
   conversationId: 'conversationId',
@@ -477,6 +499,7 @@ exports.Prisma.ModelName = {
   Chapter: 'Chapter',
   AgentConversation: 'AgentConversation',
   AgentMessage: 'AgentMessage',
+  AgentAttachment: 'AgentAttachment',
   AgentRun: 'AgentRun',
   AgentRunEvent: 'AgentRunEvent',
   AgentArtifact: 'AgentArtifact',

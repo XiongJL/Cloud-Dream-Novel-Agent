@@ -645,6 +645,14 @@ interface ChapterDraftPayload {
     sourceSnapshot?: import('../shared/draftBatch').DraftBatchSourceSnapshot
 }
 
+interface AgentAttachmentsAPI {
+    select: (payload: { novelId: string; conversationId: string }) => Promise<import('../shared/agentAttachment').AgentAttachmentRecord | null>
+    list: (payload: { novelId: string; conversationId: string }) => Promise<import('../shared/agentAttachment').AgentAttachmentRecord[]>
+    get: (payload: { novelId: string; conversationId: string; attachmentId: string }) => Promise<import('../shared/agentAttachment').AgentAttachmentContent>
+    bind: (payload: { novelId: string; conversationId: string; messageId: string; attachmentIds: string[] }) => Promise<import('../shared/agentAttachment').AgentAttachmentRecord[]>
+    removePending: (payload: { novelId: string; conversationId: string; attachmentId: string }) => Promise<{ ok: true }>
+}
+
 interface DraftSessionRecord {
     draftSessionId: string
     workspace: 'ai-workbench' | 'chapter-editor'
@@ -730,6 +738,7 @@ interface AgentConversationMessageRecord {
     createdAt: string
     contextReads?: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>
     contextDiagnostics?: AgentContextDiagnostics
+    attachmentIds?: string[]
 }
 
 interface AgentConversationSummaryEntry {
@@ -1072,7 +1081,16 @@ interface AgentAPI {
     ensureReady: () => Promise<AgentHealthResult>
     restart: () => Promise<AgentHealthResult>
     roles: (payload?: Record<string, unknown>) => Promise<AgentRoleDefinition[]>
-    chat: (payload: Record<string, unknown>) => Promise<AgentChatResponse>
+    chat: (payload: Record<string, unknown>, options?: { requestId?: string }) => Promise<AgentChatResponse>
+    cancelChat: (payload: { requestId: string }) => Promise<{ ok: boolean; cancelled: boolean }>
+    onChatProgress: (callback: (payload: {
+        requestId: string
+        sequence: number
+        phase: 'thinking' | 'reading' | 'extending' | 'finalizing' | 'cancelled'
+        toolName?: string
+        attachmentId?: string
+        selector?: unknown
+    }) => void) => () => void
     plan: (payload: Record<string, unknown>) => Promise<AgentPlan>
     registerPlan: (payload: Record<string, unknown>) => Promise<AgentPlan>
     revisePlan: (payload: Record<string, unknown>) => Promise<AgentPlan>
@@ -1140,4 +1158,5 @@ interface Window {
     ai: AIAPI
     automation: AutomationAPI
     agent: AgentAPI
+    agentAttachments: AgentAttachmentsAPI
 }

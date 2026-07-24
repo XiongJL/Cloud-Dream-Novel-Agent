@@ -41,6 +41,15 @@ type AgentInvokeEnvelope = {
     context?: Record<string, unknown>;
 };
 
+export type AgentChatProgress = {
+    sequence: number;
+    phase: 'thinking' | 'reading' | 'extending' | 'finalizing' | 'cancelled';
+    toolName?: string;
+    attachmentId?: string;
+    selector?: unknown;
+    [key: string]: unknown;
+};
+
 type PythonRuntimeClientOptions = {
     getUserDataPath: () => string;
     getAutomationRuntimePath: () => string;
@@ -368,7 +377,7 @@ export class PythonRuntimeClient {
         return true;
     }
 
-    async invoke(envelope: AgentInvokeEnvelope): Promise<unknown> {
+    async invoke(envelope: AgentInvokeEnvelope, onProgress?: (progress: AgentChatProgress) => void): Promise<unknown> {
         this.activeInvocations += 1;
         try {
             const health = await this.ensureReady();
@@ -379,7 +388,7 @@ export class PythonRuntimeClient {
                 });
             }
             try {
-                return await this.invokeOnce(envelope);
+                return await this.invokeOnce(envelope, onProgress);
             } catch (error) {
                 if (!isRecoverableRuntimeConnectionError(error)) {
                     throw error;
@@ -402,36 +411,80 @@ export class PythonRuntimeClient {
                         details: recovered.data,
                     });
                 }
-                return this.invokeOnce(envelope);
+                return this.invokeOnce(envelope, onProgress);
             }
         } finally {
             this.activeInvocations = Math.max(0, this.activeInvocations - 1);
         }
     }
 
-    private async invokeOnce(envelope: AgentInvokeEnvelope): Promise<unknown> {
+    private async invokeOnce(envelope: AgentInvokeEnvelope, onProgress?: (progress: AgentChatProgress) => void): Promise<unknown> {
         const port = this.port;
         const token = this.token;
-        const response = await requestJson(
-            port,
-            '/invoke',
-            token,
-            {
-                requestId: envelope.requestId || randomUUID(),
+        const requestId = envelope.requestId || randomUUID();
+        let lastSequence = 0;
+        let polling = false;
+        const pollProgress = async () => {
+            if (!onProgress || polling) return;
+            polling = true;
+            try {
+                const snapshot = await requestJson(port, `/progress/${encodeURIComponent(requestId)}?afterSequence=${lastSequence}`, token, undefined, 2000);
+                const events = (snapshot.data as { events?: AgentChatProgress[] } | undefined)?.events || [];
+                for (const progress of events) {
+                    if (Number(progress.sequence) > lastSequence) {
+                        lastSequence = Number(progress.sequence);
+                        onProgress(progress);
+                    }
+                }
+            } catch {
+                // Progress is advisory; the invoke response remains authoritative.
+            } finally {
+                polling = false;
+            }
+        };
+        const timer = onProgress ? setInterval(() => void pollProgress(), 300) : undefined;
+        try {
+            const response = await requestJson(
+                port,
+                '/invoke',
+                token,
+                {
+                requestId,
                 method: envelope.method,
                 params: envelope.params || {},
                 context: envelope.context || {},
-            },
-            180000,
-        );
-        this.markHealthy();
-        if (!response.ok) {
-            throw Object.assign(new Error(response.message || 'Agent runtime failed'), {
-                code: response.code || 'AGENT_RUNTIME_ERROR',
-                details: response.data,
-            });
+                },
+                180000,
+            );
+            if (timer) clearInterval(timer);
+            while (polling) {
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            await pollProgress();
+            this.markHealthy();
+            if (!response.ok) {
+                throw Object.assign(new Error(response.message || 'Agent runtime failed'), {
+                    code: response.code || 'AGENT_RUNTIME_ERROR',
+                    details: response.data,
+                });
+            }
+            return response.data;
+        } finally {
+            if (timer) clearInterval(timer);
         }
-        return response.data;
+    }
+
+    async cancelRequest(requestId: string): Promise<boolean> {
+        const normalized = String(requestId || '').trim();
+        if (!normalized || this.port <= 0) return false;
+        const response = await requestJson(
+            this.port,
+            '/cancel',
+            this.token,
+            { requestId: normalized },
+            10000,
+        );
+        return Boolean(response.ok && (response.data as { cancelled?: unknown } | undefined)?.cancelled);
     }
 
     async subscribeRunEvents(

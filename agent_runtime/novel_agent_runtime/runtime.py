@@ -338,7 +338,12 @@ class NovelAgentRuntime:
             next_steps.append(step.model_copy(update={"toolchain": next_invocation}))
         return plan.model_copy(update={"steps": next_steps})
 
-    async def chat(self, params: dict[str, Any], context: dict[str, Any]) -> AgentChatResponse:
+    async def chat(
+        self,
+        params: dict[str, Any],
+        context: dict[str, Any],
+        on_progress: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> AgentChatResponse:
         message = str(params.get("message") or "").strip()
         conversation_id = str(params.get("conversationId") or new_id("conv"))
         role = str(params.get("role") or "team")
@@ -375,6 +380,7 @@ class NovelAgentRuntime:
             "novelId": str(params.get("novelId") or context.get("novelId") or ""),
             "volumeId": str(params.get("volumeId") or context.get("volumeId") or ""),
             "chapterId": str(params.get("chapterId") or context.get("chapterId") or ""),
+            "agentConversationId": str(params.get("agentConversationId") or ""),
         }
         selection_context = {
             **exploration_context,
@@ -382,6 +388,49 @@ class NovelAgentRuntime:
             "chapterTitle": str(params.get("chapterTitle") or context.get("chapterTitle") or ""),
             "currentContent": str(params.get("currentContentText") or ""),
         }
+        attachment_context = params.get("attachments")
+        if isinstance(attachment_context, list) and attachment_context:
+            selection_context["attachmentScope"] = {
+                "novelId": exploration_context["novelId"],
+                "conversationId": exploration_context["agentConversationId"],
+            }
+            selection_context["attachments"] = [
+                {
+                    "attachmentId": str(item.get("attachmentId") or item.get("id") or ""),
+                    "fileName": str(item.get("fileName") or item.get("originalFileName") or ""),
+                    "characterCount": int(item.get("characterCount") or 0),
+                }
+                for item in attachment_context
+                if isinstance(item, dict) and (item.get("attachmentId") or item.get("id"))
+            ]
+        has_attachments = bool(selection_context.get("attachments"))
+        role_definition = next((item for item in list_agent_roles(locale) if item.id == role), None)
+        role_read_tools = set(role_definition.tools if role_definition else READ_ONLY_AGENT_TOOLS)
+        normalized_attachment_message = message.lower()
+        attachment_focused = has_attachments and any(marker in normalized_attachment_message for marker in (
+            "附件", "文档", "文件", "attachment", "attached", "document", "file",
+        ))
+        available_read_tools = (
+            [
+                name for name in READ_ONLY_AGENT_TOOLS
+                if name in role_read_tools
+                and (has_attachments or not name.startswith("attachment."))
+                and not (has_attachments and name == "attachment.list")
+                and (not attachment_focused or name.startswith("attachment."))
+            ]
+            if approval_mode != "chat_only"
+            else []
+        )
+        available_read_tool_definitions = [
+            {
+                "name": definition.name,
+                "description": definition.description,
+                "inputSchema": definition.input_schema,
+            }
+            for name in available_read_tools
+            if (definition := AGENT_TOOL_BY_NAME.get(name)) is not None
+        ]
+        request_id = str(context.get("_requestId") or params.get("requestId") or "").strip() or None
         explicit_scope = self._explicit_chapter_scope(params, context, goal=message)
         if explicit_scope:
             selection_context["chapterScope"] = explicit_scope
@@ -450,6 +499,7 @@ class NovelAgentRuntime:
         )
 
         async def model_call(graph_state: ExplorationState) -> dict[str, Any]:
+            finalizing = bool(graph_state.get("force_finalization"))
             result = await self.automation.invoke(
                 "agent.generate_chat",
                 {
@@ -458,15 +508,19 @@ class NovelAgentRuntime:
                     "approvalMode": approval_mode,
                     "locale": locale,
                     "history": [item.model_dump() for item in history],
-                    "availableReadTools": READ_ONLY_AGENT_TOOLS if approval_mode != "chat_only" else [],
+                    "availableReadTools": [] if finalizing else available_read_tools,
+                    "availableReadToolDefinitions": [] if finalizing else available_read_tool_definitions,
                     "availableOperations": INTENT_OPERATION_REGISTRY.list_public(),
                     "intentPreflight": preflight.model_dump(),
                     "selectionContext": selection_context,
                     "toolObservations": graph_state["observations"],
+                    "explorationNotes": graph_state.get("exploration_notes") or [],
+                    "forceFinalization": finalizing,
                     "conversationContext": conversation_context,
                     "persistentSummary": persistent_summary,
                 },
                 "desktop-ui",
+                request_id=request_id,
             )
             if not isinstance(result, dict):
                 return {}
@@ -501,6 +555,7 @@ class NovelAgentRuntime:
                 message,
                 exploration_context,
                 locale,
+                request_id,
             )
 
         if self.intent_service.retry_failed_run_action(intent_request) is not None:
@@ -523,9 +578,20 @@ class NovelAgentRuntime:
                     pending_tool_calls=[],
                     decision={},
                     iterations=0,
+                    audit_observations=[],
+                    exploration_notes=[],
+                    force_finalization=False,
+                    extended=False,
                 ),
                 model_call,
                 tool_call,
+                on_progress=on_progress,
+                soft_iterations=(
+                    6 if isinstance(attachment_context, list) and (
+                        len(attachment_context) > 1
+                        or any(int(item.get("characterCount") or 0) > 12000 for item in attachment_context if isinstance(item, dict))
+                    ) else 4
+                ),
             )
         result = graph_result["decision"]
         if not isinstance(result, dict) or not str(result.get("content") or "").strip():
@@ -585,6 +651,17 @@ class NovelAgentRuntime:
             intentDecision=intent_decision,
         )
 
+    async def cancel_chat_request(self, request_id: str) -> bool:
+        """Cancel the currently active upstream model or read-tool request for a chat."""
+        cancelled = False
+        for target in (self.automation, self.tool_adapter):
+            try:
+                cancelled = await target.cancel(request_id) or cancelled
+            except Exception:
+                # The active request may have moved from model to tool (or already completed).
+                continue
+        return cancelled
+
     def _retryable_failed_run_ref(self, run_id: str | None) -> FailedRunRef | None:
         if not run_id:
             return None
@@ -617,6 +694,7 @@ class NovelAgentRuntime:
         message: str,
         context: dict[str, str],
         locale: str,
+        request_id: str | None = None,
     ) -> Any:
         if tool_name not in READ_ONLY_AGENT_TOOLS:
             raise ValueError(f"Exploration tool is not read-only: {tool_name}")
@@ -639,6 +717,52 @@ class NovelAgentRuntime:
             if not requested_chapter_id or requested_chapter_id.upper() in {"ALL", "ALL_IF_SUPPORTED"}:
                 raise ValueError("chapterId is required for chapter.get")
             params = {"chapterId": requested_chapter_id}
+        elif tool_name == "attachment.list":
+            conversation_id = context.get("agentConversationId") or ""
+            if not novel_id or not conversation_id:
+                raise ValueError("novelId and conversationId are required for attachment.list")
+            params = {"novelId": novel_id, "conversationId": conversation_id}
+        elif tool_name == "attachment.search":
+            conversation_id = context.get("agentConversationId") or ""
+            query = str(tool_args.get("query") or "").strip()
+            if not novel_id or not conversation_id or not query:
+                raise ValueError("novelId, conversationId and query are required for attachment.search")
+            params = {
+                "novelId": novel_id,
+                "conversationId": conversation_id,
+                "query": query[:200],
+                "limit": max(1, min(20, int(tool_args.get("limit") or 10))),
+            }
+            attachment_id = str(tool_args.get("attachmentId") or "").strip()
+            if attachment_id:
+                params["attachmentId"] = attachment_id
+        elif tool_name in {"attachment.get", "attachment.read", "attachment.outline"}:
+            conversation_id = context.get("agentConversationId") or ""
+            attachment_id = str(tool_args.get("attachmentId") or "").strip()
+            if not novel_id or not conversation_id or not attachment_id:
+                raise ValueError(f"novelId, conversationId and attachmentId are required for {tool_name}")
+            params = {
+                "novelId": novel_id,
+                "conversationId": conversation_id,
+                "attachmentId": attachment_id,
+            }
+            if tool_name == "attachment.get":
+                has_alias_range = tool_args.get("startOffset") is not None or tool_args.get("endOffset") is not None
+                if has_alias_range:
+                    start_offset = int(tool_args.get("startOffset") or 0)
+                    end_offset = int(tool_args.get("endOffset")) if tool_args.get("endOffset") is not None else start_offset + 12000
+                    if start_offset < 0 or end_offset < start_offset:
+                        raise ValueError("attachment.get requires 0 <= startOffset <= endOffset")
+                    params["offset"] = start_offset
+                    params["limit"] = max(1, min(12000, end_offset - start_offset))
+                else:
+                    params["offset"] = max(0, int(tool_args.get("offset") or 0))
+                    params["limit"] = max(1, min(12000, int(tool_args.get("limit") or 12000)))
+            elif tool_name == "attachment.read":
+                selector = tool_args.get("selector")
+                if not isinstance(selector, dict):
+                    raise ValueError("selector is required for attachment.read")
+                params["selector"] = selector
         elif tool_name == "rag.ask":
             if not novel_id:
                 raise ValueError("novelId is required for rag.ask")
@@ -657,7 +781,7 @@ class NovelAgentRuntime:
             if not novel_id:
                 raise ValueError(f"novelId is required for {tool_name}")
             params = {"novelId": novel_id}
-        return await self.tool_adapter.invoke(tool_name, params, "desktop-ui")
+        return await self.tool_adapter.invoke(tool_name, params, "desktop-ui", request_id=request_id)
 
     async def plan(self, params: dict[str, Any], context: dict[str, Any]) -> AgentPlan:
         goal = str(params.get("goal") or params.get("message") or "")

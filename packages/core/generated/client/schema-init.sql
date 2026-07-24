@@ -70,6 +70,31 @@ CREATE TABLE "AgentMessage" (
 );
 
 -- CreateTable
+CREATE TABLE "AgentAttachment" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "novelId" TEXT NOT NULL,
+    "conversationId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "originalFileName" TEXT NOT NULL,
+    "extension" TEXT NOT NULL,
+    "mimeType" TEXT,
+    "sizeBytes" INTEGER NOT NULL,
+    "characterCount" INTEGER NOT NULL,
+    "contentHash" TEXT NOT NULL,
+    "plainText" TEXT NOT NULL,
+    "extractedContentJson" TEXT NOT NULL,
+    "extractionMetaJson" TEXT NOT NULL DEFAULT '{}',
+    "extractorVersion" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'ready',
+    "errorCode" TEXT,
+    "errorMessage" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "AgentAttachment_novelId_fkey" FOREIGN KEY ("novelId") REFERENCES "Novel" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "AgentAttachment_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "AgentConversation" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
 CREATE TABLE "AgentRun" (
     "runId" TEXT NOT NULL PRIMARY KEY,
     "conversationId" TEXT NOT NULL,
@@ -425,6 +450,15 @@ CREATE INDEX "idx_agent_conversation_novel_updated" ON "AgentConversation"("nove
 
 -- CreateIndex
 CREATE INDEX "idx_agent_message_conversation_created" ON "AgentMessage"("conversationId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_attachment_conversation_created" ON "AgentAttachment"("conversationId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_attachment_novel_hash" ON "AgentAttachment"("novelId", "contentHash");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_attachment_message" ON "AgentAttachment"("messageId");
 
 -- CreateIndex
 CREATE INDEX "idx_agent_run_conversation_updated" ON "AgentRun"("conversationId", "updatedAt");

@@ -85,16 +85,29 @@ export class BackupService {
     async exportData(targetPath?: string, password?: string): Promise<string> {
         // Fetch all data
         // Order doesn't matter for JSON export, but maintaining a structure helps
-        const [novels, volumes, chapters, characters, ideas, tags] = await Promise.all([
+        const [novels, volumes, chapters, characters, ideas, tags, agentConversations, agentMessages, agentAttachments] = await Promise.all([
             db.novel.findMany(),
             db.volume.findMany(),
             db.chapter.findMany(),
             db.character.findMany(),
             db.idea.findMany(),
-            db.tag.findMany()
+            db.tag.findMany(),
+            db.agentConversation.findMany(),
+            db.agentMessage.findMany(),
+            db.agentAttachment.findMany(),
         ]);
 
-        const fullData = { novels, volumes, chapters, characters, ideas, tags };
+        const fullData = {
+            novels,
+            volumes,
+            chapters,
+            characters,
+            ideas,
+            tags,
+            agentConversations,
+            agentMessages,
+            agentAttachments,
+        };
         const dataBuffer = Buffer.from(JSON.stringify(fullData));
 
         const zip = new AdmZip();
@@ -179,6 +192,9 @@ export class BackupService {
             // Actually, with onDelete: Cascade, deleting Novel might clear everything, 
             // but we also have standalone tags or cross-relations.
             // Safest: Delete all explicitly.
+            await tx.agentAttachment.deleteMany();
+            await tx.agentMessage.deleteMany();
+            await tx.agentConversation.deleteMany();
             await tx.tag.deleteMany();
             await tx.idea.deleteMany();
             await tx.character.deleteMany();
@@ -194,6 +210,9 @@ export class BackupService {
             if (data.characters?.length) for (const item of data.characters) await tx.character.create({ data: item });
             if (data.ideas?.length) for (const item of data.ideas) await tx.idea.create({ data: item });
             if (data.tags?.length) for (const item of data.tags) await tx.tag.create({ data: item });
+            if (data.agentConversations?.length) for (const item of data.agentConversations) await tx.agentConversation.create({ data: item });
+            if (data.agentMessages?.length) for (const item of data.agentMessages) await tx.agentMessage.create({ data: item });
+            if (data.agentAttachments?.length) for (const item of data.agentAttachments) await tx.agentAttachment.create({ data: item });
         }, {
             maxWait: 10000,
             timeout: 20000

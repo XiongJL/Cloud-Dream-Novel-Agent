@@ -3,6 +3,7 @@ export type TimelineMessage = {
     role: 'user' | 'assistant' | 'system';
     content: string;
     createdAt: string;
+    attachmentIds?: string[];
 };
 
 export type TimelinePlan = {

@@ -84,6 +84,10 @@ _ROLE_REGISTRY: list[dict[str, Any]] = [
     },
 ]
 
+_ATTACHMENT_TOOLS = ["attachment.list", "attachment.read", "attachment.outline", "attachment.search", "attachment.get"]
+for _role in _ROLE_REGISTRY:
+    _role["tools"] = [*_ATTACHMENT_TOOLS, *_role["tools"]]
+
 
 def _localized(value: Any, language: str) -> Any:
     if isinstance(value, dict) and set(value).issubset({"zh", "en"}):

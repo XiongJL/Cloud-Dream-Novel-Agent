@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import PyInstaller.__main__
 
@@ -40,6 +42,11 @@ def runtime_binary(directory: Path) -> Path:
     return directory / f"novel-agent-runtime{suffix}"
 
 
+def extractor_binary(directory: Path) -> Path:
+    suffix = ".exe" if os.name == "nt" else ""
+    return directory / f"document-extractor{suffix}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the bundled CloudDream Agent runtime")
     parser.add_argument("--output", help="Output directory inside the repository")
@@ -64,6 +71,18 @@ def main() -> None:
         ]
     )
 
+    PyInstaller.__main__.run(
+        [
+            str(RUNTIME_ROOT / "document-extractor.spec"),
+            "--noconfirm",
+            "--clean",
+            "--distpath",
+            str(dist_root),
+            "--workpath",
+            str(work_root / "document-extractor"),
+        ]
+    )
+
     built_bundle = dist_root / "novel-agent-runtime"
     binary = runtime_binary(built_bundle)
     if not binary.is_file():
@@ -71,14 +90,43 @@ def main() -> None:
 
     shutil.copytree(built_bundle, output)
     packaged_binary = runtime_binary(output)
+    built_extractor_bundle = dist_root / "document-extractor"
+    built_extractor = extractor_binary(built_extractor_bundle)
+    if not built_extractor.is_file():
+        raise FileNotFoundError(f"PyInstaller document extractor binary was not created: {built_extractor}")
+    packaged_extractor_bundle = output / "document-extractor"
+    shutil.copytree(built_extractor_bundle, packaged_extractor_bundle)
+    packaged_extractor = extractor_binary(packaged_extractor_bundle)
     if not args.skip_smoke:
         subprocess.run(
             [str(packaged_binary), "--help"],
             check=True,
             timeout=90,
         )
+        with tempfile.TemporaryDirectory(prefix="cloud-dream-extractor-smoke-") as temp_dir:
+            source = Path(temp_dir) / "smoke.txt"
+            source.write_text("document extractor smoke test 😀", encoding="utf-8")
+            request = {
+                "protocolVersion": "document-extractor-v1",
+                "jobId": "packaged-smoke",
+                "temporaryFilePath": str(source),
+                "originalFileName": source.name,
+                "extension": ".txt",
+                "limits": {"maxCharacters": 1000, "timeoutMs": 30000},
+            }
+            result = subprocess.run(
+                [str(packaged_extractor)],
+                input=json.dumps(request).encode("utf-8"),
+                capture_output=True,
+                check=True,
+                timeout=90,
+            )
+            response = json.loads(result.stdout.decode("utf-8"))
+            if response.get("ok") is not True or response.get("document", {}).get("plainText") != source.read_text(encoding="utf-8"):
+                raise RuntimeError("Packaged document extractor smoke test returned an invalid response")
 
     print(f"[agent-runtime] built {packaged_binary}")
+    print(f"[document-extractor] built {packaged_extractor}")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,20 @@ def report_progress(phase: str) -> None:
 
 def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
     app = FastAPI(title="CloudDream Novel Agent Runtime", version="0.1.0")
+    active_requests: dict[str, asyncio.Task[Any]] = {}
+    progress_states: dict[str, dict[str, Any]] = {}
+
+    def append_progress(request_id: str, phase: str, details: dict[str, Any] | None = None) -> None:
+        previous = progress_states.get(request_id) or {"sequence": 0, "events": []}
+        event = {
+            "sequence": int(previous.get("sequence") or 0) + 1,
+            "phase": phase,
+            **(details or {}),
+        }
+        progress_states[request_id] = {
+            "sequence": event["sequence"],
+            "events": [*(previous.get("events") or []), event][-50:],
+        }
 
     def check_auth(authorization: str | None) -> None:
         if not token:
@@ -50,14 +65,28 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
     @app.post("/invoke")
     async def invoke(envelope: AgentEnvelope, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         check_auth(authorization)
+        request_id = str(envelope.requestId or "").strip()
+        current_task = asyncio.current_task()
+        if request_id and current_task:
+            active_requests[request_id] = current_task
+            if len(progress_states) >= 200:
+                progress_states.pop(next(iter(progress_states)), None)
+            append_progress(request_id, "thinking")
+
+        async def report_chat_progress(phase: str, details: dict[str, Any]) -> None:
+            if not request_id:
+                return
+            append_progress(request_id, phase, details)
         try:
             method = envelope.method
             params = envelope.params
             context = envelope.context.model_dump()
+            if request_id:
+                context["_requestId"] = request_id
             if method == "agent.roles":
                 data = runtime.roles(params, context)
             elif method == "agent.chat":
-                data = await runtime.chat(params, context)
+                data = await runtime.chat(params, context, on_progress=report_chat_progress)
             elif method == "agent.plan":
                 data = await runtime.plan(params, context)
             elif method == "agent.register_plan":
@@ -85,6 +114,10 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
             else:
                 return {"ok": False, "code": "UNKNOWN_METHOD", "message": f"Unknown method: {method}"}
             return {"ok": True, "code": "OK", "message": "ok", "data": data.model_dump() if hasattr(data, "model_dump") else data}
+        except asyncio.CancelledError:
+            if request_id:
+                append_progress(request_id, "cancelled")
+            return {"ok": False, "code": "CANCELLED", "message": "Agent chat was cancelled"}
         except AgentRequestError as error:
             return {
                 "ok": False,
@@ -94,6 +127,35 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
             }
         except Exception as error:
             return {"ok": False, "code": "AGENT_RUNTIME_ERROR", "message": str(error)}
+        finally:
+            if request_id and active_requests.get(request_id) is current_task:
+                active_requests.pop(request_id, None)
+
+    @app.get("/progress/{request_id}")
+    async def progress(request_id: str, afterSequence: int = 0, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        check_auth(authorization)
+        state = progress_states.get(request_id) or {"sequence": 0, "events": []}
+        events = [event for event in state.get("events", []) if int(event.get("sequence") or 0) > afterSequence]
+        return {"ok": True, "code": "OK", "message": "ok", "data": {"events": events}}
+
+    @app.post("/cancel")
+    async def cancel_request(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        check_auth(authorization)
+        request_id = str(payload.get("requestId") or "").strip()
+        if not request_id:
+            return {"ok": False, "code": "INVALID_INPUT", "message": "requestId is required"}
+        try:
+            await runtime.cancel_chat_request(request_id)
+        finally:
+            task = active_requests.get(request_id)
+            if task:
+                task.cancel()
+        return {
+            "ok": True,
+            "code": "OK",
+            "message": "cancelled" if task else "request not active",
+            "data": {"requestId": request_id, "cancelled": bool(task)},
+        }
 
     @app.get("/events/{run_id}")
     async def events(run_id: str, afterSequence: int = 0, authorization: str | None = Header(default=None)) -> StreamingResponse:

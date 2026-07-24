@@ -14,6 +14,10 @@ const status = (phase, extras = {}) => ({ conversationId: 'conversation-1', phas
 
 assert.equal(pendingAgentStatusLabel(status('thinking')), '思考中...');
 assert.equal(pendingAgentStatusLabel(status('understanding')), '正在理解任务...');
+assert.equal(pendingAgentStatusLabel(status('reading')), '正在读取附件...');
+assert.equal(pendingAgentStatusLabel(status('reading', { detail: '“第二章”' })), '正在读取 “第二章”...');
+assert.equal(pendingAgentStatusLabel(status('extending')), '信息仍不足，正在继续读取...');
+assert.equal(pendingAgentStatusLabel(status('finalizing')), '正在汇总已读取内容...');
 assert.equal(pendingAgentStatusLabel(status('planning')), '正在整理执行计划...');
 assert.equal(pendingAgentStatusLabel(status('revising')), '正在按意见调整计划...');
 assert.equal(

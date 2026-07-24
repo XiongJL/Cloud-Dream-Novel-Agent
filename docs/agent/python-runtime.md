@@ -124,7 +124,8 @@ START -> agent -> tools -> agent -> ... -> END
 
 - `agent` 节点通过 Electron AiService 选择只读工具或形成回答。
 - `tools` 节点再次校验 `READ_ONLY_AGENT_TOOLS`，执行 Automation 调用并把观察结果回灌模型。
-- 每轮最多选择 3 个工具，整次请求最多 8 次工具调用和 4 轮模型判断。
+- 每轮最多选择 3 个工具。普通任务软限制 4 轮/8 次工具，长附件任务软限制 6 轮；有有效进展时最多扩展到 8 轮/12 次工具，并始终保留无工具最终总结轮。
+- 聊天探索总预算 165 秒，其中最后 45 秒预留给强制总结；达到硬限制或时间预算后不再静默截断。
 - Checkpoint 按 Runtime conversationId 写入 `agent_graph.db`，与现有 `agent_state.db` 业务状态分层保存。
 - `chat_only` 不暴露工具；`review_required` 允许只读探索，但不暴露草稿、写回或数据修改工具。
 - Renderer 在助手回复中显示本次 `contextReads` 标签，便于确认模型实际读取了哪些来源。

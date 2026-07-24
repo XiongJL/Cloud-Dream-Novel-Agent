@@ -173,7 +173,13 @@ contextBridge.exposeInMainWorld('agent', {
     ensureReady: () => ipcRenderer.invoke('agent:ensure-ready'),
     restart: () => ipcRenderer.invoke('agent:restart'),
     roles: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.roles', params: payload ?? {}, context: payload?.context }),
-    chat: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.chat', params: payload, context: payload?.context }),
+    chat: (payload: any, options?: { requestId?: string }) => ipcRenderer.invoke('agent:invoke', { method: 'agent.chat', params: payload, context: payload?.context, requestId: options?.requestId }),
+    cancelChat: (payload: { requestId: string }) => ipcRenderer.invoke('agent:cancel-chat', payload),
+    onChatProgress: (callback: (payload: any) => void) => {
+        const listener = (_event: unknown, payload: any) => callback(payload);
+        ipcRenderer.on('agent:chat-progress', listener);
+        return () => ipcRenderer.removeListener('agent:chat-progress', listener);
+    },
     plan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.plan', params: payload, context: payload?.context }),
     registerPlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.register_plan', params: payload, context: payload?.context }),
     revisePlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.revise_plan', params: payload, context: payload?.context }),
@@ -199,4 +205,17 @@ contextBridge.exposeInMainWorld('agent', {
         ipcRenderer.on('agent:run-disconnected', listener);
         return () => ipcRenderer.removeListener('agent:run-disconnected', listener);
     },
+})
+
+contextBridge.exposeInMainWorld('agentAttachments', {
+    select: (payload: { novelId: string; conversationId: string }) =>
+        ipcRenderer.invoke('agent-attachment:select', payload),
+    list: (payload: { novelId: string; conversationId: string }) =>
+        ipcRenderer.invoke('agent-attachment:list', payload),
+    get: (payload: { novelId: string; conversationId: string; attachmentId: string }) =>
+        ipcRenderer.invoke('agent-attachment:get', payload),
+    bind: (payload: { novelId: string; conversationId: string; messageId: string; attachmentIds: string[] }) =>
+        ipcRenderer.invoke('agent-attachment:bind', payload),
+    removePending: (payload: { novelId: string; conversationId: string; attachmentId: string }) =>
+        ipcRenderer.invoke('agent-attachment:remove-pending', payload),
 })

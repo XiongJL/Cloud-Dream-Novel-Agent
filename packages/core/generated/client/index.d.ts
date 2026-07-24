@@ -39,6 +39,11 @@ export type AgentConversation = $Result.DefaultSelection<Prisma.$AgentConversati
  */
 export type AgentMessage = $Result.DefaultSelection<Prisma.$AgentMessagePayload>
 /**
+ * Model AgentAttachment
+ * 
+ */
+export type AgentAttachment = $Result.DefaultSelection<Prisma.$AgentAttachmentPayload>
+/**
  * Model AgentRun
  * 
  */
@@ -310,6 +315,16 @@ export class PrismaClient<
     * ```
     */
   get agentMessage(): Prisma.AgentMessageDelegate<ExtArgs>;
+
+  /**
+   * `prisma.agentAttachment`: Exposes CRUD operations for the **AgentAttachment** model.
+    * Example usage:
+    * ```ts
+    * // Fetch zero or more AgentAttachments
+    * const agentAttachments = await prisma.agentAttachment.findMany()
+    * ```
+    */
+  get agentAttachment(): Prisma.AgentAttachmentDelegate<ExtArgs>;
 
   /**
    * `prisma.agentRun`: Exposes CRUD operations for the **AgentRun** model.
@@ -985,6 +1000,7 @@ export namespace Prisma {
     Chapter: 'Chapter',
     AgentConversation: 'AgentConversation',
     AgentMessage: 'AgentMessage',
+    AgentAttachment: 'AgentAttachment',
     AgentRun: 'AgentRun',
     AgentRunEvent: 'AgentRunEvent',
     AgentArtifact: 'AgentArtifact',
@@ -1021,7 +1037,7 @@ export namespace Prisma {
 
   export type TypeMap<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
     meta: {
-      modelProps: 'novel' | 'volume' | 'chapter' | 'agentConversation' | 'agentMessage' | 'agentRun' | 'agentRunEvent' | 'agentArtifact' | 'agentRevisionTask' | 'syncState' | 'character' | 'item' | 'itemOwnership' | 'worldSetting' | 'relationship' | 'idea' | 'tag' | 'plotLine' | 'plotPoint' | 'plotPointAnchor' | 'mapCanvas' | 'mapElement' | 'characterMapMarker' | 'chapterSummary' | 'narrativeSummary'
+      modelProps: 'novel' | 'volume' | 'chapter' | 'agentConversation' | 'agentMessage' | 'agentAttachment' | 'agentRun' | 'agentRunEvent' | 'agentArtifact' | 'agentRevisionTask' | 'syncState' | 'character' | 'item' | 'itemOwnership' | 'worldSetting' | 'relationship' | 'idea' | 'tag' | 'plotLine' | 'plotPoint' | 'plotPointAnchor' | 'mapCanvas' | 'mapElement' | 'characterMapMarker' | 'chapterSummary' | 'narrativeSummary'
       txIsolationLevel: Prisma.TransactionIsolationLevel
     },
     model: {
@@ -1332,6 +1348,68 @@ export namespace Prisma {
           count: {
             args: Prisma.AgentMessageCountArgs<ExtArgs>,
             result: $Utils.Optional<AgentMessageCountAggregateOutputType> | number
+          }
+        }
+      }
+      AgentAttachment: {
+        payload: Prisma.$AgentAttachmentPayload<ExtArgs>
+        fields: Prisma.AgentAttachmentFieldRefs
+        operations: {
+          findUnique: {
+            args: Prisma.AgentAttachmentFindUniqueArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload> | null
+          }
+          findUniqueOrThrow: {
+            args: Prisma.AgentAttachmentFindUniqueOrThrowArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>
+          }
+          findFirst: {
+            args: Prisma.AgentAttachmentFindFirstArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload> | null
+          }
+          findFirstOrThrow: {
+            args: Prisma.AgentAttachmentFindFirstOrThrowArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>
+          }
+          findMany: {
+            args: Prisma.AgentAttachmentFindManyArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>[]
+          }
+          create: {
+            args: Prisma.AgentAttachmentCreateArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>
+          }
+          delete: {
+            args: Prisma.AgentAttachmentDeleteArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>
+          }
+          update: {
+            args: Prisma.AgentAttachmentUpdateArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>
+          }
+          deleteMany: {
+            args: Prisma.AgentAttachmentDeleteManyArgs<ExtArgs>,
+            result: Prisma.BatchPayload
+          }
+          updateMany: {
+            args: Prisma.AgentAttachmentUpdateManyArgs<ExtArgs>,
+            result: Prisma.BatchPayload
+          }
+          upsert: {
+            args: Prisma.AgentAttachmentUpsertArgs<ExtArgs>,
+            result: $Utils.PayloadToResult<Prisma.$AgentAttachmentPayload>
+          }
+          aggregate: {
+            args: Prisma.AgentAttachmentAggregateArgs<ExtArgs>,
+            result: $Utils.Optional<AggregateAgentAttachment>
+          }
+          groupBy: {
+            args: Prisma.AgentAttachmentGroupByArgs<ExtArgs>,
+            result: $Utils.Optional<AgentAttachmentGroupByOutputType>[]
+          }
+          count: {
+            args: Prisma.AgentAttachmentCountArgs<ExtArgs>,
+            result: $Utils.Optional<AgentAttachmentCountAggregateOutputType> | number
           }
         }
       }
@@ -2747,6 +2825,7 @@ export namespace Prisma {
     agentConversations: number
     agentRuns: number
     agentArtifacts: number
+    agentAttachments: number
   }
 
   export type NovelCountOutputTypeSelect<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
@@ -2763,6 +2842,7 @@ export namespace Prisma {
     agentConversations?: boolean | NovelCountOutputTypeCountAgentConversationsArgs
     agentRuns?: boolean | NovelCountOutputTypeCountAgentRunsArgs
     agentArtifacts?: boolean | NovelCountOutputTypeCountAgentArtifactsArgs
+    agentAttachments?: boolean | NovelCountOutputTypeCountAgentAttachmentsArgs
   }
 
   // Custom InputTypes
@@ -2879,6 +2959,14 @@ export namespace Prisma {
    */
   export type NovelCountOutputTypeCountAgentArtifactsArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
     where?: AgentArtifactWhereInput
+  }
+
+
+  /**
+   * NovelCountOutputType without action
+   */
+  export type NovelCountOutputTypeCountAgentAttachmentsArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    where?: AgentAttachmentWhereInput
   }
 
 
@@ -2999,12 +3087,14 @@ export namespace Prisma {
     messages: number
     runs: number
     artifacts: number
+    attachments: number
   }
 
   export type AgentConversationCountOutputTypeSelect<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
     messages?: boolean | AgentConversationCountOutputTypeCountMessagesArgs
     runs?: boolean | AgentConversationCountOutputTypeCountRunsArgs
     artifacts?: boolean | AgentConversationCountOutputTypeCountArtifactsArgs
+    attachments?: boolean | AgentConversationCountOutputTypeCountAttachmentsArgs
   }
 
   // Custom InputTypes
@@ -3041,6 +3131,14 @@ export namespace Prisma {
    */
   export type AgentConversationCountOutputTypeCountArtifactsArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
     where?: AgentArtifactWhereInput
+  }
+
+
+  /**
+   * AgentConversationCountOutputType without action
+   */
+  export type AgentConversationCountOutputTypeCountAttachmentsArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    where?: AgentAttachmentWhereInput
   }
 
 
@@ -3626,6 +3724,7 @@ export namespace Prisma {
     agentConversations?: boolean | Novel$agentConversationsArgs<ExtArgs>
     agentRuns?: boolean | Novel$agentRunsArgs<ExtArgs>
     agentArtifacts?: boolean | Novel$agentArtifactsArgs<ExtArgs>
+    agentAttachments?: boolean | Novel$agentAttachmentsArgs<ExtArgs>
     _count?: boolean | NovelCountOutputTypeDefaultArgs<ExtArgs>
   }, ExtArgs["result"]["novel"]>
 
@@ -3656,6 +3755,7 @@ export namespace Prisma {
     agentConversations?: boolean | Novel$agentConversationsArgs<ExtArgs>
     agentRuns?: boolean | Novel$agentRunsArgs<ExtArgs>
     agentArtifacts?: boolean | Novel$agentArtifactsArgs<ExtArgs>
+    agentAttachments?: boolean | Novel$agentAttachmentsArgs<ExtArgs>
     _count?: boolean | NovelCountOutputTypeDefaultArgs<ExtArgs>
   }
 
@@ -3676,6 +3776,7 @@ export namespace Prisma {
       agentConversations: Prisma.$AgentConversationPayload<ExtArgs>[]
       agentRuns: Prisma.$AgentRunPayload<ExtArgs>[]
       agentArtifacts: Prisma.$AgentArtifactPayload<ExtArgs>[]
+      agentAttachments: Prisma.$AgentAttachmentPayload<ExtArgs>[]
     }
     scalars: $Extensions.GetPayloadResult<{
       id: string
@@ -4062,6 +4163,8 @@ export namespace Prisma {
     agentRuns<T extends Novel$agentRunsArgs<ExtArgs> = {}>(args?: Subset<T, Novel$agentRunsArgs<ExtArgs>>): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentRunPayload<ExtArgs>, T, 'findMany'> | Null>;
 
     agentArtifacts<T extends Novel$agentArtifactsArgs<ExtArgs> = {}>(args?: Subset<T, Novel$agentArtifactsArgs<ExtArgs>>): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentArtifactPayload<ExtArgs>, T, 'findMany'> | Null>;
+
+    agentAttachments<T extends Novel$agentAttachmentsArgs<ExtArgs> = {}>(args?: Subset<T, Novel$agentAttachmentsArgs<ExtArgs>>): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findMany'> | Null>;
 
     /**
      * Attaches callbacks for the resolution and/or rejection of the Promise.
@@ -4670,6 +4773,27 @@ export namespace Prisma {
     take?: number
     skip?: number
     distinct?: AgentArtifactScalarFieldEnum | AgentArtifactScalarFieldEnum[]
+  }
+
+
+  /**
+   * Novel.agentAttachments
+   */
+  export type Novel$agentAttachmentsArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    where?: AgentAttachmentWhereInput
+    orderBy?: AgentAttachmentOrderByWithRelationInput | AgentAttachmentOrderByWithRelationInput[]
+    cursor?: AgentAttachmentWhereUniqueInput
+    take?: number
+    skip?: number
+    distinct?: AgentAttachmentScalarFieldEnum | AgentAttachmentScalarFieldEnum[]
   }
 
 
@@ -7029,6 +7153,7 @@ export namespace Prisma {
     messages?: boolean | AgentConversation$messagesArgs<ExtArgs>
     runs?: boolean | AgentConversation$runsArgs<ExtArgs>
     artifacts?: boolean | AgentConversation$artifactsArgs<ExtArgs>
+    attachments?: boolean | AgentConversation$attachmentsArgs<ExtArgs>
     _count?: boolean | AgentConversationCountOutputTypeDefaultArgs<ExtArgs>
   }, ExtArgs["result"]["agentConversation"]>
 
@@ -7053,6 +7178,7 @@ export namespace Prisma {
     messages?: boolean | AgentConversation$messagesArgs<ExtArgs>
     runs?: boolean | AgentConversation$runsArgs<ExtArgs>
     artifacts?: boolean | AgentConversation$artifactsArgs<ExtArgs>
+    attachments?: boolean | AgentConversation$attachmentsArgs<ExtArgs>
     _count?: boolean | AgentConversationCountOutputTypeDefaultArgs<ExtArgs>
   }
 
@@ -7064,6 +7190,7 @@ export namespace Prisma {
       messages: Prisma.$AgentMessagePayload<ExtArgs>[]
       runs: Prisma.$AgentRunPayload<ExtArgs>[]
       artifacts: Prisma.$AgentArtifactPayload<ExtArgs>[]
+      attachments: Prisma.$AgentAttachmentPayload<ExtArgs>[]
     }
     scalars: $Extensions.GetPayloadResult<{
       id: string
@@ -7435,6 +7562,8 @@ export namespace Prisma {
     runs<T extends AgentConversation$runsArgs<ExtArgs> = {}>(args?: Subset<T, AgentConversation$runsArgs<ExtArgs>>): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentRunPayload<ExtArgs>, T, 'findMany'> | Null>;
 
     artifacts<T extends AgentConversation$artifactsArgs<ExtArgs> = {}>(args?: Subset<T, AgentConversation$artifactsArgs<ExtArgs>>): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentArtifactPayload<ExtArgs>, T, 'findMany'> | Null>;
+
+    attachments<T extends AgentConversation$attachmentsArgs<ExtArgs> = {}>(args?: Subset<T, AgentConversation$attachmentsArgs<ExtArgs>>): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findMany'> | Null>;
 
     /**
      * Attaches callbacks for the resolution and/or rejection of the Promise.
@@ -7836,6 +7965,27 @@ export namespace Prisma {
     take?: number
     skip?: number
     distinct?: AgentArtifactScalarFieldEnum | AgentArtifactScalarFieldEnum[]
+  }
+
+
+  /**
+   * AgentConversation.attachments
+   */
+  export type AgentConversation$attachmentsArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    where?: AgentAttachmentWhereInput
+    orderBy?: AgentAttachmentOrderByWithRelationInput | AgentAttachmentOrderByWithRelationInput[]
+    cursor?: AgentAttachmentWhereUniqueInput
+    take?: number
+    skip?: number
+    distinct?: AgentAttachmentScalarFieldEnum | AgentAttachmentScalarFieldEnum[]
   }
 
 
@@ -8752,6 +8902,1093 @@ export namespace Prisma {
      * Choose, which related nodes to fetch as well.
      */
     include?: AgentMessageInclude<ExtArgs> | null
+  }
+
+
+
+  /**
+   * Model AgentAttachment
+   */
+
+  export type AggregateAgentAttachment = {
+    _count: AgentAttachmentCountAggregateOutputType | null
+    _avg: AgentAttachmentAvgAggregateOutputType | null
+    _sum: AgentAttachmentSumAggregateOutputType | null
+    _min: AgentAttachmentMinAggregateOutputType | null
+    _max: AgentAttachmentMaxAggregateOutputType | null
+  }
+
+  export type AgentAttachmentAvgAggregateOutputType = {
+    sizeBytes: number | null
+    characterCount: number | null
+  }
+
+  export type AgentAttachmentSumAggregateOutputType = {
+    sizeBytes: number | null
+    characterCount: number | null
+  }
+
+  export type AgentAttachmentMinAggregateOutputType = {
+    id: string | null
+    novelId: string | null
+    conversationId: string | null
+    messageId: string | null
+    originalFileName: string | null
+    extension: string | null
+    mimeType: string | null
+    sizeBytes: number | null
+    characterCount: number | null
+    contentHash: string | null
+    plainText: string | null
+    extractedContentJson: string | null
+    extractionMetaJson: string | null
+    extractorVersion: string | null
+    status: string | null
+    errorCode: string | null
+    errorMessage: string | null
+    createdAt: Date | null
+    updatedAt: Date | null
+  }
+
+  export type AgentAttachmentMaxAggregateOutputType = {
+    id: string | null
+    novelId: string | null
+    conversationId: string | null
+    messageId: string | null
+    originalFileName: string | null
+    extension: string | null
+    mimeType: string | null
+    sizeBytes: number | null
+    characterCount: number | null
+    contentHash: string | null
+    plainText: string | null
+    extractedContentJson: string | null
+    extractionMetaJson: string | null
+    extractorVersion: string | null
+    status: string | null
+    errorCode: string | null
+    errorMessage: string | null
+    createdAt: Date | null
+    updatedAt: Date | null
+  }
+
+  export type AgentAttachmentCountAggregateOutputType = {
+    id: number
+    novelId: number
+    conversationId: number
+    messageId: number
+    originalFileName: number
+    extension: number
+    mimeType: number
+    sizeBytes: number
+    characterCount: number
+    contentHash: number
+    plainText: number
+    extractedContentJson: number
+    extractionMetaJson: number
+    extractorVersion: number
+    status: number
+    errorCode: number
+    errorMessage: number
+    createdAt: number
+    updatedAt: number
+    _all: number
+  }
+
+
+  export type AgentAttachmentAvgAggregateInputType = {
+    sizeBytes?: true
+    characterCount?: true
+  }
+
+  export type AgentAttachmentSumAggregateInputType = {
+    sizeBytes?: true
+    characterCount?: true
+  }
+
+  export type AgentAttachmentMinAggregateInputType = {
+    id?: true
+    novelId?: true
+    conversationId?: true
+    messageId?: true
+    originalFileName?: true
+    extension?: true
+    mimeType?: true
+    sizeBytes?: true
+    characterCount?: true
+    contentHash?: true
+    plainText?: true
+    extractedContentJson?: true
+    extractionMetaJson?: true
+    extractorVersion?: true
+    status?: true
+    errorCode?: true
+    errorMessage?: true
+    createdAt?: true
+    updatedAt?: true
+  }
+
+  export type AgentAttachmentMaxAggregateInputType = {
+    id?: true
+    novelId?: true
+    conversationId?: true
+    messageId?: true
+    originalFileName?: true
+    extension?: true
+    mimeType?: true
+    sizeBytes?: true
+    characterCount?: true
+    contentHash?: true
+    plainText?: true
+    extractedContentJson?: true
+    extractionMetaJson?: true
+    extractorVersion?: true
+    status?: true
+    errorCode?: true
+    errorMessage?: true
+    createdAt?: true
+    updatedAt?: true
+  }
+
+  export type AgentAttachmentCountAggregateInputType = {
+    id?: true
+    novelId?: true
+    conversationId?: true
+    messageId?: true
+    originalFileName?: true
+    extension?: true
+    mimeType?: true
+    sizeBytes?: true
+    characterCount?: true
+    contentHash?: true
+    plainText?: true
+    extractedContentJson?: true
+    extractionMetaJson?: true
+    extractorVersion?: true
+    status?: true
+    errorCode?: true
+    errorMessage?: true
+    createdAt?: true
+    updatedAt?: true
+    _all?: true
+  }
+
+  export type AgentAttachmentAggregateArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Filter which AgentAttachment to aggregate.
+     */
+    where?: AgentAttachmentWhereInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/sorting Sorting Docs}
+     * 
+     * Determine the order of AgentAttachments to fetch.
+     */
+    orderBy?: AgentAttachmentOrderByWithRelationInput | AgentAttachmentOrderByWithRelationInput[]
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination#cursor-based-pagination Cursor Docs}
+     * 
+     * Sets the start position
+     */
+    cursor?: AgentAttachmentWhereUniqueInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Take `±n` AgentAttachments from the position of the cursor.
+     */
+    take?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Skip the first `n` AgentAttachments.
+     */
+    skip?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/aggregations Aggregation Docs}
+     * 
+     * Count returned AgentAttachments
+    **/
+    _count?: true | AgentAttachmentCountAggregateInputType
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/aggregations Aggregation Docs}
+     * 
+     * Select which fields to average
+    **/
+    _avg?: AgentAttachmentAvgAggregateInputType
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/aggregations Aggregation Docs}
+     * 
+     * Select which fields to sum
+    **/
+    _sum?: AgentAttachmentSumAggregateInputType
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/aggregations Aggregation Docs}
+     * 
+     * Select which fields to find the minimum value
+    **/
+    _min?: AgentAttachmentMinAggregateInputType
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/aggregations Aggregation Docs}
+     * 
+     * Select which fields to find the maximum value
+    **/
+    _max?: AgentAttachmentMaxAggregateInputType
+  }
+
+  export type GetAgentAttachmentAggregateType<T extends AgentAttachmentAggregateArgs> = {
+        [P in keyof T & keyof AggregateAgentAttachment]: P extends '_count' | 'count'
+      ? T[P] extends true
+        ? number
+        : GetScalarType<T[P], AggregateAgentAttachment[P]>
+      : GetScalarType<T[P], AggregateAgentAttachment[P]>
+  }
+
+
+
+
+  export type AgentAttachmentGroupByArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    where?: AgentAttachmentWhereInput
+    orderBy?: AgentAttachmentOrderByWithAggregationInput | AgentAttachmentOrderByWithAggregationInput[]
+    by: AgentAttachmentScalarFieldEnum[] | AgentAttachmentScalarFieldEnum
+    having?: AgentAttachmentScalarWhereWithAggregatesInput
+    take?: number
+    skip?: number
+    _count?: AgentAttachmentCountAggregateInputType | true
+    _avg?: AgentAttachmentAvgAggregateInputType
+    _sum?: AgentAttachmentSumAggregateInputType
+    _min?: AgentAttachmentMinAggregateInputType
+    _max?: AgentAttachmentMaxAggregateInputType
+  }
+
+  export type AgentAttachmentGroupByOutputType = {
+    id: string
+    novelId: string
+    conversationId: string
+    messageId: string | null
+    originalFileName: string
+    extension: string
+    mimeType: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson: string
+    extractorVersion: string
+    status: string
+    errorCode: string | null
+    errorMessage: string | null
+    createdAt: Date
+    updatedAt: Date
+    _count: AgentAttachmentCountAggregateOutputType | null
+    _avg: AgentAttachmentAvgAggregateOutputType | null
+    _sum: AgentAttachmentSumAggregateOutputType | null
+    _min: AgentAttachmentMinAggregateOutputType | null
+    _max: AgentAttachmentMaxAggregateOutputType | null
+  }
+
+  type GetAgentAttachmentGroupByPayload<T extends AgentAttachmentGroupByArgs> = Prisma.PrismaPromise<
+    Array<
+      PickEnumerable<AgentAttachmentGroupByOutputType, T['by']> &
+        {
+          [P in ((keyof T) & (keyof AgentAttachmentGroupByOutputType))]: P extends '_count'
+            ? T[P] extends boolean
+              ? number
+              : GetScalarType<T[P], AgentAttachmentGroupByOutputType[P]>
+            : GetScalarType<T[P], AgentAttachmentGroupByOutputType[P]>
+        }
+      >
+    >
+
+
+  export type AgentAttachmentSelect<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = $Extensions.GetSelect<{
+    id?: boolean
+    novelId?: boolean
+    conversationId?: boolean
+    messageId?: boolean
+    originalFileName?: boolean
+    extension?: boolean
+    mimeType?: boolean
+    sizeBytes?: boolean
+    characterCount?: boolean
+    contentHash?: boolean
+    plainText?: boolean
+    extractedContentJson?: boolean
+    extractionMetaJson?: boolean
+    extractorVersion?: boolean
+    status?: boolean
+    errorCode?: boolean
+    errorMessage?: boolean
+    createdAt?: boolean
+    updatedAt?: boolean
+    novel?: boolean | NovelDefaultArgs<ExtArgs>
+    conversation?: boolean | AgentConversationDefaultArgs<ExtArgs>
+  }, ExtArgs["result"]["agentAttachment"]>
+
+  export type AgentAttachmentSelectScalar = {
+    id?: boolean
+    novelId?: boolean
+    conversationId?: boolean
+    messageId?: boolean
+    originalFileName?: boolean
+    extension?: boolean
+    mimeType?: boolean
+    sizeBytes?: boolean
+    characterCount?: boolean
+    contentHash?: boolean
+    plainText?: boolean
+    extractedContentJson?: boolean
+    extractionMetaJson?: boolean
+    extractorVersion?: boolean
+    status?: boolean
+    errorCode?: boolean
+    errorMessage?: boolean
+    createdAt?: boolean
+    updatedAt?: boolean
+  }
+
+  export type AgentAttachmentInclude<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    novel?: boolean | NovelDefaultArgs<ExtArgs>
+    conversation?: boolean | AgentConversationDefaultArgs<ExtArgs>
+  }
+
+
+  export type $AgentAttachmentPayload<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    name: "AgentAttachment"
+    objects: {
+      novel: Prisma.$NovelPayload<ExtArgs>
+      conversation: Prisma.$AgentConversationPayload<ExtArgs>
+    }
+    scalars: $Extensions.GetPayloadResult<{
+      id: string
+      novelId: string
+      conversationId: string
+      messageId: string | null
+      originalFileName: string
+      extension: string
+      mimeType: string | null
+      sizeBytes: number
+      characterCount: number
+      contentHash: string
+      plainText: string
+      extractedContentJson: string
+      extractionMetaJson: string
+      extractorVersion: string
+      status: string
+      errorCode: string | null
+      errorMessage: string | null
+      createdAt: Date
+      updatedAt: Date
+    }, ExtArgs["result"]["agentAttachment"]>
+    composites: {}
+  }
+
+
+  type AgentAttachmentGetPayload<S extends boolean | null | undefined | AgentAttachmentDefaultArgs> = $Result.GetResult<Prisma.$AgentAttachmentPayload, S>
+
+  type AgentAttachmentCountArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = 
+    Omit<AgentAttachmentFindManyArgs, 'select' | 'include' | 'distinct'> & {
+      select?: AgentAttachmentCountAggregateInputType | true
+    }
+
+  export interface AgentAttachmentDelegate<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> {
+    [K: symbol]: { types: Prisma.TypeMap<ExtArgs>['model']['AgentAttachment'], meta: { name: 'AgentAttachment' } }
+    /**
+     * Find zero or one AgentAttachment that matches the filter.
+     * @param {AgentAttachmentFindUniqueArgs} args - Arguments to find a AgentAttachment
+     * @example
+     * // Get one AgentAttachment
+     * const agentAttachment = await prisma.agentAttachment.findUnique({
+     *   where: {
+     *     // ... provide filter here
+     *   }
+     * })
+    **/
+    findUnique<T extends AgentAttachmentFindUniqueArgs<ExtArgs>>(
+      args: SelectSubset<T, AgentAttachmentFindUniqueArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findUnique'> | null, null, ExtArgs>
+
+    /**
+     * Find one AgentAttachment that matches the filter or throw an error  with `error.code='P2025'` 
+     *     if no matches were found.
+     * @param {AgentAttachmentFindUniqueOrThrowArgs} args - Arguments to find a AgentAttachment
+     * @example
+     * // Get one AgentAttachment
+     * const agentAttachment = await prisma.agentAttachment.findUniqueOrThrow({
+     *   where: {
+     *     // ... provide filter here
+     *   }
+     * })
+    **/
+    findUniqueOrThrow<T extends AgentAttachmentFindUniqueOrThrowArgs<ExtArgs>>(
+      args?: SelectSubset<T, AgentAttachmentFindUniqueOrThrowArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findUniqueOrThrow'>, never, ExtArgs>
+
+    /**
+     * Find the first AgentAttachment that matches the filter.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentFindFirstArgs} args - Arguments to find a AgentAttachment
+     * @example
+     * // Get one AgentAttachment
+     * const agentAttachment = await prisma.agentAttachment.findFirst({
+     *   where: {
+     *     // ... provide filter here
+     *   }
+     * })
+    **/
+    findFirst<T extends AgentAttachmentFindFirstArgs<ExtArgs>>(
+      args?: SelectSubset<T, AgentAttachmentFindFirstArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findFirst'> | null, null, ExtArgs>
+
+    /**
+     * Find the first AgentAttachment that matches the filter or
+     * throw `PrismaKnownClientError` with `P2025` code if no matches were found.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentFindFirstOrThrowArgs} args - Arguments to find a AgentAttachment
+     * @example
+     * // Get one AgentAttachment
+     * const agentAttachment = await prisma.agentAttachment.findFirstOrThrow({
+     *   where: {
+     *     // ... provide filter here
+     *   }
+     * })
+    **/
+    findFirstOrThrow<T extends AgentAttachmentFindFirstOrThrowArgs<ExtArgs>>(
+      args?: SelectSubset<T, AgentAttachmentFindFirstOrThrowArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findFirstOrThrow'>, never, ExtArgs>
+
+    /**
+     * Find zero or more AgentAttachments that matches the filter.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentFindManyArgs=} args - Arguments to filter and select certain fields only.
+     * @example
+     * // Get all AgentAttachments
+     * const agentAttachments = await prisma.agentAttachment.findMany()
+     * 
+     * // Get first 10 AgentAttachments
+     * const agentAttachments = await prisma.agentAttachment.findMany({ take: 10 })
+     * 
+     * // Only select the `id`
+     * const agentAttachmentWithIdOnly = await prisma.agentAttachment.findMany({ select: { id: true } })
+     * 
+    **/
+    findMany<T extends AgentAttachmentFindManyArgs<ExtArgs>>(
+      args?: SelectSubset<T, AgentAttachmentFindManyArgs<ExtArgs>>
+    ): Prisma.PrismaPromise<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'findMany'>>
+
+    /**
+     * Create a AgentAttachment.
+     * @param {AgentAttachmentCreateArgs} args - Arguments to create a AgentAttachment.
+     * @example
+     * // Create one AgentAttachment
+     * const AgentAttachment = await prisma.agentAttachment.create({
+     *   data: {
+     *     // ... data to create a AgentAttachment
+     *   }
+     * })
+     * 
+    **/
+    create<T extends AgentAttachmentCreateArgs<ExtArgs>>(
+      args: SelectSubset<T, AgentAttachmentCreateArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'create'>, never, ExtArgs>
+
+    /**
+     * Delete a AgentAttachment.
+     * @param {AgentAttachmentDeleteArgs} args - Arguments to delete one AgentAttachment.
+     * @example
+     * // Delete one AgentAttachment
+     * const AgentAttachment = await prisma.agentAttachment.delete({
+     *   where: {
+     *     // ... filter to delete one AgentAttachment
+     *   }
+     * })
+     * 
+    **/
+    delete<T extends AgentAttachmentDeleteArgs<ExtArgs>>(
+      args: SelectSubset<T, AgentAttachmentDeleteArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'delete'>, never, ExtArgs>
+
+    /**
+     * Update one AgentAttachment.
+     * @param {AgentAttachmentUpdateArgs} args - Arguments to update one AgentAttachment.
+     * @example
+     * // Update one AgentAttachment
+     * const agentAttachment = await prisma.agentAttachment.update({
+     *   where: {
+     *     // ... provide filter here
+     *   },
+     *   data: {
+     *     // ... provide data here
+     *   }
+     * })
+     * 
+    **/
+    update<T extends AgentAttachmentUpdateArgs<ExtArgs>>(
+      args: SelectSubset<T, AgentAttachmentUpdateArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'update'>, never, ExtArgs>
+
+    /**
+     * Delete zero or more AgentAttachments.
+     * @param {AgentAttachmentDeleteManyArgs} args - Arguments to filter AgentAttachments to delete.
+     * @example
+     * // Delete a few AgentAttachments
+     * const { count } = await prisma.agentAttachment.deleteMany({
+     *   where: {
+     *     // ... provide filter here
+     *   }
+     * })
+     * 
+    **/
+    deleteMany<T extends AgentAttachmentDeleteManyArgs<ExtArgs>>(
+      args?: SelectSubset<T, AgentAttachmentDeleteManyArgs<ExtArgs>>
+    ): Prisma.PrismaPromise<BatchPayload>
+
+    /**
+     * Update zero or more AgentAttachments.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentUpdateManyArgs} args - Arguments to update one or more rows.
+     * @example
+     * // Update many AgentAttachments
+     * const agentAttachment = await prisma.agentAttachment.updateMany({
+     *   where: {
+     *     // ... provide filter here
+     *   },
+     *   data: {
+     *     // ... provide data here
+     *   }
+     * })
+     * 
+    **/
+    updateMany<T extends AgentAttachmentUpdateManyArgs<ExtArgs>>(
+      args: SelectSubset<T, AgentAttachmentUpdateManyArgs<ExtArgs>>
+    ): Prisma.PrismaPromise<BatchPayload>
+
+    /**
+     * Create or update one AgentAttachment.
+     * @param {AgentAttachmentUpsertArgs} args - Arguments to update or create a AgentAttachment.
+     * @example
+     * // Update or create a AgentAttachment
+     * const agentAttachment = await prisma.agentAttachment.upsert({
+     *   create: {
+     *     // ... data to create a AgentAttachment
+     *   },
+     *   update: {
+     *     // ... in case it already exists, update
+     *   },
+     *   where: {
+     *     // ... the filter for the AgentAttachment we want to update
+     *   }
+     * })
+    **/
+    upsert<T extends AgentAttachmentUpsertArgs<ExtArgs>>(
+      args: SelectSubset<T, AgentAttachmentUpsertArgs<ExtArgs>>
+    ): Prisma__AgentAttachmentClient<$Result.GetResult<Prisma.$AgentAttachmentPayload<ExtArgs>, T, 'upsert'>, never, ExtArgs>
+
+    /**
+     * Count the number of AgentAttachments.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentCountArgs} args - Arguments to filter AgentAttachments to count.
+     * @example
+     * // Count the number of AgentAttachments
+     * const count = await prisma.agentAttachment.count({
+     *   where: {
+     *     // ... the filter for the AgentAttachments we want to count
+     *   }
+     * })
+    **/
+    count<T extends AgentAttachmentCountArgs>(
+      args?: Subset<T, AgentAttachmentCountArgs>,
+    ): Prisma.PrismaPromise<
+      T extends $Utils.Record<'select', any>
+        ? T['select'] extends true
+          ? number
+          : GetScalarType<T['select'], AgentAttachmentCountAggregateOutputType>
+        : number
+    >
+
+    /**
+     * Allows you to perform aggregations operations on a AgentAttachment.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentAggregateArgs} args - Select which aggregations you would like to apply and on what fields.
+     * @example
+     * // Ordered by age ascending
+     * // Where email contains prisma.io
+     * // Limited to the 10 users
+     * const aggregations = await prisma.user.aggregate({
+     *   _avg: {
+     *     age: true,
+     *   },
+     *   where: {
+     *     email: {
+     *       contains: "prisma.io",
+     *     },
+     *   },
+     *   orderBy: {
+     *     age: "asc",
+     *   },
+     *   take: 10,
+     * })
+    **/
+    aggregate<T extends AgentAttachmentAggregateArgs>(args: Subset<T, AgentAttachmentAggregateArgs>): Prisma.PrismaPromise<GetAgentAttachmentAggregateType<T>>
+
+    /**
+     * Group by AgentAttachment.
+     * Note, that providing `undefined` is treated as the value not being there.
+     * Read more here: https://pris.ly/d/null-undefined
+     * @param {AgentAttachmentGroupByArgs} args - Group by arguments.
+     * @example
+     * // Group by city, order by createdAt, get count
+     * const result = await prisma.user.groupBy({
+     *   by: ['city', 'createdAt'],
+     *   orderBy: {
+     *     createdAt: true
+     *   },
+     *   _count: {
+     *     _all: true
+     *   },
+     * })
+     * 
+    **/
+    groupBy<
+      T extends AgentAttachmentGroupByArgs,
+      HasSelectOrTake extends Or<
+        Extends<'skip', Keys<T>>,
+        Extends<'take', Keys<T>>
+      >,
+      OrderByArg extends True extends HasSelectOrTake
+        ? { orderBy: AgentAttachmentGroupByArgs['orderBy'] }
+        : { orderBy?: AgentAttachmentGroupByArgs['orderBy'] },
+      OrderFields extends ExcludeUnderscoreKeys<Keys<MaybeTupleToUnion<T['orderBy']>>>,
+      ByFields extends MaybeTupleToUnion<T['by']>,
+      ByValid extends Has<ByFields, OrderFields>,
+      HavingFields extends GetHavingFields<T['having']>,
+      HavingValid extends Has<ByFields, HavingFields>,
+      ByEmpty extends T['by'] extends never[] ? True : False,
+      InputErrors extends ByEmpty extends True
+      ? `Error: "by" must not be empty.`
+      : HavingValid extends False
+      ? {
+          [P in HavingFields]: P extends ByFields
+            ? never
+            : P extends string
+            ? `Error: Field "${P}" used in "having" needs to be provided in "by".`
+            : [
+                Error,
+                'Field ',
+                P,
+                ` in "having" needs to be provided in "by"`,
+              ]
+        }[HavingFields]
+      : 'take' extends Keys<T>
+      ? 'orderBy' extends Keys<T>
+        ? ByValid extends True
+          ? {}
+          : {
+              [P in OrderFields]: P extends ByFields
+                ? never
+                : `Error: Field "${P}" in "orderBy" needs to be provided in "by"`
+            }[OrderFields]
+        : 'Error: If you provide "take", you also need to provide "orderBy"'
+      : 'skip' extends Keys<T>
+      ? 'orderBy' extends Keys<T>
+        ? ByValid extends True
+          ? {}
+          : {
+              [P in OrderFields]: P extends ByFields
+                ? never
+                : `Error: Field "${P}" in "orderBy" needs to be provided in "by"`
+            }[OrderFields]
+        : 'Error: If you provide "skip", you also need to provide "orderBy"'
+      : ByValid extends True
+      ? {}
+      : {
+          [P in OrderFields]: P extends ByFields
+            ? never
+            : `Error: Field "${P}" in "orderBy" needs to be provided in "by"`
+        }[OrderFields]
+    >(args: SubsetIntersection<T, AgentAttachmentGroupByArgs, OrderByArg> & InputErrors): {} extends InputErrors ? GetAgentAttachmentGroupByPayload<T> : Prisma.PrismaPromise<InputErrors>
+  /**
+   * Fields of the AgentAttachment model
+   */
+  readonly fields: AgentAttachmentFieldRefs;
+  }
+
+  /**
+   * The delegate class that acts as a "Promise-like" for AgentAttachment.
+   * Why is this prefixed with `Prisma__`?
+   * Because we want to prevent naming conflicts as mentioned in
+   * https://github.com/prisma/prisma-client-js/issues/707
+   */
+  export interface Prisma__AgentAttachmentClient<T, Null = never, ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> extends Prisma.PrismaPromise<T> {
+    readonly [Symbol.toStringTag]: 'PrismaPromise';
+
+    novel<T extends NovelDefaultArgs<ExtArgs> = {}>(args?: Subset<T, NovelDefaultArgs<ExtArgs>>): Prisma__NovelClient<$Result.GetResult<Prisma.$NovelPayload<ExtArgs>, T, 'findUniqueOrThrow'> | Null, Null, ExtArgs>;
+
+    conversation<T extends AgentConversationDefaultArgs<ExtArgs> = {}>(args?: Subset<T, AgentConversationDefaultArgs<ExtArgs>>): Prisma__AgentConversationClient<$Result.GetResult<Prisma.$AgentConversationPayload<ExtArgs>, T, 'findUniqueOrThrow'> | Null, Null, ExtArgs>;
+
+    /**
+     * Attaches callbacks for the resolution and/or rejection of the Promise.
+     * @param onfulfilled The callback to execute when the Promise is resolved.
+     * @param onrejected The callback to execute when the Promise is rejected.
+     * @returns A Promise for the completion of which ever callback is executed.
+     */
+    then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null): $Utils.JsPromise<TResult1 | TResult2>;
+    /**
+     * Attaches a callback for only the rejection of the Promise.
+     * @param onrejected The callback to execute when the Promise is rejected.
+     * @returns A Promise for the completion of the callback.
+     */
+    catch<TResult = never>(onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | undefined | null): $Utils.JsPromise<T | TResult>;
+    /**
+     * Attaches a callback that is invoked when the Promise is settled (fulfilled or rejected). The
+     * resolved value cannot be modified from the callback.
+     * @param onfinally The callback to execute when the Promise is settled (fulfilled or rejected).
+     * @returns A Promise for the completion of the callback.
+     */
+    finally(onfinally?: (() => void) | undefined | null): $Utils.JsPromise<T>;
+  }
+
+
+
+  /**
+   * Fields of the AgentAttachment model
+   */ 
+  interface AgentAttachmentFieldRefs {
+    readonly id: FieldRef<"AgentAttachment", 'String'>
+    readonly novelId: FieldRef<"AgentAttachment", 'String'>
+    readonly conversationId: FieldRef<"AgentAttachment", 'String'>
+    readonly messageId: FieldRef<"AgentAttachment", 'String'>
+    readonly originalFileName: FieldRef<"AgentAttachment", 'String'>
+    readonly extension: FieldRef<"AgentAttachment", 'String'>
+    readonly mimeType: FieldRef<"AgentAttachment", 'String'>
+    readonly sizeBytes: FieldRef<"AgentAttachment", 'Int'>
+    readonly characterCount: FieldRef<"AgentAttachment", 'Int'>
+    readonly contentHash: FieldRef<"AgentAttachment", 'String'>
+    readonly plainText: FieldRef<"AgentAttachment", 'String'>
+    readonly extractedContentJson: FieldRef<"AgentAttachment", 'String'>
+    readonly extractionMetaJson: FieldRef<"AgentAttachment", 'String'>
+    readonly extractorVersion: FieldRef<"AgentAttachment", 'String'>
+    readonly status: FieldRef<"AgentAttachment", 'String'>
+    readonly errorCode: FieldRef<"AgentAttachment", 'String'>
+    readonly errorMessage: FieldRef<"AgentAttachment", 'String'>
+    readonly createdAt: FieldRef<"AgentAttachment", 'DateTime'>
+    readonly updatedAt: FieldRef<"AgentAttachment", 'DateTime'>
+  }
+    
+
+  // Custom InputTypes
+
+  /**
+   * AgentAttachment findUnique
+   */
+  export type AgentAttachmentFindUniqueArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * Filter, which AgentAttachment to fetch.
+     */
+    where: AgentAttachmentWhereUniqueInput
+  }
+
+
+  /**
+   * AgentAttachment findUniqueOrThrow
+   */
+  export type AgentAttachmentFindUniqueOrThrowArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * Filter, which AgentAttachment to fetch.
+     */
+    where: AgentAttachmentWhereUniqueInput
+  }
+
+
+  /**
+   * AgentAttachment findFirst
+   */
+  export type AgentAttachmentFindFirstArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * Filter, which AgentAttachment to fetch.
+     */
+    where?: AgentAttachmentWhereInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/sorting Sorting Docs}
+     * 
+     * Determine the order of AgentAttachments to fetch.
+     */
+    orderBy?: AgentAttachmentOrderByWithRelationInput | AgentAttachmentOrderByWithRelationInput[]
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination#cursor-based-pagination Cursor Docs}
+     * 
+     * Sets the position for searching for AgentAttachments.
+     */
+    cursor?: AgentAttachmentWhereUniqueInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Take `±n` AgentAttachments from the position of the cursor.
+     */
+    take?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Skip the first `n` AgentAttachments.
+     */
+    skip?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/distinct Distinct Docs}
+     * 
+     * Filter by unique combinations of AgentAttachments.
+     */
+    distinct?: AgentAttachmentScalarFieldEnum | AgentAttachmentScalarFieldEnum[]
+  }
+
+
+  /**
+   * AgentAttachment findFirstOrThrow
+   */
+  export type AgentAttachmentFindFirstOrThrowArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * Filter, which AgentAttachment to fetch.
+     */
+    where?: AgentAttachmentWhereInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/sorting Sorting Docs}
+     * 
+     * Determine the order of AgentAttachments to fetch.
+     */
+    orderBy?: AgentAttachmentOrderByWithRelationInput | AgentAttachmentOrderByWithRelationInput[]
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination#cursor-based-pagination Cursor Docs}
+     * 
+     * Sets the position for searching for AgentAttachments.
+     */
+    cursor?: AgentAttachmentWhereUniqueInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Take `±n` AgentAttachments from the position of the cursor.
+     */
+    take?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Skip the first `n` AgentAttachments.
+     */
+    skip?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/distinct Distinct Docs}
+     * 
+     * Filter by unique combinations of AgentAttachments.
+     */
+    distinct?: AgentAttachmentScalarFieldEnum | AgentAttachmentScalarFieldEnum[]
+  }
+
+
+  /**
+   * AgentAttachment findMany
+   */
+  export type AgentAttachmentFindManyArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * Filter, which AgentAttachments to fetch.
+     */
+    where?: AgentAttachmentWhereInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/sorting Sorting Docs}
+     * 
+     * Determine the order of AgentAttachments to fetch.
+     */
+    orderBy?: AgentAttachmentOrderByWithRelationInput | AgentAttachmentOrderByWithRelationInput[]
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination#cursor-based-pagination Cursor Docs}
+     * 
+     * Sets the position for listing AgentAttachments.
+     */
+    cursor?: AgentAttachmentWhereUniqueInput
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Take `±n` AgentAttachments from the position of the cursor.
+     */
+    take?: number
+    /**
+     * {@link https://www.prisma.io/docs/concepts/components/prisma-client/pagination Pagination Docs}
+     * 
+     * Skip the first `n` AgentAttachments.
+     */
+    skip?: number
+    distinct?: AgentAttachmentScalarFieldEnum | AgentAttachmentScalarFieldEnum[]
+  }
+
+
+  /**
+   * AgentAttachment create
+   */
+  export type AgentAttachmentCreateArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * The data needed to create a AgentAttachment.
+     */
+    data: XOR<AgentAttachmentCreateInput, AgentAttachmentUncheckedCreateInput>
+  }
+
+
+  /**
+   * AgentAttachment update
+   */
+  export type AgentAttachmentUpdateArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * The data needed to update a AgentAttachment.
+     */
+    data: XOR<AgentAttachmentUpdateInput, AgentAttachmentUncheckedUpdateInput>
+    /**
+     * Choose, which AgentAttachment to update.
+     */
+    where: AgentAttachmentWhereUniqueInput
+  }
+
+
+  /**
+   * AgentAttachment updateMany
+   */
+  export type AgentAttachmentUpdateManyArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * The data used to update AgentAttachments.
+     */
+    data: XOR<AgentAttachmentUpdateManyMutationInput, AgentAttachmentUncheckedUpdateManyInput>
+    /**
+     * Filter which AgentAttachments to update
+     */
+    where?: AgentAttachmentWhereInput
+  }
+
+
+  /**
+   * AgentAttachment upsert
+   */
+  export type AgentAttachmentUpsertArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * The filter to search for the AgentAttachment to update in case it exists.
+     */
+    where: AgentAttachmentWhereUniqueInput
+    /**
+     * In case the AgentAttachment found by the `where` argument doesn't exist, create a new AgentAttachment with this data.
+     */
+    create: XOR<AgentAttachmentCreateInput, AgentAttachmentUncheckedCreateInput>
+    /**
+     * In case the AgentAttachment was found with the provided `where` argument, update it with this data.
+     */
+    update: XOR<AgentAttachmentUpdateInput, AgentAttachmentUncheckedUpdateInput>
+  }
+
+
+  /**
+   * AgentAttachment delete
+   */
+  export type AgentAttachmentDeleteArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
+    /**
+     * Filter which AgentAttachment to delete.
+     */
+    where: AgentAttachmentWhereUniqueInput
+  }
+
+
+  /**
+   * AgentAttachment deleteMany
+   */
+  export type AgentAttachmentDeleteManyArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Filter which AgentAttachments to delete
+     */
+    where?: AgentAttachmentWhereInput
+  }
+
+
+  /**
+   * AgentAttachment without action
+   */
+  export type AgentAttachmentDefaultArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = {
+    /**
+     * Select specific fields to fetch from the AgentAttachment
+     */
+    select?: AgentAttachmentSelect<ExtArgs> | null
+    /**
+     * Choose, which related nodes to fetch as well.
+     */
+    include?: AgentAttachmentInclude<ExtArgs> | null
   }
 
 
@@ -29057,6 +30294,31 @@ export namespace Prisma {
   export type AgentMessageScalarFieldEnum = (typeof AgentMessageScalarFieldEnum)[keyof typeof AgentMessageScalarFieldEnum]
 
 
+  export const AgentAttachmentScalarFieldEnum: {
+    id: 'id',
+    novelId: 'novelId',
+    conversationId: 'conversationId',
+    messageId: 'messageId',
+    originalFileName: 'originalFileName',
+    extension: 'extension',
+    mimeType: 'mimeType',
+    sizeBytes: 'sizeBytes',
+    characterCount: 'characterCount',
+    contentHash: 'contentHash',
+    plainText: 'plainText',
+    extractedContentJson: 'extractedContentJson',
+    extractionMetaJson: 'extractionMetaJson',
+    extractorVersion: 'extractorVersion',
+    status: 'status',
+    errorCode: 'errorCode',
+    errorMessage: 'errorMessage',
+    createdAt: 'createdAt',
+    updatedAt: 'updatedAt'
+  };
+
+  export type AgentAttachmentScalarFieldEnum = (typeof AgentAttachmentScalarFieldEnum)[keyof typeof AgentAttachmentScalarFieldEnum]
+
+
   export const AgentRunScalarFieldEnum: {
     runId: 'runId',
     conversationId: 'conversationId',
@@ -29504,6 +30766,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationListRelationFilter
     agentRuns?: AgentRunListRelationFilter
     agentArtifacts?: AgentArtifactListRelationFilter
+    agentAttachments?: AgentAttachmentListRelationFilter
   }
 
   export type NovelOrderByWithRelationInput = {
@@ -29530,6 +30793,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationOrderByRelationAggregateInput
     agentRuns?: AgentRunOrderByRelationAggregateInput
     agentArtifacts?: AgentArtifactOrderByRelationAggregateInput
+    agentAttachments?: AgentAttachmentOrderByRelationAggregateInput
   }
 
   export type NovelWhereUniqueInput = Prisma.AtLeast<{
@@ -29559,6 +30823,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationListRelationFilter
     agentRuns?: AgentRunListRelationFilter
     agentArtifacts?: AgentArtifactListRelationFilter
+    agentAttachments?: AgentAttachmentListRelationFilter
   }, "id">
 
   export type NovelOrderByWithAggregationInput = {
@@ -29788,6 +31053,7 @@ export namespace Prisma {
     messages?: AgentMessageListRelationFilter
     runs?: AgentRunListRelationFilter
     artifacts?: AgentArtifactListRelationFilter
+    attachments?: AgentAttachmentListRelationFilter
   }
 
   export type AgentConversationOrderByWithRelationInput = {
@@ -29808,6 +31074,7 @@ export namespace Prisma {
     messages?: AgentMessageOrderByRelationAggregateInput
     runs?: AgentRunOrderByRelationAggregateInput
     artifacts?: AgentArtifactOrderByRelationAggregateInput
+    attachments?: AgentAttachmentOrderByRelationAggregateInput
   }
 
   export type AgentConversationWhereUniqueInput = Prisma.AtLeast<{
@@ -29831,6 +31098,7 @@ export namespace Prisma {
     messages?: AgentMessageListRelationFilter
     runs?: AgentRunListRelationFilter
     artifacts?: AgentArtifactListRelationFilter
+    attachments?: AgentAttachmentListRelationFilter
   }, "id">
 
   export type AgentConversationOrderByWithAggregationInput = {
@@ -29929,6 +31197,136 @@ export namespace Prisma {
     content?: StringWithAggregatesFilter<"AgentMessage"> | string
     metadataJson?: StringNullableWithAggregatesFilter<"AgentMessage"> | string | null
     createdAt?: DateTimeWithAggregatesFilter<"AgentMessage"> | Date | string
+  }
+
+  export type AgentAttachmentWhereInput = {
+    AND?: AgentAttachmentWhereInput | AgentAttachmentWhereInput[]
+    OR?: AgentAttachmentWhereInput[]
+    NOT?: AgentAttachmentWhereInput | AgentAttachmentWhereInput[]
+    id?: StringFilter<"AgentAttachment"> | string
+    novelId?: StringFilter<"AgentAttachment"> | string
+    conversationId?: StringFilter<"AgentAttachment"> | string
+    messageId?: StringNullableFilter<"AgentAttachment"> | string | null
+    originalFileName?: StringFilter<"AgentAttachment"> | string
+    extension?: StringFilter<"AgentAttachment"> | string
+    mimeType?: StringNullableFilter<"AgentAttachment"> | string | null
+    sizeBytes?: IntFilter<"AgentAttachment"> | number
+    characterCount?: IntFilter<"AgentAttachment"> | number
+    contentHash?: StringFilter<"AgentAttachment"> | string
+    plainText?: StringFilter<"AgentAttachment"> | string
+    extractedContentJson?: StringFilter<"AgentAttachment"> | string
+    extractionMetaJson?: StringFilter<"AgentAttachment"> | string
+    extractorVersion?: StringFilter<"AgentAttachment"> | string
+    status?: StringFilter<"AgentAttachment"> | string
+    errorCode?: StringNullableFilter<"AgentAttachment"> | string | null
+    errorMessage?: StringNullableFilter<"AgentAttachment"> | string | null
+    createdAt?: DateTimeFilter<"AgentAttachment"> | Date | string
+    updatedAt?: DateTimeFilter<"AgentAttachment"> | Date | string
+    novel?: XOR<NovelRelationFilter, NovelWhereInput>
+    conversation?: XOR<AgentConversationRelationFilter, AgentConversationWhereInput>
+  }
+
+  export type AgentAttachmentOrderByWithRelationInput = {
+    id?: SortOrder
+    novelId?: SortOrder
+    conversationId?: SortOrder
+    messageId?: SortOrderInput | SortOrder
+    originalFileName?: SortOrder
+    extension?: SortOrder
+    mimeType?: SortOrderInput | SortOrder
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
+    contentHash?: SortOrder
+    plainText?: SortOrder
+    extractedContentJson?: SortOrder
+    extractionMetaJson?: SortOrder
+    extractorVersion?: SortOrder
+    status?: SortOrder
+    errorCode?: SortOrderInput | SortOrder
+    errorMessage?: SortOrderInput | SortOrder
+    createdAt?: SortOrder
+    updatedAt?: SortOrder
+    novel?: NovelOrderByWithRelationInput
+    conversation?: AgentConversationOrderByWithRelationInput
+  }
+
+  export type AgentAttachmentWhereUniqueInput = Prisma.AtLeast<{
+    id?: string
+    AND?: AgentAttachmentWhereInput | AgentAttachmentWhereInput[]
+    OR?: AgentAttachmentWhereInput[]
+    NOT?: AgentAttachmentWhereInput | AgentAttachmentWhereInput[]
+    novelId?: StringFilter<"AgentAttachment"> | string
+    conversationId?: StringFilter<"AgentAttachment"> | string
+    messageId?: StringNullableFilter<"AgentAttachment"> | string | null
+    originalFileName?: StringFilter<"AgentAttachment"> | string
+    extension?: StringFilter<"AgentAttachment"> | string
+    mimeType?: StringNullableFilter<"AgentAttachment"> | string | null
+    sizeBytes?: IntFilter<"AgentAttachment"> | number
+    characterCount?: IntFilter<"AgentAttachment"> | number
+    contentHash?: StringFilter<"AgentAttachment"> | string
+    plainText?: StringFilter<"AgentAttachment"> | string
+    extractedContentJson?: StringFilter<"AgentAttachment"> | string
+    extractionMetaJson?: StringFilter<"AgentAttachment"> | string
+    extractorVersion?: StringFilter<"AgentAttachment"> | string
+    status?: StringFilter<"AgentAttachment"> | string
+    errorCode?: StringNullableFilter<"AgentAttachment"> | string | null
+    errorMessage?: StringNullableFilter<"AgentAttachment"> | string | null
+    createdAt?: DateTimeFilter<"AgentAttachment"> | Date | string
+    updatedAt?: DateTimeFilter<"AgentAttachment"> | Date | string
+    novel?: XOR<NovelRelationFilter, NovelWhereInput>
+    conversation?: XOR<AgentConversationRelationFilter, AgentConversationWhereInput>
+  }, "id">
+
+  export type AgentAttachmentOrderByWithAggregationInput = {
+    id?: SortOrder
+    novelId?: SortOrder
+    conversationId?: SortOrder
+    messageId?: SortOrderInput | SortOrder
+    originalFileName?: SortOrder
+    extension?: SortOrder
+    mimeType?: SortOrderInput | SortOrder
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
+    contentHash?: SortOrder
+    plainText?: SortOrder
+    extractedContentJson?: SortOrder
+    extractionMetaJson?: SortOrder
+    extractorVersion?: SortOrder
+    status?: SortOrder
+    errorCode?: SortOrderInput | SortOrder
+    errorMessage?: SortOrderInput | SortOrder
+    createdAt?: SortOrder
+    updatedAt?: SortOrder
+    _count?: AgentAttachmentCountOrderByAggregateInput
+    _avg?: AgentAttachmentAvgOrderByAggregateInput
+    _max?: AgentAttachmentMaxOrderByAggregateInput
+    _min?: AgentAttachmentMinOrderByAggregateInput
+    _sum?: AgentAttachmentSumOrderByAggregateInput
+  }
+
+  export type AgentAttachmentScalarWhereWithAggregatesInput = {
+    AND?: AgentAttachmentScalarWhereWithAggregatesInput | AgentAttachmentScalarWhereWithAggregatesInput[]
+    OR?: AgentAttachmentScalarWhereWithAggregatesInput[]
+    NOT?: AgentAttachmentScalarWhereWithAggregatesInput | AgentAttachmentScalarWhereWithAggregatesInput[]
+    id?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    novelId?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    conversationId?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    messageId?: StringNullableWithAggregatesFilter<"AgentAttachment"> | string | null
+    originalFileName?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    extension?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    mimeType?: StringNullableWithAggregatesFilter<"AgentAttachment"> | string | null
+    sizeBytes?: IntWithAggregatesFilter<"AgentAttachment"> | number
+    characterCount?: IntWithAggregatesFilter<"AgentAttachment"> | number
+    contentHash?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    plainText?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    extractedContentJson?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    extractionMetaJson?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    extractorVersion?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    status?: StringWithAggregatesFilter<"AgentAttachment"> | string
+    errorCode?: StringNullableWithAggregatesFilter<"AgentAttachment"> | string | null
+    errorMessage?: StringNullableWithAggregatesFilter<"AgentAttachment"> | string | null
+    createdAt?: DateTimeWithAggregatesFilter<"AgentAttachment"> | Date | string
+    updatedAt?: DateTimeWithAggregatesFilter<"AgentAttachment"> | Date | string
   }
 
   export type AgentRunWhereInput = {
@@ -31828,6 +33226,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateInput = {
@@ -31854,6 +33253,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUpdateInput = {
@@ -31880,6 +33280,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateInput = {
@@ -31906,6 +33307,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUpdateManyMutationInput = {
@@ -32117,6 +33519,7 @@ export namespace Prisma {
     messages?: AgentMessageCreateNestedManyWithoutConversationInput
     runs?: AgentRunCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationUncheckedCreateInput = {
@@ -32136,6 +33539,7 @@ export namespace Prisma {
     messages?: AgentMessageUncheckedCreateNestedManyWithoutConversationInput
     runs?: AgentRunUncheckedCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactUncheckedCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentUncheckedCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationUpdateInput = {
@@ -32155,6 +33559,7 @@ export namespace Prisma {
     messages?: AgentMessageUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUncheckedUpdateInput = {
@@ -32174,6 +33579,7 @@ export namespace Prisma {
     messages?: AgentMessageUncheckedUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUncheckedUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUncheckedUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUncheckedUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUpdateManyMutationInput = {
@@ -32258,6 +33664,136 @@ export namespace Prisma {
     content?: StringFieldUpdateOperationsInput | string
     metadataJson?: NullableStringFieldUpdateOperationsInput | string | null
     createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
+  export type AgentAttachmentCreateInput = {
+    id: string
+    messageId?: string | null
+    originalFileName: string
+    extension: string
+    mimeType?: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson?: string
+    extractorVersion: string
+    status?: string
+    errorCode?: string | null
+    errorMessage?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    novel: NovelCreateNestedOneWithoutAgentAttachmentsInput
+    conversation: AgentConversationCreateNestedOneWithoutAttachmentsInput
+  }
+
+  export type AgentAttachmentUncheckedCreateInput = {
+    id: string
+    novelId: string
+    conversationId: string
+    messageId?: string | null
+    originalFileName: string
+    extension: string
+    mimeType?: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson?: string
+    extractorVersion: string
+    status?: string
+    errorCode?: string | null
+    errorMessage?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+  }
+
+  export type AgentAttachmentUpdateInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    novel?: NovelUpdateOneRequiredWithoutAgentAttachmentsNestedInput
+    conversation?: AgentConversationUpdateOneRequiredWithoutAttachmentsNestedInput
+  }
+
+  export type AgentAttachmentUncheckedUpdateInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    novelId?: StringFieldUpdateOperationsInput | string
+    conversationId?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
+  export type AgentAttachmentUpdateManyMutationInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
+  export type AgentAttachmentUncheckedUpdateManyInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    novelId?: StringFieldUpdateOperationsInput | string
+    conversationId?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
   }
 
   export type AgentRunCreateInput = {
@@ -34180,6 +35716,12 @@ export namespace Prisma {
     none?: AgentArtifactWhereInput
   }
 
+  export type AgentAttachmentListRelationFilter = {
+    every?: AgentAttachmentWhereInput
+    some?: AgentAttachmentWhereInput
+    none?: AgentAttachmentWhereInput
+  }
+
   export type SortOrderInput = {
     sort: SortOrder
     nulls?: NullsOrder
@@ -34234,6 +35776,10 @@ export namespace Prisma {
   }
 
   export type AgentArtifactOrderByRelationAggregateInput = {
+    _count?: SortOrder
+  }
+
+  export type AgentAttachmentOrderByRelationAggregateInput = {
     _count?: SortOrder
   }
 
@@ -34570,6 +36116,82 @@ export namespace Prisma {
     content?: SortOrder
     metadataJson?: SortOrder
     createdAt?: SortOrder
+  }
+
+  export type AgentAttachmentCountOrderByAggregateInput = {
+    id?: SortOrder
+    novelId?: SortOrder
+    conversationId?: SortOrder
+    messageId?: SortOrder
+    originalFileName?: SortOrder
+    extension?: SortOrder
+    mimeType?: SortOrder
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
+    contentHash?: SortOrder
+    plainText?: SortOrder
+    extractedContentJson?: SortOrder
+    extractionMetaJson?: SortOrder
+    extractorVersion?: SortOrder
+    status?: SortOrder
+    errorCode?: SortOrder
+    errorMessage?: SortOrder
+    createdAt?: SortOrder
+    updatedAt?: SortOrder
+  }
+
+  export type AgentAttachmentAvgOrderByAggregateInput = {
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
+  }
+
+  export type AgentAttachmentMaxOrderByAggregateInput = {
+    id?: SortOrder
+    novelId?: SortOrder
+    conversationId?: SortOrder
+    messageId?: SortOrder
+    originalFileName?: SortOrder
+    extension?: SortOrder
+    mimeType?: SortOrder
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
+    contentHash?: SortOrder
+    plainText?: SortOrder
+    extractedContentJson?: SortOrder
+    extractionMetaJson?: SortOrder
+    extractorVersion?: SortOrder
+    status?: SortOrder
+    errorCode?: SortOrder
+    errorMessage?: SortOrder
+    createdAt?: SortOrder
+    updatedAt?: SortOrder
+  }
+
+  export type AgentAttachmentMinOrderByAggregateInput = {
+    id?: SortOrder
+    novelId?: SortOrder
+    conversationId?: SortOrder
+    messageId?: SortOrder
+    originalFileName?: SortOrder
+    extension?: SortOrder
+    mimeType?: SortOrder
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
+    contentHash?: SortOrder
+    plainText?: SortOrder
+    extractedContentJson?: SortOrder
+    extractionMetaJson?: SortOrder
+    extractorVersion?: SortOrder
+    status?: SortOrder
+    errorCode?: SortOrder
+    errorMessage?: SortOrder
+    createdAt?: SortOrder
+    updatedAt?: SortOrder
+  }
+
+  export type AgentAttachmentSumOrderByAggregateInput = {
+    sizeBytes?: SortOrder
+    characterCount?: SortOrder
   }
 
   export type FloatFilter<$PrismaModel = never> = {
@@ -35960,6 +37582,12 @@ export namespace Prisma {
     connect?: AgentArtifactWhereUniqueInput | AgentArtifactWhereUniqueInput[]
   }
 
+  export type AgentAttachmentCreateNestedManyWithoutNovelInput = {
+    create?: XOR<AgentAttachmentCreateWithoutNovelInput, AgentAttachmentUncheckedCreateWithoutNovelInput> | AgentAttachmentCreateWithoutNovelInput[] | AgentAttachmentUncheckedCreateWithoutNovelInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutNovelInput | AgentAttachmentCreateOrConnectWithoutNovelInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+  }
+
   export type VolumeUncheckedCreateNestedManyWithoutNovelInput = {
     create?: XOR<VolumeCreateWithoutNovelInput, VolumeUncheckedCreateWithoutNovelInput> | VolumeCreateWithoutNovelInput[] | VolumeUncheckedCreateWithoutNovelInput[]
     connectOrCreate?: VolumeCreateOrConnectWithoutNovelInput | VolumeCreateOrConnectWithoutNovelInput[]
@@ -36036,6 +37664,12 @@ export namespace Prisma {
     create?: XOR<AgentArtifactCreateWithoutNovelInput, AgentArtifactUncheckedCreateWithoutNovelInput> | AgentArtifactCreateWithoutNovelInput[] | AgentArtifactUncheckedCreateWithoutNovelInput[]
     connectOrCreate?: AgentArtifactCreateOrConnectWithoutNovelInput | AgentArtifactCreateOrConnectWithoutNovelInput[]
     connect?: AgentArtifactWhereUniqueInput | AgentArtifactWhereUniqueInput[]
+  }
+
+  export type AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput = {
+    create?: XOR<AgentAttachmentCreateWithoutNovelInput, AgentAttachmentUncheckedCreateWithoutNovelInput> | AgentAttachmentCreateWithoutNovelInput[] | AgentAttachmentUncheckedCreateWithoutNovelInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutNovelInput | AgentAttachmentCreateOrConnectWithoutNovelInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
   }
 
   export type StringFieldUpdateOperationsInput = {
@@ -36231,6 +37865,19 @@ export namespace Prisma {
     deleteMany?: AgentArtifactScalarWhereInput | AgentArtifactScalarWhereInput[]
   }
 
+  export type AgentAttachmentUpdateManyWithoutNovelNestedInput = {
+    create?: XOR<AgentAttachmentCreateWithoutNovelInput, AgentAttachmentUncheckedCreateWithoutNovelInput> | AgentAttachmentCreateWithoutNovelInput[] | AgentAttachmentUncheckedCreateWithoutNovelInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutNovelInput | AgentAttachmentCreateOrConnectWithoutNovelInput[]
+    upsert?: AgentAttachmentUpsertWithWhereUniqueWithoutNovelInput | AgentAttachmentUpsertWithWhereUniqueWithoutNovelInput[]
+    set?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    disconnect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    delete?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    update?: AgentAttachmentUpdateWithWhereUniqueWithoutNovelInput | AgentAttachmentUpdateWithWhereUniqueWithoutNovelInput[]
+    updateMany?: AgentAttachmentUpdateManyWithWhereWithoutNovelInput | AgentAttachmentUpdateManyWithWhereWithoutNovelInput[]
+    deleteMany?: AgentAttachmentScalarWhereInput | AgentAttachmentScalarWhereInput[]
+  }
+
   export type VolumeUncheckedUpdateManyWithoutNovelNestedInput = {
     create?: XOR<VolumeCreateWithoutNovelInput, VolumeUncheckedCreateWithoutNovelInput> | VolumeCreateWithoutNovelInput[] | VolumeUncheckedCreateWithoutNovelInput[]
     connectOrCreate?: VolumeCreateOrConnectWithoutNovelInput | VolumeCreateOrConnectWithoutNovelInput[]
@@ -36398,6 +38045,19 @@ export namespace Prisma {
     update?: AgentArtifactUpdateWithWhereUniqueWithoutNovelInput | AgentArtifactUpdateWithWhereUniqueWithoutNovelInput[]
     updateMany?: AgentArtifactUpdateManyWithWhereWithoutNovelInput | AgentArtifactUpdateManyWithWhereWithoutNovelInput[]
     deleteMany?: AgentArtifactScalarWhereInput | AgentArtifactScalarWhereInput[]
+  }
+
+  export type AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput = {
+    create?: XOR<AgentAttachmentCreateWithoutNovelInput, AgentAttachmentUncheckedCreateWithoutNovelInput> | AgentAttachmentCreateWithoutNovelInput[] | AgentAttachmentUncheckedCreateWithoutNovelInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutNovelInput | AgentAttachmentCreateOrConnectWithoutNovelInput[]
+    upsert?: AgentAttachmentUpsertWithWhereUniqueWithoutNovelInput | AgentAttachmentUpsertWithWhereUniqueWithoutNovelInput[]
+    set?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    disconnect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    delete?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    update?: AgentAttachmentUpdateWithWhereUniqueWithoutNovelInput | AgentAttachmentUpdateWithWhereUniqueWithoutNovelInput[]
+    updateMany?: AgentAttachmentUpdateManyWithWhereWithoutNovelInput | AgentAttachmentUpdateManyWithWhereWithoutNovelInput[]
+    deleteMany?: AgentAttachmentScalarWhereInput | AgentAttachmentScalarWhereInput[]
   }
 
   export type NovelCreateNestedOneWithoutVolumesInput = {
@@ -36680,6 +38340,12 @@ export namespace Prisma {
     connect?: AgentArtifactWhereUniqueInput | AgentArtifactWhereUniqueInput[]
   }
 
+  export type AgentAttachmentCreateNestedManyWithoutConversationInput = {
+    create?: XOR<AgentAttachmentCreateWithoutConversationInput, AgentAttachmentUncheckedCreateWithoutConversationInput> | AgentAttachmentCreateWithoutConversationInput[] | AgentAttachmentUncheckedCreateWithoutConversationInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutConversationInput | AgentAttachmentCreateOrConnectWithoutConversationInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+  }
+
   export type AgentMessageUncheckedCreateNestedManyWithoutConversationInput = {
     create?: XOR<AgentMessageCreateWithoutConversationInput, AgentMessageUncheckedCreateWithoutConversationInput> | AgentMessageCreateWithoutConversationInput[] | AgentMessageUncheckedCreateWithoutConversationInput[]
     connectOrCreate?: AgentMessageCreateOrConnectWithoutConversationInput | AgentMessageCreateOrConnectWithoutConversationInput[]
@@ -36696,6 +38362,12 @@ export namespace Prisma {
     create?: XOR<AgentArtifactCreateWithoutConversationInput, AgentArtifactUncheckedCreateWithoutConversationInput> | AgentArtifactCreateWithoutConversationInput[] | AgentArtifactUncheckedCreateWithoutConversationInput[]
     connectOrCreate?: AgentArtifactCreateOrConnectWithoutConversationInput | AgentArtifactCreateOrConnectWithoutConversationInput[]
     connect?: AgentArtifactWhereUniqueInput | AgentArtifactWhereUniqueInput[]
+  }
+
+  export type AgentAttachmentUncheckedCreateNestedManyWithoutConversationInput = {
+    create?: XOR<AgentAttachmentCreateWithoutConversationInput, AgentAttachmentUncheckedCreateWithoutConversationInput> | AgentAttachmentCreateWithoutConversationInput[] | AgentAttachmentUncheckedCreateWithoutConversationInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutConversationInput | AgentAttachmentCreateOrConnectWithoutConversationInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
   }
 
   export type NovelUpdateOneRequiredWithoutAgentConversationsNestedInput = {
@@ -36745,6 +38417,19 @@ export namespace Prisma {
     deleteMany?: AgentArtifactScalarWhereInput | AgentArtifactScalarWhereInput[]
   }
 
+  export type AgentAttachmentUpdateManyWithoutConversationNestedInput = {
+    create?: XOR<AgentAttachmentCreateWithoutConversationInput, AgentAttachmentUncheckedCreateWithoutConversationInput> | AgentAttachmentCreateWithoutConversationInput[] | AgentAttachmentUncheckedCreateWithoutConversationInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutConversationInput | AgentAttachmentCreateOrConnectWithoutConversationInput[]
+    upsert?: AgentAttachmentUpsertWithWhereUniqueWithoutConversationInput | AgentAttachmentUpsertWithWhereUniqueWithoutConversationInput[]
+    set?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    disconnect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    delete?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    update?: AgentAttachmentUpdateWithWhereUniqueWithoutConversationInput | AgentAttachmentUpdateWithWhereUniqueWithoutConversationInput[]
+    updateMany?: AgentAttachmentUpdateManyWithWhereWithoutConversationInput | AgentAttachmentUpdateManyWithWhereWithoutConversationInput[]
+    deleteMany?: AgentAttachmentScalarWhereInput | AgentAttachmentScalarWhereInput[]
+  }
+
   export type AgentMessageUncheckedUpdateManyWithoutConversationNestedInput = {
     create?: XOR<AgentMessageCreateWithoutConversationInput, AgentMessageUncheckedCreateWithoutConversationInput> | AgentMessageCreateWithoutConversationInput[] | AgentMessageUncheckedCreateWithoutConversationInput[]
     connectOrCreate?: AgentMessageCreateOrConnectWithoutConversationInput | AgentMessageCreateOrConnectWithoutConversationInput[]
@@ -36784,6 +38469,19 @@ export namespace Prisma {
     deleteMany?: AgentArtifactScalarWhereInput | AgentArtifactScalarWhereInput[]
   }
 
+  export type AgentAttachmentUncheckedUpdateManyWithoutConversationNestedInput = {
+    create?: XOR<AgentAttachmentCreateWithoutConversationInput, AgentAttachmentUncheckedCreateWithoutConversationInput> | AgentAttachmentCreateWithoutConversationInput[] | AgentAttachmentUncheckedCreateWithoutConversationInput[]
+    connectOrCreate?: AgentAttachmentCreateOrConnectWithoutConversationInput | AgentAttachmentCreateOrConnectWithoutConversationInput[]
+    upsert?: AgentAttachmentUpsertWithWhereUniqueWithoutConversationInput | AgentAttachmentUpsertWithWhereUniqueWithoutConversationInput[]
+    set?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    disconnect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    delete?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    connect?: AgentAttachmentWhereUniqueInput | AgentAttachmentWhereUniqueInput[]
+    update?: AgentAttachmentUpdateWithWhereUniqueWithoutConversationInput | AgentAttachmentUpdateWithWhereUniqueWithoutConversationInput[]
+    updateMany?: AgentAttachmentUpdateManyWithWhereWithoutConversationInput | AgentAttachmentUpdateManyWithWhereWithoutConversationInput[]
+    deleteMany?: AgentAttachmentScalarWhereInput | AgentAttachmentScalarWhereInput[]
+  }
+
   export type AgentConversationCreateNestedOneWithoutMessagesInput = {
     create?: XOR<AgentConversationCreateWithoutMessagesInput, AgentConversationUncheckedCreateWithoutMessagesInput>
     connectOrCreate?: AgentConversationCreateOrConnectWithoutMessagesInput
@@ -36796,6 +38494,34 @@ export namespace Prisma {
     upsert?: AgentConversationUpsertWithoutMessagesInput
     connect?: AgentConversationWhereUniqueInput
     update?: XOR<XOR<AgentConversationUpdateToOneWithWhereWithoutMessagesInput, AgentConversationUpdateWithoutMessagesInput>, AgentConversationUncheckedUpdateWithoutMessagesInput>
+  }
+
+  export type NovelCreateNestedOneWithoutAgentAttachmentsInput = {
+    create?: XOR<NovelCreateWithoutAgentAttachmentsInput, NovelUncheckedCreateWithoutAgentAttachmentsInput>
+    connectOrCreate?: NovelCreateOrConnectWithoutAgentAttachmentsInput
+    connect?: NovelWhereUniqueInput
+  }
+
+  export type AgentConversationCreateNestedOneWithoutAttachmentsInput = {
+    create?: XOR<AgentConversationCreateWithoutAttachmentsInput, AgentConversationUncheckedCreateWithoutAttachmentsInput>
+    connectOrCreate?: AgentConversationCreateOrConnectWithoutAttachmentsInput
+    connect?: AgentConversationWhereUniqueInput
+  }
+
+  export type NovelUpdateOneRequiredWithoutAgentAttachmentsNestedInput = {
+    create?: XOR<NovelCreateWithoutAgentAttachmentsInput, NovelUncheckedCreateWithoutAgentAttachmentsInput>
+    connectOrCreate?: NovelCreateOrConnectWithoutAgentAttachmentsInput
+    upsert?: NovelUpsertWithoutAgentAttachmentsInput
+    connect?: NovelWhereUniqueInput
+    update?: XOR<XOR<NovelUpdateToOneWithWhereWithoutAgentAttachmentsInput, NovelUpdateWithoutAgentAttachmentsInput>, NovelUncheckedUpdateWithoutAgentAttachmentsInput>
+  }
+
+  export type AgentConversationUpdateOneRequiredWithoutAttachmentsNestedInput = {
+    create?: XOR<AgentConversationCreateWithoutAttachmentsInput, AgentConversationUncheckedCreateWithoutAttachmentsInput>
+    connectOrCreate?: AgentConversationCreateOrConnectWithoutAttachmentsInput
+    upsert?: AgentConversationUpsertWithoutAttachmentsInput
+    connect?: AgentConversationWhereUniqueInput
+    update?: XOR<XOR<AgentConversationUpdateToOneWithWhereWithoutAttachmentsInput, AgentConversationUpdateWithoutAttachmentsInput>, AgentConversationUncheckedUpdateWithoutAttachmentsInput>
   }
 
   export type AgentConversationCreateNestedOneWithoutRunsInput = {
@@ -38386,6 +40112,7 @@ export namespace Prisma {
     messages?: AgentMessageCreateNestedManyWithoutConversationInput
     runs?: AgentRunCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationUncheckedCreateWithoutNovelInput = {
@@ -38404,6 +40131,7 @@ export namespace Prisma {
     messages?: AgentMessageUncheckedCreateNestedManyWithoutConversationInput
     runs?: AgentRunUncheckedCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactUncheckedCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentUncheckedCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationCreateOrConnectWithoutNovelInput = {
@@ -38499,6 +40227,53 @@ export namespace Prisma {
   export type AgentArtifactCreateOrConnectWithoutNovelInput = {
     where: AgentArtifactWhereUniqueInput
     create: XOR<AgentArtifactCreateWithoutNovelInput, AgentArtifactUncheckedCreateWithoutNovelInput>
+  }
+
+  export type AgentAttachmentCreateWithoutNovelInput = {
+    id: string
+    messageId?: string | null
+    originalFileName: string
+    extension: string
+    mimeType?: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson?: string
+    extractorVersion: string
+    status?: string
+    errorCode?: string | null
+    errorMessage?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    conversation: AgentConversationCreateNestedOneWithoutAttachmentsInput
+  }
+
+  export type AgentAttachmentUncheckedCreateWithoutNovelInput = {
+    id: string
+    conversationId: string
+    messageId?: string | null
+    originalFileName: string
+    extension: string
+    mimeType?: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson?: string
+    extractorVersion: string
+    status?: string
+    errorCode?: string | null
+    errorMessage?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+  }
+
+  export type AgentAttachmentCreateOrConnectWithoutNovelInput = {
+    where: AgentAttachmentWhereUniqueInput
+    create: XOR<AgentAttachmentCreateWithoutNovelInput, AgentAttachmentUncheckedCreateWithoutNovelInput>
   }
 
   export type VolumeUpsertWithWhereUniqueWithoutNovelInput = {
@@ -38963,6 +40738,47 @@ export namespace Prisma {
     updatedAt?: DateTimeFilter<"AgentArtifact"> | Date | string
   }
 
+  export type AgentAttachmentUpsertWithWhereUniqueWithoutNovelInput = {
+    where: AgentAttachmentWhereUniqueInput
+    update: XOR<AgentAttachmentUpdateWithoutNovelInput, AgentAttachmentUncheckedUpdateWithoutNovelInput>
+    create: XOR<AgentAttachmentCreateWithoutNovelInput, AgentAttachmentUncheckedCreateWithoutNovelInput>
+  }
+
+  export type AgentAttachmentUpdateWithWhereUniqueWithoutNovelInput = {
+    where: AgentAttachmentWhereUniqueInput
+    data: XOR<AgentAttachmentUpdateWithoutNovelInput, AgentAttachmentUncheckedUpdateWithoutNovelInput>
+  }
+
+  export type AgentAttachmentUpdateManyWithWhereWithoutNovelInput = {
+    where: AgentAttachmentScalarWhereInput
+    data: XOR<AgentAttachmentUpdateManyMutationInput, AgentAttachmentUncheckedUpdateManyWithoutNovelInput>
+  }
+
+  export type AgentAttachmentScalarWhereInput = {
+    AND?: AgentAttachmentScalarWhereInput | AgentAttachmentScalarWhereInput[]
+    OR?: AgentAttachmentScalarWhereInput[]
+    NOT?: AgentAttachmentScalarWhereInput | AgentAttachmentScalarWhereInput[]
+    id?: StringFilter<"AgentAttachment"> | string
+    novelId?: StringFilter<"AgentAttachment"> | string
+    conversationId?: StringFilter<"AgentAttachment"> | string
+    messageId?: StringNullableFilter<"AgentAttachment"> | string | null
+    originalFileName?: StringFilter<"AgentAttachment"> | string
+    extension?: StringFilter<"AgentAttachment"> | string
+    mimeType?: StringNullableFilter<"AgentAttachment"> | string | null
+    sizeBytes?: IntFilter<"AgentAttachment"> | number
+    characterCount?: IntFilter<"AgentAttachment"> | number
+    contentHash?: StringFilter<"AgentAttachment"> | string
+    plainText?: StringFilter<"AgentAttachment"> | string
+    extractedContentJson?: StringFilter<"AgentAttachment"> | string
+    extractionMetaJson?: StringFilter<"AgentAttachment"> | string
+    extractorVersion?: StringFilter<"AgentAttachment"> | string
+    status?: StringFilter<"AgentAttachment"> | string
+    errorCode?: StringNullableFilter<"AgentAttachment"> | string | null
+    errorMessage?: StringNullableFilter<"AgentAttachment"> | string | null
+    createdAt?: DateTimeFilter<"AgentAttachment"> | Date | string
+    updatedAt?: DateTimeFilter<"AgentAttachment"> | Date | string
+  }
+
   export type NovelCreateWithoutVolumesInput = {
     id?: string
     title: string
@@ -38986,6 +40802,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutVolumesInput = {
@@ -39011,6 +40828,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutVolumesInput = {
@@ -39223,6 +41041,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutVolumesInput = {
@@ -39248,6 +41067,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type ChapterUpsertWithWhereUniqueWithoutVolumeInput = {
@@ -39593,6 +41413,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutAgentConversationsInput = {
@@ -39618,6 +41439,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutAgentConversationsInput = {
@@ -39736,6 +41558,53 @@ export namespace Prisma {
     create: XOR<AgentArtifactCreateWithoutConversationInput, AgentArtifactUncheckedCreateWithoutConversationInput>
   }
 
+  export type AgentAttachmentCreateWithoutConversationInput = {
+    id: string
+    messageId?: string | null
+    originalFileName: string
+    extension: string
+    mimeType?: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson?: string
+    extractorVersion: string
+    status?: string
+    errorCode?: string | null
+    errorMessage?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    novel: NovelCreateNestedOneWithoutAgentAttachmentsInput
+  }
+
+  export type AgentAttachmentUncheckedCreateWithoutConversationInput = {
+    id: string
+    novelId: string
+    messageId?: string | null
+    originalFileName: string
+    extension: string
+    mimeType?: string | null
+    sizeBytes: number
+    characterCount: number
+    contentHash: string
+    plainText: string
+    extractedContentJson: string
+    extractionMetaJson?: string
+    extractorVersion: string
+    status?: string
+    errorCode?: string | null
+    errorMessage?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+  }
+
+  export type AgentAttachmentCreateOrConnectWithoutConversationInput = {
+    where: AgentAttachmentWhereUniqueInput
+    create: XOR<AgentAttachmentCreateWithoutConversationInput, AgentAttachmentUncheckedCreateWithoutConversationInput>
+  }
+
   export type NovelUpsertWithoutAgentConversationsInput = {
     update: XOR<NovelUpdateWithoutAgentConversationsInput, NovelUncheckedUpdateWithoutAgentConversationsInput>
     create: XOR<NovelCreateWithoutAgentConversationsInput, NovelUncheckedCreateWithoutAgentConversationsInput>
@@ -39770,6 +41639,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutAgentConversationsInput = {
@@ -39795,6 +41665,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type AgentMessageUpsertWithWhereUniqueWithoutConversationInput = {
@@ -39857,6 +41728,22 @@ export namespace Prisma {
     data: XOR<AgentArtifactUpdateManyMutationInput, AgentArtifactUncheckedUpdateManyWithoutConversationInput>
   }
 
+  export type AgentAttachmentUpsertWithWhereUniqueWithoutConversationInput = {
+    where: AgentAttachmentWhereUniqueInput
+    update: XOR<AgentAttachmentUpdateWithoutConversationInput, AgentAttachmentUncheckedUpdateWithoutConversationInput>
+    create: XOR<AgentAttachmentCreateWithoutConversationInput, AgentAttachmentUncheckedCreateWithoutConversationInput>
+  }
+
+  export type AgentAttachmentUpdateWithWhereUniqueWithoutConversationInput = {
+    where: AgentAttachmentWhereUniqueInput
+    data: XOR<AgentAttachmentUpdateWithoutConversationInput, AgentAttachmentUncheckedUpdateWithoutConversationInput>
+  }
+
+  export type AgentAttachmentUpdateManyWithWhereWithoutConversationInput = {
+    where: AgentAttachmentScalarWhereInput
+    data: XOR<AgentAttachmentUpdateManyMutationInput, AgentAttachmentUncheckedUpdateManyWithoutConversationInput>
+  }
+
   export type AgentConversationCreateWithoutMessagesInput = {
     id: string
     title: string
@@ -39873,6 +41760,7 @@ export namespace Prisma {
     novel: NovelCreateNestedOneWithoutAgentConversationsInput
     runs?: AgentRunCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationUncheckedCreateWithoutMessagesInput = {
@@ -39891,6 +41779,7 @@ export namespace Prisma {
     updatedAt?: Date | string
     runs?: AgentRunUncheckedCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactUncheckedCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentUncheckedCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationCreateOrConnectWithoutMessagesInput = {
@@ -39925,6 +41814,7 @@ export namespace Prisma {
     novel?: NovelUpdateOneRequiredWithoutAgentConversationsNestedInput
     runs?: AgentRunUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUncheckedUpdateWithoutMessagesInput = {
@@ -39941,6 +41831,219 @@ export namespace Prisma {
     error?: NullableStringFieldUpdateOperationsInput | string | null
     createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
     updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    runs?: AgentRunUncheckedUpdateManyWithoutConversationNestedInput
+    artifacts?: AgentArtifactUncheckedUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUncheckedUpdateManyWithoutConversationNestedInput
+  }
+
+  export type NovelCreateWithoutAgentAttachmentsInput = {
+    id?: string
+    title: string
+    description?: string | null
+    coverUrl?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    version?: number
+    deleted?: boolean
+    wordCount?: number
+    formatting?: string
+    volumes?: VolumeCreateNestedManyWithoutNovelInput
+    characters?: CharacterCreateNestedManyWithoutNovelInput
+    items?: ItemCreateNestedManyWithoutNovelInput
+    ideas?: IdeaCreateNestedManyWithoutNovelInput
+    tags?: TagCreateNestedManyWithoutNovelInput
+    plotLines?: PlotLineCreateNestedManyWithoutNovelInput
+    plotPoints?: PlotPointCreateNestedManyWithoutNovelInput
+    worldSettings?: WorldSettingCreateNestedManyWithoutNovelInput
+    chapterSummaries?: ChapterSummaryCreateNestedManyWithoutNovelInput
+    narrativeSummaries?: NarrativeSummaryCreateNestedManyWithoutNovelInput
+    agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
+    agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
+    agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+  }
+
+  export type NovelUncheckedCreateWithoutAgentAttachmentsInput = {
+    id?: string
+    title: string
+    description?: string | null
+    coverUrl?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    version?: number
+    deleted?: boolean
+    wordCount?: number
+    formatting?: string
+    volumes?: VolumeUncheckedCreateNestedManyWithoutNovelInput
+    characters?: CharacterUncheckedCreateNestedManyWithoutNovelInput
+    items?: ItemUncheckedCreateNestedManyWithoutNovelInput
+    ideas?: IdeaUncheckedCreateNestedManyWithoutNovelInput
+    tags?: TagUncheckedCreateNestedManyWithoutNovelInput
+    plotLines?: PlotLineUncheckedCreateNestedManyWithoutNovelInput
+    plotPoints?: PlotPointUncheckedCreateNestedManyWithoutNovelInput
+    worldSettings?: WorldSettingUncheckedCreateNestedManyWithoutNovelInput
+    chapterSummaries?: ChapterSummaryUncheckedCreateNestedManyWithoutNovelInput
+    narrativeSummaries?: NarrativeSummaryUncheckedCreateNestedManyWithoutNovelInput
+    agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
+    agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
+    agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+  }
+
+  export type NovelCreateOrConnectWithoutAgentAttachmentsInput = {
+    where: NovelWhereUniqueInput
+    create: XOR<NovelCreateWithoutAgentAttachmentsInput, NovelUncheckedCreateWithoutAgentAttachmentsInput>
+  }
+
+  export type AgentConversationCreateWithoutAttachmentsInput = {
+    id: string
+    title: string
+    description?: string | null
+    role: string
+    runtimeConversationId?: string | null
+    suggestedGoal?: string | null
+    planJson?: string | null
+    runJson?: string | null
+    contextSummaryJson?: string | null
+    error?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    novel: NovelCreateNestedOneWithoutAgentConversationsInput
+    messages?: AgentMessageCreateNestedManyWithoutConversationInput
+    runs?: AgentRunCreateNestedManyWithoutConversationInput
+    artifacts?: AgentArtifactCreateNestedManyWithoutConversationInput
+  }
+
+  export type AgentConversationUncheckedCreateWithoutAttachmentsInput = {
+    id: string
+    novelId: string
+    title: string
+    description?: string | null
+    role: string
+    runtimeConversationId?: string | null
+    suggestedGoal?: string | null
+    planJson?: string | null
+    runJson?: string | null
+    contextSummaryJson?: string | null
+    error?: string | null
+    createdAt?: Date | string
+    updatedAt?: Date | string
+    messages?: AgentMessageUncheckedCreateNestedManyWithoutConversationInput
+    runs?: AgentRunUncheckedCreateNestedManyWithoutConversationInput
+    artifacts?: AgentArtifactUncheckedCreateNestedManyWithoutConversationInput
+  }
+
+  export type AgentConversationCreateOrConnectWithoutAttachmentsInput = {
+    where: AgentConversationWhereUniqueInput
+    create: XOR<AgentConversationCreateWithoutAttachmentsInput, AgentConversationUncheckedCreateWithoutAttachmentsInput>
+  }
+
+  export type NovelUpsertWithoutAgentAttachmentsInput = {
+    update: XOR<NovelUpdateWithoutAgentAttachmentsInput, NovelUncheckedUpdateWithoutAgentAttachmentsInput>
+    create: XOR<NovelCreateWithoutAgentAttachmentsInput, NovelUncheckedCreateWithoutAgentAttachmentsInput>
+    where?: NovelWhereInput
+  }
+
+  export type NovelUpdateToOneWithWhereWithoutAgentAttachmentsInput = {
+    where?: NovelWhereInput
+    data: XOR<NovelUpdateWithoutAgentAttachmentsInput, NovelUncheckedUpdateWithoutAgentAttachmentsInput>
+  }
+
+  export type NovelUpdateWithoutAgentAttachmentsInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    title?: StringFieldUpdateOperationsInput | string
+    description?: NullableStringFieldUpdateOperationsInput | string | null
+    coverUrl?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    version?: IntFieldUpdateOperationsInput | number
+    deleted?: BoolFieldUpdateOperationsInput | boolean
+    wordCount?: IntFieldUpdateOperationsInput | number
+    formatting?: StringFieldUpdateOperationsInput | string
+    volumes?: VolumeUpdateManyWithoutNovelNestedInput
+    characters?: CharacterUpdateManyWithoutNovelNestedInput
+    items?: ItemUpdateManyWithoutNovelNestedInput
+    ideas?: IdeaUpdateManyWithoutNovelNestedInput
+    tags?: TagUpdateManyWithoutNovelNestedInput
+    plotLines?: PlotLineUpdateManyWithoutNovelNestedInput
+    plotPoints?: PlotPointUpdateManyWithoutNovelNestedInput
+    worldSettings?: WorldSettingUpdateManyWithoutNovelNestedInput
+    chapterSummaries?: ChapterSummaryUpdateManyWithoutNovelNestedInput
+    narrativeSummaries?: NarrativeSummaryUpdateManyWithoutNovelNestedInput
+    agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
+    agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
+    agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+  }
+
+  export type NovelUncheckedUpdateWithoutAgentAttachmentsInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    title?: StringFieldUpdateOperationsInput | string
+    description?: NullableStringFieldUpdateOperationsInput | string | null
+    coverUrl?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    version?: IntFieldUpdateOperationsInput | number
+    deleted?: BoolFieldUpdateOperationsInput | boolean
+    wordCount?: IntFieldUpdateOperationsInput | number
+    formatting?: StringFieldUpdateOperationsInput | string
+    volumes?: VolumeUncheckedUpdateManyWithoutNovelNestedInput
+    characters?: CharacterUncheckedUpdateManyWithoutNovelNestedInput
+    items?: ItemUncheckedUpdateManyWithoutNovelNestedInput
+    ideas?: IdeaUncheckedUpdateManyWithoutNovelNestedInput
+    tags?: TagUncheckedUpdateManyWithoutNovelNestedInput
+    plotLines?: PlotLineUncheckedUpdateManyWithoutNovelNestedInput
+    plotPoints?: PlotPointUncheckedUpdateManyWithoutNovelNestedInput
+    worldSettings?: WorldSettingUncheckedUpdateManyWithoutNovelNestedInput
+    chapterSummaries?: ChapterSummaryUncheckedUpdateManyWithoutNovelNestedInput
+    narrativeSummaries?: NarrativeSummaryUncheckedUpdateManyWithoutNovelNestedInput
+    agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
+    agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
+    agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+  }
+
+  export type AgentConversationUpsertWithoutAttachmentsInput = {
+    update: XOR<AgentConversationUpdateWithoutAttachmentsInput, AgentConversationUncheckedUpdateWithoutAttachmentsInput>
+    create: XOR<AgentConversationCreateWithoutAttachmentsInput, AgentConversationUncheckedCreateWithoutAttachmentsInput>
+    where?: AgentConversationWhereInput
+  }
+
+  export type AgentConversationUpdateToOneWithWhereWithoutAttachmentsInput = {
+    where?: AgentConversationWhereInput
+    data: XOR<AgentConversationUpdateWithoutAttachmentsInput, AgentConversationUncheckedUpdateWithoutAttachmentsInput>
+  }
+
+  export type AgentConversationUpdateWithoutAttachmentsInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    title?: StringFieldUpdateOperationsInput | string
+    description?: NullableStringFieldUpdateOperationsInput | string | null
+    role?: StringFieldUpdateOperationsInput | string
+    runtimeConversationId?: NullableStringFieldUpdateOperationsInput | string | null
+    suggestedGoal?: NullableStringFieldUpdateOperationsInput | string | null
+    planJson?: NullableStringFieldUpdateOperationsInput | string | null
+    runJson?: NullableStringFieldUpdateOperationsInput | string | null
+    contextSummaryJson?: NullableStringFieldUpdateOperationsInput | string | null
+    error?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    novel?: NovelUpdateOneRequiredWithoutAgentConversationsNestedInput
+    messages?: AgentMessageUpdateManyWithoutConversationNestedInput
+    runs?: AgentRunUpdateManyWithoutConversationNestedInput
+    artifacts?: AgentArtifactUpdateManyWithoutConversationNestedInput
+  }
+
+  export type AgentConversationUncheckedUpdateWithoutAttachmentsInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    novelId?: StringFieldUpdateOperationsInput | string
+    title?: StringFieldUpdateOperationsInput | string
+    description?: NullableStringFieldUpdateOperationsInput | string | null
+    role?: StringFieldUpdateOperationsInput | string
+    runtimeConversationId?: NullableStringFieldUpdateOperationsInput | string | null
+    suggestedGoal?: NullableStringFieldUpdateOperationsInput | string | null
+    planJson?: NullableStringFieldUpdateOperationsInput | string | null
+    runJson?: NullableStringFieldUpdateOperationsInput | string | null
+    contextSummaryJson?: NullableStringFieldUpdateOperationsInput | string | null
+    error?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    messages?: AgentMessageUncheckedUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUncheckedUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUncheckedUpdateManyWithoutConversationNestedInput
   }
@@ -39961,6 +42064,7 @@ export namespace Prisma {
     novel: NovelCreateNestedOneWithoutAgentConversationsInput
     messages?: AgentMessageCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationUncheckedCreateWithoutRunsInput = {
@@ -39979,6 +42083,7 @@ export namespace Prisma {
     updatedAt?: Date | string
     messages?: AgentMessageUncheckedCreateNestedManyWithoutConversationInput
     artifacts?: AgentArtifactUncheckedCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentUncheckedCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationCreateOrConnectWithoutRunsInput = {
@@ -40009,6 +42114,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryCreateNestedManyWithoutNovelInput
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutAgentRunsInput = {
@@ -40034,6 +42140,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUncheckedCreateNestedManyWithoutNovelInput
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutAgentRunsInput = {
@@ -40148,6 +42255,7 @@ export namespace Prisma {
     novel?: NovelUpdateOneRequiredWithoutAgentConversationsNestedInput
     messages?: AgentMessageUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUncheckedUpdateWithoutRunsInput = {
@@ -40166,6 +42274,7 @@ export namespace Prisma {
     updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
     messages?: AgentMessageUncheckedUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUncheckedUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUncheckedUpdateManyWithoutConversationNestedInput
   }
 
   export type NovelUpsertWithoutAgentRunsInput = {
@@ -40202,6 +42311,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUpdateManyWithoutNovelNestedInput
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutAgentRunsInput = {
@@ -40227,6 +42337,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUncheckedUpdateManyWithoutNovelNestedInput
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type AgentRunEventUpsertWithWhereUniqueWithoutRunInput = {
@@ -40387,6 +42498,7 @@ export namespace Prisma {
     novel: NovelCreateNestedOneWithoutAgentConversationsInput
     messages?: AgentMessageCreateNestedManyWithoutConversationInput
     runs?: AgentRunCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationUncheckedCreateWithoutArtifactsInput = {
@@ -40405,6 +42517,7 @@ export namespace Prisma {
     updatedAt?: Date | string
     messages?: AgentMessageUncheckedCreateNestedManyWithoutConversationInput
     runs?: AgentRunUncheckedCreateNestedManyWithoutConversationInput
+    attachments?: AgentAttachmentUncheckedCreateNestedManyWithoutConversationInput
   }
 
   export type AgentConversationCreateOrConnectWithoutArtifactsInput = {
@@ -40478,6 +42591,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryCreateNestedManyWithoutNovelInput
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutAgentArtifactsInput = {
@@ -40503,6 +42617,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUncheckedCreateNestedManyWithoutNovelInput
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutAgentArtifactsInput = {
@@ -40537,6 +42652,7 @@ export namespace Prisma {
     novel?: NovelUpdateOneRequiredWithoutAgentConversationsNestedInput
     messages?: AgentMessageUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUncheckedUpdateWithoutArtifactsInput = {
@@ -40555,6 +42671,7 @@ export namespace Prisma {
     updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
     messages?: AgentMessageUncheckedUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUncheckedUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUncheckedUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentRunUpsertWithoutArtifactsInput = {
@@ -40640,6 +42757,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUpdateManyWithoutNovelNestedInput
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutAgentArtifactsInput = {
@@ -40665,6 +42783,7 @@ export namespace Prisma {
     narrativeSummaries?: NarrativeSummaryUncheckedUpdateManyWithoutNovelNestedInput
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelCreateWithoutCharactersInput = {
@@ -40690,6 +42809,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutCharactersInput = {
@@ -40715,6 +42835,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutCharactersInput = {
@@ -40842,6 +42963,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutCharactersInput = {
@@ -40867,6 +42989,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type ItemOwnershipUpsertWithWhereUniqueWithoutCharacterInput = {
@@ -40992,6 +43115,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutItemsInput = {
@@ -41017,6 +43141,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutItemsInput = {
@@ -41077,6 +43202,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutItemsInput = {
@@ -41102,6 +43228,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type ItemOwnershipUpsertWithWhereUniqueWithoutItemInput = {
@@ -41299,6 +43426,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutWorldSettingsInput = {
@@ -41324,6 +43452,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutWorldSettingsInput = {
@@ -41365,6 +43494,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutWorldSettingsInput = {
@@ -41390,6 +43520,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type CharacterCreateWithoutRelationsAsSourceInput = {
@@ -41608,6 +43739,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutIdeasInput = {
@@ -41633,6 +43765,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutIdeasInput = {
@@ -41725,6 +43858,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutIdeasInput = {
@@ -41750,6 +43884,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type ChapterUpsertWithoutIdeasInput = {
@@ -41816,6 +43951,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutTagsInput = {
@@ -41841,6 +43977,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutTagsInput = {
@@ -41911,6 +44048,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutTagsInput = {
@@ -41936,6 +44074,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type IdeaUpsertWithWhereUniqueWithoutTagsInput = {
@@ -41977,6 +44116,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutPlotLinesInput = {
@@ -42002,6 +44142,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutPlotLinesInput = {
@@ -42076,6 +44217,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutPlotLinesInput = {
@@ -42101,6 +44243,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type PlotPointUpsertWithWhereUniqueWithoutPlotLineInput = {
@@ -42142,6 +44285,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutPlotPointsInput = {
@@ -42167,6 +44311,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutPlotPointsInput = {
@@ -42262,6 +44407,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutPlotPointsInput = {
@@ -42287,6 +44433,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type PlotLineUpsertWithoutPointsInput = {
@@ -42844,6 +44991,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutChapterSummariesInput = {
@@ -42869,6 +45017,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutChapterSummariesInput = {
@@ -42976,6 +45125,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutChapterSummariesInput = {
@@ -43001,6 +45151,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type VolumeUpsertWithoutChapterSummariesInput = {
@@ -43104,6 +45255,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentCreateNestedManyWithoutNovelInput
   }
 
   export type NovelUncheckedCreateWithoutNarrativeSummariesInput = {
@@ -43129,6 +45281,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedCreateNestedManyWithoutNovelInput
     agentRuns?: AgentRunUncheckedCreateNestedManyWithoutNovelInput
     agentArtifacts?: AgentArtifactUncheckedCreateNestedManyWithoutNovelInput
+    agentAttachments?: AgentAttachmentUncheckedCreateNestedManyWithoutNovelInput
   }
 
   export type NovelCreateOrConnectWithoutNarrativeSummariesInput = {
@@ -43201,6 +45354,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUpdateManyWithoutNovelNestedInput
   }
 
   export type NovelUncheckedUpdateWithoutNarrativeSummariesInput = {
@@ -43226,6 +45380,7 @@ export namespace Prisma {
     agentConversations?: AgentConversationUncheckedUpdateManyWithoutNovelNestedInput
     agentRuns?: AgentRunUncheckedUpdateManyWithoutNovelNestedInput
     agentArtifacts?: AgentArtifactUncheckedUpdateManyWithoutNovelNestedInput
+    agentAttachments?: AgentAttachmentUncheckedUpdateManyWithoutNovelNestedInput
   }
 
   export type VolumeUpsertWithoutNarrativeSummariesInput = {
@@ -43752,6 +45907,7 @@ export namespace Prisma {
     messages?: AgentMessageUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUncheckedUpdateWithoutNovelInput = {
@@ -43770,6 +45926,7 @@ export namespace Prisma {
     messages?: AgentMessageUncheckedUpdateManyWithoutConversationNestedInput
     runs?: AgentRunUncheckedUpdateManyWithoutConversationNestedInput
     artifacts?: AgentArtifactUncheckedUpdateManyWithoutConversationNestedInput
+    attachments?: AgentAttachmentUncheckedUpdateManyWithoutConversationNestedInput
   }
 
   export type AgentConversationUncheckedUpdateManyWithoutNovelInput = {
@@ -43901,6 +46058,69 @@ export namespace Prisma {
     reviewDecisionsJson?: NullableStringFieldUpdateOperationsInput | string | null
     reviewStaleChapterIdsJson?: NullableStringFieldUpdateOperationsInput | string | null
     reviewedAt?: NullableDateTimeFieldUpdateOperationsInput | Date | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
+  export type AgentAttachmentUpdateWithoutNovelInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    conversation?: AgentConversationUpdateOneRequiredWithoutAttachmentsNestedInput
+  }
+
+  export type AgentAttachmentUncheckedUpdateWithoutNovelInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    conversationId?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
+  export type AgentAttachmentUncheckedUpdateManyWithoutNovelInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    conversationId?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
     createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
     updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
   }
@@ -44442,6 +46662,69 @@ export namespace Prisma {
     updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
   }
 
+  export type AgentAttachmentUpdateWithoutConversationInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    novel?: NovelUpdateOneRequiredWithoutAgentAttachmentsNestedInput
+  }
+
+  export type AgentAttachmentUncheckedUpdateWithoutConversationInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    novelId?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
+  export type AgentAttachmentUncheckedUpdateManyWithoutConversationInput = {
+    id?: StringFieldUpdateOperationsInput | string
+    novelId?: StringFieldUpdateOperationsInput | string
+    messageId?: NullableStringFieldUpdateOperationsInput | string | null
+    originalFileName?: StringFieldUpdateOperationsInput | string
+    extension?: StringFieldUpdateOperationsInput | string
+    mimeType?: NullableStringFieldUpdateOperationsInput | string | null
+    sizeBytes?: IntFieldUpdateOperationsInput | number
+    characterCount?: IntFieldUpdateOperationsInput | number
+    contentHash?: StringFieldUpdateOperationsInput | string
+    plainText?: StringFieldUpdateOperationsInput | string
+    extractedContentJson?: StringFieldUpdateOperationsInput | string
+    extractionMetaJson?: StringFieldUpdateOperationsInput | string
+    extractorVersion?: StringFieldUpdateOperationsInput | string
+    status?: StringFieldUpdateOperationsInput | string
+    errorCode?: NullableStringFieldUpdateOperationsInput | string | null
+    errorMessage?: NullableStringFieldUpdateOperationsInput | string | null
+    createdAt?: DateTimeFieldUpdateOperationsInput | Date | string
+    updatedAt?: DateTimeFieldUpdateOperationsInput | Date | string
+  }
+
   export type AgentRunEventUpdateWithoutRunInput = {
     eventId?: StringFieldUpdateOperationsInput | string
     sequence?: IntFieldUpdateOperationsInput | number
@@ -44925,6 +47208,10 @@ export namespace Prisma {
      * @deprecated Use AgentMessageDefaultArgs instead
      */
     export type AgentMessageArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = AgentMessageDefaultArgs<ExtArgs>
+    /**
+     * @deprecated Use AgentAttachmentDefaultArgs instead
+     */
+    export type AgentAttachmentArgs<ExtArgs extends $Extensions.InternalArgs = $Extensions.DefaultArgs> = AgentAttachmentDefaultArgs<ExtArgs>
     /**
      * @deprecated Use AgentRunDefaultArgs instead
      */

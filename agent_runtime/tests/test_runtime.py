@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -263,6 +265,53 @@ def test_health_reports_active_fastmcp_tool_transport(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["toolTransport"] == "fastmcp"
     assert "agent.retry_run" in response.json()["data"]["capabilities"]
+
+
+def test_chat_request_exposes_progress_and_can_be_cancelled(tmp_path: Path) -> None:
+    runtime, automation = create_runtime(tmp_path)
+    started = asyncio.Event()
+
+    async def slow_invoke(
+        method: str,
+        params: dict[str, Any],
+        origin: str,
+        request_id: str | None = None,
+    ) -> Any:
+        if method != "agent.generate_chat":
+            raise AssertionError(method)
+        started.set()
+        await asyncio.sleep(30)
+        return {"content": "不应完成", "toolCalls": []}
+
+    automation.invoke = slow_invoke  # type: ignore[method-assign]
+    with TestClient(build_app(runtime, None)) as client, ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            client.post,
+            "/invoke",
+            json={
+                "requestId": "chat-cancel-1",
+                "method": "agent.chat",
+                "params": {
+                    "message": "读取附件",
+                    "conversationId": "runtime-conv",
+                    "role": "team",
+                    "approvalMode": "review_required",
+                },
+                "context": {"novelId": "novel_1"},
+            },
+        )
+        progress = None
+        for _ in range(50):
+            progress = client.get("/progress/chat-cancel-1").json().get("data")
+            if progress and progress.get("events"):
+                break
+            time.sleep(0.02)
+        assert progress and progress["events"][0]["phase"] == "thinking"
+        cancelled = client.post("/cancel", json={"requestId": "chat-cancel-1"}).json()
+        assert cancelled["data"]["cancelled"] is True
+        response = future.result(timeout=5).json()
+        assert response["code"] == "CANCELLED"
+        assert "chat-cancel-1" in automation.cancelled_request_ids
 
 
 def test_execute_plan_requires_explicit_approval(tmp_path: Path) -> None:
@@ -741,6 +790,163 @@ def test_chat_langgraph_can_execute_project_reads_through_fastmcp(tmp_path: Path
         assert model_calls == 2
         assert response.contextReads == [{"toolName": "chapter.get", "status": "completed"}]
         assert [method for method, _, _ in automation.calls] == ["agent.generate_chat", "chapter.get", "agent.generate_chat"]
+
+    asyncio.run(scenario())
+
+
+def test_chat_attachment_reads_are_scoped_to_active_conversation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, automation = create_runtime(tmp_path)
+        model_calls = 0
+
+        async def attachment_invoke(
+            method: str,
+            params: dict[str, Any],
+            origin: str,
+            request_id: str | None = None,
+        ) -> Any:
+            nonlocal model_calls
+            if method == "agent.generate_chat":
+                model_calls += 1
+                scope = params["selectionContext"]["attachmentScope"]
+                assert scope == {"novelId": "novel_1", "conversationId": "desktop_conv_1"}
+                if not params["toolObservations"]:
+                    return {
+                        "content": "我先搜索附件。",
+                        "shouldPlan": False,
+                        "needsClarification": False,
+                        "toolCalls": [{
+                            "name": "attachment.search",
+                            "args": {
+                                "novelId": "novel_other",
+                                "conversationId": "conv_other",
+                                "attachmentId": "attachment_1",
+                                "query": "关键线索",
+                                "limit": 99,
+                            },
+                        }],
+                    }
+                if len(params["toolObservations"]) == 1:
+                    return {
+                        "content": "我再读取命中位置。",
+                        "shouldPlan": False,
+                        "needsClarification": False,
+                        "toolCalls": [{
+                            "name": "attachment.get",
+                            "args": {"attachmentId": "attachment_1", "offset": 0, "limit": 4000},
+                        }],
+                    }
+                return {
+                    "content": "附件已读取。",
+                    "shouldPlan": False,
+                    "needsClarification": False,
+                    "toolCalls": [],
+                }
+            if method == "attachment.search":
+                assert params == {
+                    "novelId": "novel_1",
+                    "conversationId": "desktop_conv_1",
+                    "attachmentId": "attachment_1",
+                    "query": "关键线索",
+                    "limit": 20,
+                }
+                return {"matches": [{"attachmentId": "attachment_1", "startOffset": 0, "endOffset": 4}]}
+            if method == "attachment.get":
+                assert params == {
+                    "novelId": "novel_1",
+                    "conversationId": "desktop_conv_1",
+                    "attachmentId": "attachment_1",
+                    "offset": 0,
+                    "limit": 4000,
+                }
+                return {"text": "attachment content", "nextOffset": None}
+            raise AssertionError(f"Unexpected method: {method}")
+
+        automation.invoke = attachment_invoke  # type: ignore[method-assign]
+        response = await runtime.chat(
+            {
+                "message": "读取附件并总结。",
+                "role": "editor",
+                "approvalMode": "review_required",
+                "conversationId": "runtime_conv_1",
+                "agentConversationId": "desktop_conv_1",
+                "attachments": [{
+                    "attachmentId": "attachment_1",
+                    "fileName": "outline.md",
+                    "characterCount": 18,
+                }],
+            },
+            {"novelId": "novel_1", "locale": "zh-CN"},
+        )
+
+        assert model_calls == 3
+        assert response.contextReads == [
+            {"toolName": "attachment.search", "status": "completed"},
+            {"toolName": "attachment.get", "status": "completed"},
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_attachment_read_and_get_offset_aliases_are_normalized(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, automation = create_runtime(tmp_path)
+
+        async def invoke(
+            method: str,
+            params: dict[str, Any],
+            origin: str,
+            request_id: str | None = None,
+        ) -> Any:
+            assert origin == "desktop-ui"
+            assert request_id == "chat-request-1"
+            if method == "attachment.get":
+                assert params == {
+                    "novelId": "novel_1",
+                    "conversationId": "desktop_conv_1",
+                    "attachmentId": "attachment_1",
+                    "offset": 12,
+                    "limit": 30,
+                }
+                return {"text": "window"}
+            if method == "attachment.read":
+                assert params["selector"] == {"kind": "section", "title": "第二章"}
+                return {"status": "resolved", "text": "第二章正文"}
+            raise AssertionError(method)
+
+        automation.invoke = invoke  # type: ignore[method-assign]
+        context = {
+            "novelId": "novel_1",
+            "agentConversationId": "desktop_conv_1",
+            "volumeId": "",
+            "chapterId": "",
+        }
+        result = await runtime._invoke_exploration_tool(  # noqa: SLF001
+            "attachment.get",
+            {"attachmentId": "attachment_1", "startOffset": 12, "endOffset": 42},
+            "读取",
+            context,
+            "zh-CN",
+            "chat-request-1",
+        )
+        assert result == {"text": "window"}
+        result = await runtime._invoke_exploration_tool(  # noqa: SLF001
+            "attachment.read",
+            {"attachmentId": "attachment_1", "selector": {"kind": "section", "title": "第二章"}},
+            "读取",
+            context,
+            "zh-CN",
+            "chat-request-1",
+        )
+        assert result["text"] == "第二章正文"
+        with pytest.raises(ValueError, match="startOffset"):
+            await runtime._invoke_exploration_tool(  # noqa: SLF001
+                "attachment.get",
+                {"attachmentId": "attachment_1", "startOffset": 50, "endOffset": 20},
+                "读取",
+                context,
+                "zh-CN",
+            )
 
     asyncio.run(scenario())
 

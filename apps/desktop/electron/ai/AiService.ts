@@ -747,12 +747,15 @@ export class AiService {
         approvalMode?: string;
         history?: Array<{ role: 'user' | 'assistant'; content: string; createdAt?: string; messageId?: string }>;
         availableReadTools?: string[];
+        availableReadToolDefinitions?: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }>;
         availableOperations?: Array<Record<string, unknown>>;
         intentPreflight?: Record<string, unknown>;
         selectionContext?: Record<string, unknown>;
         toolObservations?: Array<{ toolName?: string; args?: unknown; result?: unknown; error?: string; ok?: boolean }>;
         conversationContext?: Record<string, unknown>;
         persistentSummary?: AgentConversationSummary | Record<string, unknown> | null;
+        explorationNotes?: string[];
+        forceFinalization?: boolean;
     }, signal?: AbortSignal): Promise<{
         content: string;
         shouldPlan: boolean;
@@ -802,6 +805,15 @@ export class AiService {
             ...(item.messageId ? { messageId: String(item.messageId) } : {}),
         })).filter((item) => item.content);
         const availableReadTools = dedupeStrings(payload.availableReadTools || [], 20);
+        const availableReadToolDefinitions = (payload.availableReadToolDefinitions || [])
+            .filter((item) => item && availableReadTools.includes(String(item.name || '')))
+            .slice(0, 20)
+            .map((item) => ({
+                name: trimText(item.name, 80),
+                description: trimText(item.description, 800),
+                inputSchema: item.inputSchema && typeof item.inputSchema === 'object' ? item.inputSchema : {},
+            }));
+        const explorationNotes = (payload.explorationNotes || []).map((item) => trimText(item, 3000)).filter(Boolean).slice(-8);
         const availableOperations = Array.isArray(payload.availableOperations) ? payload.availableOperations.slice(0, 30) : [];
         const availableOperationIds = new Set(availableOperations.flatMap((item) => (
             typeof item?.id === 'string' ? [item.id] : []
@@ -825,6 +837,16 @@ export class AiService {
             volumeId: trimText(rawSelection.volumeId, 160),
             chapterId: trimText(rawSelection.chapterId, 160),
             chapterTitle: trimText(rawSelection.chapterTitle, 300),
+            ...(rawSelection.attachmentScope && typeof rawSelection.attachmentScope === 'object' ? {
+                attachmentScope: rawSelection.attachmentScope,
+            } : {}),
+            ...(Array.isArray(rawSelection.attachments) ? {
+                attachments: rawSelection.attachments.slice(0, 10).map((item: any) => ({
+                    attachmentId: trimText(item?.attachmentId, 160),
+                    fileName: trimText(item?.fileName, 300),
+                    characterCount: Math.max(0, Number(item?.characterCount) || 0),
+                })).filter((item: any) => item.attachmentId),
+            } : {}),
             ...(rawChapterScope ? {
                 chapterScope: {
                     kind: trimText(rawChapterScope.kind, 40),
@@ -845,8 +867,11 @@ export class AiService {
                 '判断用户是在普通讨论，还是提出了需要读取项目上下文、检索、生成草稿或修改数据的明确任务。',
                 'SelectionContext 是当前编辑器显式选中的项目范围。存在 chapterId 时，“这篇文章”“本章”“当前章”等指代必须直接绑定该章节，不得再次询问用户选择章节，也不得为定位它调用 novel.list、volume.list 或 chapter.list。需要持久化章节资料时直接使用该 chapterId 调用 chapter.get；CurrentEditorContent 是用户当前可见正文，优先于数据库中的旧正文。',
                 '你可以从 AvailableReadTools 主动选择只读工具。回答依赖项目事实且 ToolObservations 不足时，先返回 toolCalls；每轮最多 3 个，不得调用名单外工具。',
+                'AvailableReadToolDefinitions 是工具的真实参数结构，必须严格按其中的 inputSchema 调用；读取附件标题、页码、块或字符范围时优先使用 attachment.read。',
+                '附件范围较长且返回 nextSelector 时，在 content 中保留截至当前块、不超过约 800 tokens 的累计发现，再继续读取；ExplorationNotes 会在下一轮带回这些发现。',
                 '仅当 SelectionContext 没有可用目标，或用户明确要求跨章节、当前卷或全书范围时，才用 `volume.list` 发现真实 volumeId/chapterId；`chapter.list` 需要真实 volumeId，`chapter.get` 需要一个真实 chapterId。禁止虚构 ALL、ALL_IF_SUPPORTED 等占位 ID。',
                 '收到 ToolObservations 后先综合结果；信息仍不足可继续调用只读工具，否则给出回答并将 toolCalls 设为空数组。',
+                ...(payload.forceFinalization ? ['当前是强制总结轮，不得调用任何工具；必须基于已读证据作答，并明确覆盖范围和可能遗漏。'] : []),
                 '从 AvailableOperations 中选择有序的 requestedOperations；复合任务必须保留用户要求的先后顺序，不得创造 Operation ID。',
                 'requestedOperations 只包含用户当前明确要求执行的动作。问题、缺口、建议和可能的后续步骤不是执行授权：“检查需要补充说明之处”只请求审核，不请求生成素材；“给出润色建议”不请求改写；“评估续写准备度”不请求续写。只有用户明确要求起草、生成、续写或改写时，才选择 draft_write Operation。',
                 'Role 只决定分析视角、能力范围和默认负责人，不得改变用户请求的 Operation、deliverable 或副作用等级。世界观角色下的只读检查仍然只能建议 report，不得因为角色擅长设定而追加 creative_asset.draft。',
@@ -864,6 +889,7 @@ export class AiService {
                 'PersistentSummary is a traceable conversation projection. Prefer RecalledMessages, RecalledArtifacts, and tool evidence over summarized assistant outcomes, which are not project facts.',
                 'SelectionContext is the explicit editor selection. When it includes chapterId, references such as "this article", "this chapter", or "current chapter" bind to it. Do not ask the user to select the chapter again and do not call novel.list, volume.list, or chapter.list merely to locate it. Use chapter.get with that exact ID when persisted data is needed. CurrentEditorContent is the visible editor text and takes precedence over an older saved body.',
                 'When an answer depends on project facts and observations are insufficient, choose up to three tools from AvailableReadTools. After observations arrive, continue reading or answer with an empty toolCalls array.',
+                'AvailableReadToolDefinitions contains the authoritative input schemas. Follow them exactly and prefer attachment.read for title, page, block, or offset ranges. Preserve no more than about 800 tokens of cumulative findings in content before requesting the next long-document chunk; ExplorationNotes will carry them forward.',
                 'Use `volume.list` to discover IDs only when SelectionContext has no usable target or the user explicitly requests a multi-chapter, volume, or novel scope. `chapter.list` requires a real volumeId and `chapter.get` requires one real chapterId. Never invent placeholder IDs such as ALL or ALL_IF_SUPPORTED.',
                 'Select ordered requestedOperations only from AvailableOperations. Preserve the requested order for compound tasks and never invent operation IDs.',
                 'Include only actions the user explicitly asks to perform now. Findings, gaps, advice, and plausible next steps are not authorization. A request to identify missing explanations is review-only; polishing advice is not a rewrite; continuation readiness is not continuation. Select a draft_write operation only when the user explicitly requests drafting, generation, continuation, or rewriting.',
@@ -875,6 +901,7 @@ export class AiService {
                 'Ask one focused clarification question only when a user preference or creative decision unavailable from project tools would materially change the goal.',
                 'Do not propose a plan until the user answers. Set needsClarification=false once enough information is available.',
                 'Set shouldPlan=true only for sufficiently specified tasks that require project context, retrieval, draft generation, or data changes.',
+                ...(payload.forceFinalization ? ['This is a forced finalization turn. Call no tools; answer from the evidence already read and state coverage and possible omissions.'] : []),
             ].join(' ');
         const outputTokens = Math.min(this.settingsCache.http.maxTokens, 1600);
         const sections: AgentContextSection[] = [
@@ -882,7 +909,7 @@ export class AiService {
                 id: 'available-read-tools',
                 kind: 'metadata',
                 priority: 'low',
-                value: availableReadTools,
+                value: availableReadToolDefinitions.length ? availableReadToolDefinitions : availableReadTools,
             },
             {
                 id: 'available-operations',
@@ -929,6 +956,16 @@ export class AiService {
                 sourceRef: 'current-exploration-turn',
             });
         }
+        if (explorationNotes.length) {
+            sections.push({
+                id: 'exploration-notes',
+                kind: 'tool',
+                priority: 'high',
+                value: explorationNotes,
+                sourceRef: 'current-exploration-working-memory',
+                maxTokens: 6000,
+            });
+        }
         const contextArtifacts = collectAgentContextArtifacts(payload.conversationContext);
         if (payload.conversationContext && Object.keys(payload.conversationContext).length) {
             sections.push({
@@ -959,7 +996,9 @@ export class AiService {
             prompt: contextAssembly.prompt,
             maxTokens: outputTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.5),
-            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            timeoutMs: payload.forceFinalization
+                ? Math.min(Math.max(this.settingsCache.http.timeoutMs, 15000), 45000)
+                : Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
         });
         const parsed = parseJsonObject(response.text);
