@@ -613,7 +613,8 @@ export class PythonRuntimeClient {
         }
 
         if (this.isPackaged) {
-            const exePath = path.join(process.resourcesPath, 'agent-runtime', 'novel-agent-runtime.exe');
+            const binaryName = process.platform === 'win32' ? 'novel-agent-runtime.exe' : 'novel-agent-runtime';
+            const exePath = path.join(process.resourcesPath, 'agent-runtime', binaryName);
             if (fs.existsSync(exePath)) {
                 return { command: exePath, argsPrefix: [] };
             }

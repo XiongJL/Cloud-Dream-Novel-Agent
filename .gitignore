@@ -24,6 +24,7 @@ pnpm-debug.log*
 .venv/
 agent_runtime/.venv/
 /agent_runtime/.codex-debug*/
+/agent_runtime/build/
 __pycache__/
 *.pyc
 *.egg-info/
@@ -58,6 +59,7 @@ release*/
 /.playwright-cli/
 /apps/desktop/.playwright-cli/
 /apps/desktop/output/
+/apps/desktop/build/agent-runtime/
 
 # Local package inspection artifacts
 /package/

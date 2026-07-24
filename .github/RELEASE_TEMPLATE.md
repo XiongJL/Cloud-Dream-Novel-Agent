@@ -4,9 +4,10 @@
 
 ## Downloads
 
-- Windows installer: `云梦小说智能体-Setup-<version>.exe`
-- Windows portable: `云梦小说智能体-Portable-<version>.exe`
-- macOS DMG: `云梦小说智能体-mac-<version>.dmg`
+- Windows installer: `clouddream-novel-agent-setup-<version>.exe`
+- Windows portable: `clouddream-novel-agent-portable-<version>.exe`
+- macOS Intel DMG: `clouddream-novel-agent-mac-x64-<version>.dmg`
+- macOS Apple Silicon DMG: `clouddream-novel-agent-mac-arm64-<version>.dmg`
 
 ## Notes
 

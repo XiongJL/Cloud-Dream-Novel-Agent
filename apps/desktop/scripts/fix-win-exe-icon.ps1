@@ -58,24 +58,32 @@ if (-not (Test-Path $iconPath)) {
 $exePath = Resolve-MainExe $resolvedAppOutDir
 $rceditPath = Resolve-RcEditPath
 
-$tempRoot = Join-Path $resolvedProjectDir ".tmp\rcedit"
-New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
-$tempExe = Join-Path $tempRoot "novel-editor-desktop.exe"
+$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("novel-editor-rcedit-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $tempRoot | Out-Null
+$updated = $false
 
-for ($attempt = 1; $attempt -le 5; $attempt++) {
-    Copy-Item $exePath $tempExe -Force
-    & $rceditPath $tempExe "--set-icon" $iconPath
+try {
+    for ($attempt = 1; $attempt -le 5; $attempt++) {
+        $tempExe = Join-Path $tempRoot "novel-editor-desktop-$attempt.exe"
+        Copy-Item $exePath $tempExe
+        & $rceditPath $tempExe "--set-icon" $iconPath
 
-    if ($LASTEXITCODE -eq 0) {
-        Copy-BackWithRetry $tempExe $exePath
-        Remove-Item $tempExe -Force -ErrorAction SilentlyContinue
-        Write-Host "[fix-win-exe-icon] updated icon for $exePath"
-        exit 0
+        if ($LASTEXITCODE -eq 0) {
+            Copy-BackWithRetry $tempExe $exePath
+            $updated = $true
+            break
+        }
+
+        if ($attempt -lt 5) {
+            Start-Sleep -Milliseconds ($attempt * 400)
+        }
     }
 
-    if ($attempt -lt 5) {
-        Start-Sleep -Milliseconds ($attempt * 400)
+    if (-not $updated) {
+        throw "rcedit failed to update icon for $exePath"
     }
+
+    Write-Host "[fix-win-exe-icon] updated icon for $exePath"
+} finally {
+    Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-throw "rcedit failed to update icon for $exePath"

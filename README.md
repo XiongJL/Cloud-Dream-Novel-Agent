@@ -48,9 +48,10 @@ CloudDream Novel Agent 是一款面向长篇小说创作的桌面应用。它把
 
 - Windows 安装版：`clouddream-novel-agent-setup-<version>.exe`
 - Windows 便携版：`clouddream-novel-agent-portable-<version>.exe`
-- macOS：`clouddream-novel-agent-mac-<version>.dmg`
+- macOS Intel：`clouddream-novel-agent-mac-x64-<version>.dmg`
+- macOS Apple Silicon：`clouddream-novel-agent-mac-arm64-<version>.dmg`
 
-macOS 构建如果未签名，首次启动可能需要在系统安全设置中手动允许。Agent 功能是否包含在特定安装包中，请查看对应版本的 Release 说明。
+macOS 构建如果未签名，首次启动可能需要在系统安全设置中手动允许。当前官方桌面包均内置对应平台的 Python Agent Runtime，用户无需另外安装 Python。
 
 ## 本地开发
 
@@ -58,7 +59,7 @@ macOS 构建如果未签名，首次启动可能需要在系统安全设置中�
 
 - Node.js 20+（CI 使用 Node.js 24）
 - pnpm 8.15.9
-- Python 3.11+（开发 Agent 模式需要）
+- Python 3.11+（开发 Agent 模式或生成桌面安装包需要）
 - JDK 17 与 MariaDB（仅开发可选的云同步后端时需要）
 
 ### 初始化 JavaScript 工作区
@@ -77,7 +78,7 @@ Windows PowerShell：
 ```powershell
 cd agent_runtime
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,build]"
 cd ..
 ```
 
@@ -86,7 +87,7 @@ macOS / Linux：
 ```bash
 cd agent_runtime
 python3 -m venv .venv
-./.venv/bin/python -m pip install -e '.[dev]'
+./.venv/bin/python -m pip install -e '.[dev,build]'
 cd ..
 ```
 
@@ -110,7 +111,7 @@ pnpm dev:desktop
 | `pnpm db:push` | 将 Prisma schema 同步到开发数据库 |
 | `pnpm build:desktop` | 构建桌面端 |
 | `pnpm build:desktop:win` | 构建 Windows 安装版与便携版 |
-| `pnpm build:desktop:mac` | 在 macOS 构建 universal DMG |
+| `pnpm build:desktop:mac` | 在 macOS 构建当前机器架构的 DMG |
 | `pnpm mcp:config` | 输出 Codex / Claude / JSON MCP 配置 |
 
 ### 验证

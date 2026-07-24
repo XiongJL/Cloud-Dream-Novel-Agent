@@ -65,7 +65,7 @@ resources/
     novel-agent-runtime.exe
 ```
 
-第一阶段先支持开发环境自动启动/连接。正式打包只预留路径，后续再引入 PyInstaller/Nuitka。
+开发环境优先使用 `agent_runtime/.venv`。正式打包通过 PyInstaller onedir 生成平台 Runtime，并由 `electron-builder` 复制到 `resources/agent-runtime/`；Windows、macOS x64 与 macOS arm64 分别在对应 GitHub runner 上构建和执行健康检查。
 
 ## 通信边界
 

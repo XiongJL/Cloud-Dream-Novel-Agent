@@ -5,50 +5,55 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish (for example v0.2.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  UV_VERSION: 0.11.32
+  UV_LINK_MODE: copy
+
 jobs:
-  prepare-release:
-    name: Prepare GitHub Release
+  validate-release:
+    name: Validate release tag
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Ensure release exists
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require an existing version tag
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" \
-              --verify-tag \
-              --generate-notes \
-              --title "$GITHUB_REF_NAME"
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Release tag must start with v: $RELEASE_TAG" >&2; exit 1 ;;
+          esac
+          git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null || {
+            echo "Release tag does not exist on origin: $RELEASE_TAG" >&2
+            exit 1
+          }
 
   build-windows:
-    name: Build Windows
-    needs:
-      - prepare-release
+    name: Build Windows x64
+    needs: validate-release
     runs-on: windows-latest
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Sync package versions from tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
+        shell: pwsh
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          VERSION="$VERSION" node <<'NODE'
-          const fs = require('fs');
-          for (const file of ['package.json', 'apps/desktop/package.json']) {
-            const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-            data.version = process.env.VERSION;
-            fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');
-          }
-          NODE
+          $version = $env:RELEASE_TAG -replace '^v', ''
+          $env:VERSION = $version
+          node -e "const fs=require('fs'); for (const file of ['package.json','apps/desktop/package.json']) { const data=JSON.parse(fs.readFileSync(file,'utf8')); data.version=process.env.VERSION; fs.writeFileSync(file, JSON.stringify(data,null,2)+'\n'); }"
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -57,65 +62,106 @@ jobs:
           package-manager-cache: false
 
       - name: Setup pnpm
-        run: |
-          npm install -g pnpm@8.15.9
-          pnpm --version
+        run: npm install -g pnpm@8.15.9
 
-      - name: Install dependencies
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: python -m pip install "uv==$env:UV_VERSION"
+
+      - name: Sync frozen Python environment
+        run: uv sync --frozen --project agent_runtime --extra dev --extra build
+
+      - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Test Python Runtime
+        run: uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime
+
+      - name: Test Desktop Agent contracts
+        run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
       - name: Build Windows artifacts
         run: pnpm --filter novel-editor-desktop run build:win
 
-      - name: Upload Windows assets to release
+      - name: Smoke-test packaged Windows Runtime
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $binary = "apps/desktop/release/win-unpacked/resources/agent-runtime/novel-agent-runtime.exe"
+          if (-not (Test-Path -LiteralPath $binary)) {
+            throw "Packaged Agent runtime missing: $binary"
+          }
+          python agent_runtime/scripts/smoke_runtime.py --binary $binary
+
+      - name: Stage Windows release assets
+        id: stage
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG -replace '^v', ''
           $stageDir = Join-Path $env:RUNNER_TEMP "release-upload-windows"
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-
           $files = Get-ChildItem apps/desktop/release -File | Where-Object {
             $_.Name -like '*Setup-*.exe' -or
             $_.Name -like '*Portable-*.exe' -or
             $_.Name -like '*Setup-*.exe.blockmap'
-          } | ForEach-Object {
-            $targetName = switch -Wildcard ($_.Name) {
+          }
+          foreach ($file in $files) {
+            $targetName = switch -Wildcard ($file.Name) {
               '*Setup-*.exe.blockmap' { "clouddream-novel-agent-setup-$version.exe.blockmap"; break }
               '*Setup-*.exe' { "clouddream-novel-agent-setup-$version.exe"; break }
               '*Portable-*.exe' { "clouddream-novel-agent-portable-$version.exe"; break }
-              default { throw "Unexpected Windows asset: $($_.Name)" }
+              default { throw "Unexpected Windows asset: $($file.Name)" }
             }
-
-            $targetPath = Join-Path $stageDir $targetName
-            Copy-Item $_.FullName $targetPath -Force
-            "$targetPath#$($_.Name)"
+            Copy-Item $file.FullName (Join-Path $stageDir $targetName) -Force
           }
-
-          if (-not $files) {
+          if (-not (Get-ChildItem $stageDir -File)) {
             throw "No Windows release assets found."
           }
+          "path=$stageDir" >> $env:GITHUB_OUTPUT
 
-          gh release upload $env:GITHUB_REF_NAME $files --clobber
+      - name: Upload Windows workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: ${{ steps.stage.outputs.path }}/*
+          if-no-files-found: error
 
   build-macos:
-    name: Build macOS
-    needs:
-      - prepare-release
-    runs-on: macos-latest
+    name: Build macOS ${{ matrix.arch }}
+    needs: validate-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-15-intel
+            machine: x86_64
+          - arch: arm64
+            runner: macos-15
+            machine: arm64
+    runs-on: ${{ matrix.runner }}
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     steps:
-      - name: Checkout
+      - name: Checkout release tag
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Verify runner architecture
+        run: |
+          test "$(uname -m)" = "${{ matrix.machine }}" || {
+            echo "Expected ${{ matrix.machine }}, got $(uname -m)" >&2
+            exit 1
+          }
 
       - name: Sync package versions from tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          VERSION="$VERSION" node <<'NODE'
+          version="${RELEASE_TAG#v}"
+          VERSION="$version" node <<'NODE'
           const fs = require('fs');
           for (const file of ['package.json', 'apps/desktop/package.json']) {
             const data = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -131,61 +177,88 @@ jobs:
           package-manager-cache: false
 
       - name: Setup pnpm
-        run: |
-          npm install -g pnpm@8.15.9
-          pnpm --version
+        run: npm install -g pnpm@8.15.9
 
-      - name: Install dependencies
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: python -m pip install "uv==${UV_VERSION}"
+
+      - name: Sync frozen Python environment
+        run: uv sync --frozen --project agent_runtime --extra dev --extra build
+
+      - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build macOS artifacts
-        run: pnpm --filter novel-editor-desktop run build:mac
+      - name: Test Python Runtime
+        run: uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime
 
-      - name: Upload macOS assets to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Test Desktop Agent contracts
+        run: pnpm --filter novel-editor-desktop run test:agent-recovery
+
+      - name: Build macOS artifact
+        run: pnpm --filter novel-editor-desktop run build:mac:${{ matrix.arch }}
+
+      - name: Smoke-test packaged macOS Runtime
+        run: |
+          binary="$(find apps/desktop/release -type f -path '*/Contents/Resources/agent-runtime/novel-agent-runtime' -print -quit)"
+          test -n "$binary" || { echo "Packaged Agent runtime missing" >&2; exit 1; }
+          python agent_runtime/scripts/smoke_runtime.py --binary "$binary"
+
+      - name: Stage macOS release assets
+        id: stage
         run: |
           shopt -s nullglob
-          version="${GITHUB_REF_NAME#v}"
-          stage_dir="${RUNNER_TEMP}/release-upload-macos"
+          version="${RELEASE_TAG#v}"
+          arch="${{ matrix.arch }}"
+          stage_dir="${RUNNER_TEMP}/release-upload-macos-${arch}"
           mkdir -p "$stage_dir"
-          files=(
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.zip
-            apps/desktop/release/*.blockmap
-            apps/desktop/release/latest*.yml
-          )
-
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No macOS release assets found." >&2
-            exit 1
-          fi
-
-          labeled_files=()
+          files=(apps/desktop/release/*.dmg apps/desktop/release/*.dmg.blockmap apps/desktop/release/*.zip)
           for file in "${files[@]}"; do
-            base="$(basename "$file")"
-            case "$base" in
-              *.dmg.blockmap)
-                target_name="clouddream-novel-agent-mac-${version}.dmg.blockmap"
-                ;;
-              *.dmg)
-                target_name="clouddream-novel-agent-mac-${version}.dmg"
-                ;;
-              *.zip)
-                target_name="clouddream-novel-agent-mac-${version}.zip"
-                ;;
-              latest*.yml)
-                target_name="$base"
-                ;;
-              *)
-                echo "Unexpected macOS asset: $base" >&2
-                exit 1
-                ;;
+            case "$(basename "$file")" in
+              *.dmg.blockmap) target_name="clouddream-novel-agent-mac-${arch}-${version}.dmg.blockmap" ;;
+              *.dmg) target_name="clouddream-novel-agent-mac-${arch}-${version}.dmg" ;;
+              *.zip) target_name="clouddream-novel-agent-mac-${arch}-${version}.zip" ;;
+              *) echo "Unexpected macOS asset: $file" >&2; exit 1 ;;
             esac
-
-            target_path="${stage_dir}/${target_name}"
-            cp "$file" "$target_path"
-            labeled_files+=("${target_path}#${base}")
+            cp "$file" "$stage_dir/$target_name"
           done
+          compgen -G "$stage_dir/*" >/dev/null || { echo "No macOS release assets found" >&2; exit 1; }
+          echo "path=$stage_dir" >> "$GITHUB_OUTPUT"
 
-          gh release upload "$GITHUB_REF_NAME" "${labeled_files[@]}" --clobber
+      - name: Upload macOS workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-${{ matrix.arch }}
+          path: ${{ steps.stage.outputs.path }}/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs:
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --generate-notes \
+              --title "$RELEASE_TAG"
+          mapfile -d '' files < <(find release-assets -type f -print0)
+          test ${#files[@]} -gt 0 || { echo "No verified release assets found" >&2; exit 1; }
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber

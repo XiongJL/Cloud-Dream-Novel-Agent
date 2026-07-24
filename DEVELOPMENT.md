@@ -104,7 +104,7 @@ pnpm --filter @novel-editor/desktop run ai:diag -- coverage
 - 打包前确认 `packages/core` 已可用，避免 Prisma Client 缺失。
 - 平台化打包命令：
   - Windows：`pnpm --filter novel-editor-desktop run build:win`
-  - macOS DMG（universal）：`pnpm --filter novel-editor-desktop run build:mac`
+  - macOS DMG（当前机器架构）：`pnpm --filter novel-editor-desktop run build:mac`
 - Windows 图标链路：
   - `build:win` 会先生成 `release/win-unpacked`
   - 再执行 `apps/desktop/scripts/fix-win-exe-icon.ps1` 修正主程序 `.exe` 图标
