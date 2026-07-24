@@ -53,6 +53,7 @@ export class NovelRagService {
             detection,
             question,
             maxEvidenceItems: payload.maxEvidenceItems,
+            analysisScope: payload.analysisScope,
             locale: payload.locale,
             embeddingSettings,
         });
@@ -61,11 +62,12 @@ export class NovelRagService {
         )).join('\n\n');
         const isZh = (payload.locale || 'zh').startsWith('zh');
         const systemPrompt = isZh
-            ? '你是小说编辑器中的 RAG 问答助手。你只能基于 Evidence 中提供的资料回答。如果资料不足，请明确说明不足以判断。请区分“已写事实”“大纲计划”“写作建议”。涉及剧情判断时必须引用证据标签，例如 [E1]。不要编造未提供的设定、章节或人物状态。'
-            : 'You are a RAG Q&A assistant inside a novel editor. Answer only from the provided Evidence. If evidence is insufficient, say so clearly. Separate written facts, outline plans, and writing suggestions. Cite evidence labels such as [E1]. Do not invent missing lore, chapters, or character state.';
+            ? '你是云梦小说智能体中的 RAG 问答助手。你只能基于 Evidence 中提供的资料回答。如果资料不足，请明确说明不足以判断。请区分“已写事实”“大纲计划”“写作建议”。涉及剧情判断时必须引用证据标签，例如 [E1]。不要编造未提供的设定、章节或人物状态。'
+            : 'You are a RAG Q&A assistant inside CloudDream Novel Agent. Answer only from the provided Evidence. If evidence is insufficient, say so clearly. Separate written facts, outline plans, and writing suggestions. Cite evidence labels such as [E1]. Do not invent missing lore, chapters, or character state.';
         const defaultUserPrompt = [
             `Question=${question}`,
             `Intent=${detection.intent}`,
+            `AnalysisScope=${payload.analysisScope || 'current_chapter'}`,
             detection.entityNames.length ? `DetectedEntities=${detection.entityNames.join(', ')}` : 'DetectedEntities=none',
             detection.keywords.length ? `Keywords=${detection.keywords.join(', ')}` : 'Keywords=none',
             payload.selectedText?.trim() ? `SelectedTextProvided=true` : 'SelectedTextProvided=false',
@@ -107,13 +109,14 @@ export class NovelRagService {
         };
     }
 
-    async ask(payload: RagAskPayload, provider: AiProvider, settings: { maxTokens?: number; temperature?: number; embeddingSettings?: AiEmbeddingSettings }): Promise<RagAskResult> {
+    async ask(payload: RagAskPayload, provider: AiProvider, settings: { maxTokens?: number; temperature?: number; embeddingSettings?: AiEmbeddingSettings; signal?: AbortSignal }): Promise<RagAskResult> {
         const bundle = await this.buildPromptBundle(payload, settings.embeddingSettings);
         const response = await provider.generate({
             systemPrompt: bundle.systemPrompt,
             prompt: bundle.effectiveUserPrompt,
             maxTokens: settings.maxTokens,
             temperature: settings.temperature ?? 0.2,
+            signal: settings.signal,
         });
         const evidenceIds = bundle.evidence.map((item) => item.id);
         const citations = extractCitations(response.text, evidenceIds);

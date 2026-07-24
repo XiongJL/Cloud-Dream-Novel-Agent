@@ -1,16 +1,57 @@
-import type { AiActionExecutePayload, CreativeAssetsDraft, CreativeAssetsDraftValidationResult, CreativeAssetsGeneratePayload, PromptPreviewResult } from '../ai/types';
+import { createHash, randomUUID } from 'node:crypto';
+import type { CreativeAssetsDraft, CreativeAssetsDraftValidationResult, CreativeAssetsGeneratePayload, PromptPreviewResult } from '../ai/types';
+import { db } from '@novel-editor/core';
 import { AiService } from '../ai/AiService';
+import * as searchIndex from '../search/searchIndex';
+import { scheduleChapterSummaryRebuild } from '../ai/summary/chapterSummary';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
 import { DraftSessionStore } from './DraftSessionStore';
+import { ReviewCommentStore } from './ReviewCommentStore';
 import type {
     AutomationInvokeContext,
     ChapterDraftPayload,
     CreativeDraftSelection,
     DraftCommitResponse,
+    DraftBatchCommitPrefixInput,
+    DraftBatchCommitPrefixResponse,
+    DraftBatchCreateInput,
+    DraftBatchInspectReconciliationInput,
+    DraftBatchListFilters,
+    DraftBatchMarkFailedInput,
+    DraftBatchPrepareRegenerationInput,
+    DraftBatchPrepareRegenerationResponse,
+    DraftBatchReconcileUnknownInput,
+    DraftBatchReconciliationInspection,
+    DraftBatchRecord,
+    DraftBatchUndoInput,
     DraftListFilters,
     DraftSessionRecord,
+    DraftUndoResponse,
     PromptPreviewResponse,
 } from './types';
+import {
+    appendPlainTextToLexical,
+    createLexicalDocumentFromPlainText,
+    ensureLexicalDocument,
+    extractReadableText,
+} from '../../shared/lexicalDocument';
+import type { ChapterBeatInput, NarrativeStateDelta } from '../../shared/draftBatch';
+import { commitDraftBatchChapters, undoDraftBatchWriteback } from './DraftBatchCommitter';
+import { undoCreativeAssetsWriteback } from './CreativeAssetsWriteback';
+import { AgentReviewStore } from '../agent/AgentReviewStore';
+import type {
+    ArtifactReviewSubmitInput,
+    RevisionTaskCreatePlanInput,
+    RevisionTaskCreatePlanResult,
+    RevisionTaskListFilters,
+} from '../../shared/expertReport';
+import type {
+    ReviewCommentDeleteInput,
+    ReviewCommentListFilters,
+    ReviewCommentMarkSentInput,
+    ReviewCommentRecord,
+    ReviewCommentSaveInput,
+} from '../../shared/reviewComments';
 
 const EMPTY_CREATIVE_DRAFT: CreativeAssetsDraft = {
     plotLines: [],
@@ -26,6 +67,7 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'volume.list': 15000,
     'chapter.list': 15000,
     'chapter.get': 15000,
+    'chapter.scope_context.build': 60000,
     'plotline.list': 15000,
     'character.list': 15000,
     'item.list': 15000,
@@ -34,12 +76,54 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'worldsetting.update': 30000,
     'map.list': 15000,
     'search.query': 15000,
+    'rag.ask': 90000,
+    'rag.preview': 30000,
+    'rag.rebuild_index': 180000,
+    'agent.generate_chat': 150000,
+    'agent.generate_plan': 150000,
+    'agent.revise_plan': 150000,
+    'agent.generate_report': 210000,
+    'agent.generate_consistency_review': 240000,
+    'agent.generate_editor_range_review': 240000,
+    'agent.generate_writer_range_revision_plan': 240000,
+    'agent.generate_reader_chapter_evaluation': 240000,
+    'agent.generate_worldbuilding_range_consistency': 240000,
+    'agent.extract_research_claims': 240000,
+    'agent.generate_research_fact_check': 240000,
+    'agent.generate_scope_audit': 240000,
+    'agent.generate_plotline_analysis': 240000,
+    'agent.detect_creative_direction': 150000,
+    'agent.generate_chapter_beats': 180000,
+    'artifact.review.submit': 30000,
+    'review.comment.list': 15000,
+    'review.comment.save': 15000,
+    'review.comment.delete': 15000,
+    'review.comment.mark_sent': 15000,
+    'revision_task.list': 15000,
+    'revision_task.create_plan': 150000,
+    'revision_task.update_status': 15000,
+    'revision_task.sync_run': 15000,
     'draft.list': 15000,
     'draft.get': 15000,
     'draft.get_active': 15000,
     'draft.update': 15000,
     'draft.commit': 30000,
+    'draft.undo': 30000,
     'draft.discard': 15000,
+    'draft.batch.list': 15000,
+    'draft.batch.get': 15000,
+    'draft.batch.create': 15000,
+    'draft.batch.update_outline': 15000,
+    'draft.batch.approve_outline': 15000,
+    'draft.batch.attach_child': 15000,
+    'draft.batch.mark_stale_after': 15000,
+    'draft.batch.prepare_regeneration': 15000,
+    'draft.batch.mark_failed': 15000,
+    'draft.batch.inspect_reconciliation': 15000,
+    'draft.batch.reconcile_unknown': 15000,
+    'draft.batch.commit_prefix': 60000,
+    'draft.batch.undo': 60000,
+    'draft.batch.discard': 15000,
     'outline.write': 30000,
     'character.create_batch': 30000,
     'story_patch.apply': 30000,
@@ -47,9 +131,12 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'chapter.save': 30000,
     'prompt.preview': 30000,
     'creative_assets.validate_draft': 30000,
-    'creative_assets.generate_draft': 90000,
-    'outline.generate_draft': 90000,
-    'chapter.generate_draft': 90000,
+    'creative_assets.generate_draft': 210000,
+    'creative_assets.revise_draft': 300000,
+    'outline.generate_draft': 210000,
+    'chapter.generate_draft': 360000,
+    'chapter.revise_draft': 360000,
+    'chapter.continuation_context.build': 90000,
 };
 const DEFAULT_AUTOMATION_TIMEOUT_MS = 30000;
 
@@ -170,10 +257,84 @@ function normalizePromptPreviewKind(kind: unknown): NormalizedPromptPreviewKind 
 export class AutomationService {
     private readonly aiService: AiService;
     private readonly draftStore: DraftSessionStore;
+    private readonly reviewStore: AgentReviewStore;
+    private readonly reviewCommentStore: ReviewCommentStore;
+    private draftBatchCommitTail: Promise<void> = Promise.resolve();
 
     constructor(aiService: AiService, getUserDataPath: () => string) {
         this.aiService = aiService;
         this.draftStore = new DraftSessionStore(getUserDataPath);
+        this.reviewStore = new AgentReviewStore(db);
+        this.reviewCommentStore = new ReviewCommentStore(getUserDataPath);
+    }
+
+    private async createRevisionTaskPlan(
+        input: RevisionTaskCreatePlanInput,
+        context: AutomationInvokeContext,
+    ): Promise<RevisionTaskCreatePlanResult> {
+        const revisionTaskId = assertRequiredString(input?.revisionTaskId, 'revisionTaskId');
+        const availableTools = Array.isArray(input?.availableTools)
+            ? input.availableTools.map((tool) => String(tool || '').trim()).filter(Boolean)
+            : [];
+        if (!availableTools.length) {
+            throw createAutomationError('INVALID_INPUT', 'availableTools is required');
+        }
+        const task = await this.reviewStore.getRevisionTask(revisionTaskId);
+        if (task.status !== 'open') {
+            throw createAutomationError('INVALID_TASK_STATUS', `Revision task cannot create a plan from status ${task.status}`);
+        }
+        await this.reviewStore.assertRevisionTaskFresh(task);
+        const preferredRole = input.role || task.recommendedRole;
+        const goal = [
+            `根据已审核问题创建修订计划：${task.title}`,
+            task.description,
+            task.targetChapterIds.length ? `目标章节：${task.targetChapterIds.join('、')}` : '',
+            `来源专家：${task.sourceExpert}；严重度：${task.severity}`,
+            task.note ? `审核备注：${task.note}` : '',
+            '只生成可审核计划，不直接修改或写回正文。',
+        ].filter(Boolean).join('\n');
+        const generated = await this.aiService.generateAgentPlan({
+            goal,
+            role: preferredRole,
+            locale: input.locale || 'zh-CN',
+            availableTools,
+            availableToolchains: Array.isArray(input.availableToolchains) ? input.availableToolchains : [],
+        }, context.signal);
+        const planId = `plan_${randomUUID().replace(/-/g, '')}`;
+        const threadId = input.threadId?.trim() || `thread_revision_${randomUUID().replace(/-/g, '')}`;
+        const plan: RevisionTaskCreatePlanResult['plan'] = {
+            planId,
+            threadId,
+            title: generated.title,
+            goal,
+            requiresApproval: true,
+            preferredRole,
+            ...(generated.deliverable ? { deliverable: generated.deliverable } : {}),
+            steps: generated.steps.map((step) => ({
+                stepId: `step_${randomUUID().replace(/-/g, '')}`,
+                agent: step.agent,
+                title: step.title,
+                tools: Array.isArray(step.tools) ? step.tools : [],
+                ...(step.toolchain ? { toolchain: step.toolchain } : {}),
+                status: 'pending',
+            })),
+        };
+        const updatedTask = await this.reviewStore.attachPlan(revisionTaskId, plan as unknown as Record<string, unknown> & { planId: string });
+        return { task: updatedTask, plan };
+    }
+
+    private async serializeDraftBatchCommit<T>(task: () => Promise<T>): Promise<T> {
+        const previous = this.draftBatchCommitTail;
+        let release!: () => void;
+        this.draftBatchCommitTail = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        await previous;
+        try {
+            return await task();
+        } finally {
+            release();
+        }
     }
 
     private logInvokeStart(method: string, params: unknown, context: AutomationInvokeContext, timeoutMs: number): void {
@@ -228,6 +389,12 @@ export class AutomationService {
         } catch (error) {
             if (timer) clearTimeout(timer);
             this.logInvokeError(method, context, startedAt, error);
+            if (context.signal?.aborted) {
+                throw createAutomationError('CANCELLED', `Automation method ${method} was cancelled`, {
+                    method,
+                    requestId: context.requestId,
+                });
+            }
             throw error;
         }
     }
@@ -273,6 +440,296 @@ export class AutomationService {
         });
     }
 
+    async listDraftBatches(filters?: DraftBatchListFilters): Promise<DraftBatchRecord[]> {
+        return this.draftStore.listBatches(filters);
+    }
+
+    async getDraftBatch(draftBatchId: string): Promise<DraftBatchRecord | null> {
+        return this.draftStore.getBatchById(draftBatchId);
+    }
+
+    async createDraftBatch(input: DraftBatchCreateInput): Promise<DraftBatchRecord> {
+        assertRequiredString(input?.novelId, 'novelId');
+        assertRequiredString(input?.volumeId, 'volumeId');
+        assertRequiredString(input?.anchorChapterId, 'anchorChapterId');
+        return this.draftStore.createBatch(input);
+    }
+
+    async updateDraftBatchOutline(input: {
+        draftBatchId: string;
+        version: number;
+        beats: ChapterBeatInput[];
+    }): Promise<DraftBatchRecord> {
+        return this.draftStore.updateBatchOutline(
+            assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            assertRequiredNumber(input?.version, 'version'),
+            input?.beats,
+        );
+    }
+
+    async approveDraftBatchOutline(input: {
+        draftBatchId: string;
+        version: number;
+        outlineRevision: number;
+        approvedBy?: string;
+    }): Promise<DraftBatchRecord> {
+        return this.draftStore.approveBatchOutline(
+            assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            assertRequiredNumber(input?.version, 'version'),
+            assertRequiredNumber(input?.outlineRevision, 'outlineRevision'),
+            typeof input?.approvedBy === 'string' ? input.approvedBy : 'desktop-ui',
+        );
+    }
+
+    async attachDraftBatchChild(input: {
+        draftBatchId: string;
+        childIndex: number;
+        session: Omit<DraftSessionRecord, 'draftSessionId' | 'version' | 'createdAt' | 'updatedAt' | 'draftBatchId' | 'childIndex' | 'generationRevision' | 'dependsOnDraftSessionId'>;
+    }): Promise<{ batch: DraftBatchRecord; session: DraftSessionRecord }> {
+        return this.draftStore.createBatchChildSession(
+            assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            assertRequiredNumber(input?.childIndex, 'childIndex'),
+            input?.session,
+        );
+    }
+
+    async markDraftBatchStaleAfter(input: {
+        draftBatchId: string;
+        version: number;
+        afterChildIndex: number;
+    }): Promise<DraftBatchRecord> {
+        return this.draftStore.markBatchChildrenStale(
+            assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            assertRequiredNumber(input?.version, 'version'),
+            assertRequiredNumber(input?.afterChildIndex, 'afterChildIndex'),
+        );
+    }
+
+    async prepareDraftBatchRegeneration(
+        input: DraftBatchPrepareRegenerationInput,
+    ): Promise<DraftBatchPrepareRegenerationResponse> {
+        const fromChildIndex = input?.fromChildIndex;
+        if (fromChildIndex !== undefined && (!Number.isInteger(fromChildIndex) || fromChildIndex < 0)) {
+            throw createAutomationError('INVALID_INPUT', 'fromChildIndex must be a non-negative integer');
+        }
+        return this.draftStore.prepareBatchRegeneration(
+            assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            assertRequiredNumber(input?.version, 'version'),
+            fromChildIndex,
+            assertRequiredString(input?.runId, 'runId'),
+        );
+    }
+
+    async markDraftBatchChildFailed(input: DraftBatchMarkFailedInput): Promise<DraftBatchRecord> {
+        assertRequiredString(input?.draftBatchId, 'draftBatchId');
+        assertRequiredNumber(input?.version, 'version');
+        assertRequiredNumber(input?.childIndex, 'childIndex');
+        assertRequiredNumber(input?.generationRevision, 'generationRevision');
+        if (!Number.isInteger(input.childIndex) || input.childIndex < 0) {
+            throw createAutomationError('INVALID_INPUT', 'childIndex must be a non-negative integer');
+        }
+        if (!Number.isInteger(input.generationRevision) || input.generationRevision < 1) {
+            throw createAutomationError('INVALID_INPUT', 'generationRevision must be a positive integer');
+        }
+        return this.draftStore.markBatchChildFailed(input);
+    }
+
+    async inspectDraftBatchReconciliation(
+        input: DraftBatchInspectReconciliationInput,
+    ): Promise<DraftBatchReconciliationInspection> {
+        const childIndex = assertRequiredNumber(input?.childIndex, 'childIndex');
+        const generationRevision = assertRequiredNumber(input?.generationRevision, 'generationRevision');
+        if (!Number.isInteger(childIndex) || childIndex < 0) {
+            throw createAutomationError('INVALID_INPUT', 'childIndex must be a non-negative integer');
+        }
+        if (!Number.isInteger(generationRevision) || generationRevision < 1) {
+            throw createAutomationError('INVALID_INPUT', 'generationRevision must be a positive integer');
+        }
+        return this.draftStore.inspectBatchReconciliation({
+            draftBatchId: assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            childIndex,
+            generationRevision,
+        });
+    }
+
+    async reconcileDraftBatchUnknown(input: DraftBatchReconcileUnknownInput): Promise<DraftBatchRecord> {
+        assertRequiredString(input?.invocationKey, 'invocationKey');
+        if (input?.resolution !== 'reconciled_succeeded' && input?.resolution !== 'reconciled_absent') {
+            throw createAutomationError('INVALID_INPUT', 'resolution must be reconciled_succeeded or reconciled_absent');
+        }
+        return this.draftStore.reconcileBatchUnknown({
+            ...input,
+            draftBatchId: assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            version: assertRequiredNumber(input?.version, 'version'),
+            childIndex: assertRequiredNumber(input?.childIndex, 'childIndex'),
+            generationRevision: assertRequiredNumber(input?.generationRevision, 'generationRevision'),
+            invocationKey: assertRequiredString(input?.invocationKey, 'invocationKey'),
+        });
+    }
+
+    async discardDraftBatch(input: { draftBatchId: string; version: number }): Promise<DraftBatchRecord> {
+        return this.draftStore.discardBatch(
+            assertRequiredString(input?.draftBatchId, 'draftBatchId'),
+            assertRequiredNumber(input?.version, 'version'),
+        );
+    }
+
+    async commitDraftBatchPrefix(input: DraftBatchCommitPrefixInput): Promise<DraftBatchCommitPrefixResponse> {
+        return this.serializeDraftBatchCommit(async () => {
+            const draftBatchId = assertRequiredString(input?.draftBatchId, 'draftBatchId');
+            const version = assertRequiredNumber(input?.version, 'version');
+            const prefixLength = assertRequiredNumber(input?.prefixLength, 'prefixLength');
+            if (!Number.isInteger(prefixLength)) {
+                throw createAutomationError('INVALID_INPUT', 'prefixLength must be an integer');
+            }
+            const insertionMode = input?.insertionMode;
+            if (insertionMode !== undefined && insertionMode !== 'after_anchor' && insertionMode !== 'volume_end') {
+                throw createAutomationError('INVALID_INPUT', 'insertionMode must be after_anchor or volume_end');
+            }
+
+            const batch = await this.draftStore.getBatchById(draftBatchId);
+            if (!batch) throw createAutomationError('NOT_FOUND', 'Draft batch not found');
+            if (batch.version !== version) throw createAutomationError('VERSION_CONFLICT', 'Draft batch version conflict');
+            if (!Number.isInteger(prefixLength) || prefixLength < 1 || prefixLength > batch.children.length) {
+                throw createAutomationError('INVALID_INPUT', 'prefixLength is outside the draft batch');
+            }
+            if (batch.status === 'discarded' || batch.status === 'failed') {
+                throw createAutomationError('INVALID_STATE', `Draft batch cannot be committed from ${batch.status}`);
+            }
+
+            const firstUncommittedIndex = batch.children.findIndex((child) => child.status !== 'committed');
+            const committedPrefixLength = firstUncommittedIndex < 0 ? batch.children.length : firstUncommittedIndex;
+            if (batch.children.slice(committedPrefixLength).some((child) => child.status === 'committed')) {
+                throw createAutomationError('INVALID_STATE', 'Draft batch contains a non-contiguous committed child');
+            }
+            if (prefixLength <= committedPrefixLength) {
+                throw createAutomationError('INVALID_STATE', 'Requested prefix is already committed');
+            }
+
+            const sessions = await this.draftStore.list({ draftBatchId, includeInactive: true });
+            const sessionById = new Map(sessions.map((session) => [session.draftSessionId, session]));
+            const drafts = batch.children
+                .slice(committedPrefixLength, prefixLength)
+                .map((child) => {
+                    const session = child.draftSessionId ? sessionById.get(child.draftSessionId) : undefined;
+                    if (!session || child.status !== 'draft' || session.status !== 'draft' || session.type !== 'chapter-draft') {
+                        throw createAutomationError(
+                            'INVALID_STATE',
+                            `Draft batch child ${child.childIndex + 1} is not ready to commit`,
+                        );
+                    }
+                    if (session.draftBatchId !== draftBatchId || session.childIndex !== child.childIndex) {
+                        throw createAutomationError(
+                            'INVALID_STATE',
+                            `Draft batch child ${child.childIndex + 1} session linkage is invalid`,
+                        );
+                    }
+                    const payload = session.payload as ChapterDraftPayload;
+                    const generatedText = String(payload.generatedText || '').trim();
+                    const content = batch.mode === 'sequence_continuation'
+                        ? createLexicalDocumentFromPlainText(generatedText)
+                        : ensureLexicalDocument(String(payload.content || generatedText));
+                    if (!extractReadableText(content)) {
+                        throw createAutomationError(
+                            'INVALID_STATE',
+                            `Draft batch child ${child.childIndex + 1} has no reviewable content`,
+                        );
+                    }
+                    return {
+                        childIndex: child.childIndex,
+                        targetChapterId: child.targetChapterId,
+                        title: child.title.trim() || `第 ${child.childIndex + 1} 章`,
+                        content,
+                        wordCount: extractReadableText(content).length,
+                    };
+                });
+
+            const committed = await commitDraftBatchChapters(db, {
+                batch,
+                committedPrefixLength,
+                prefixLength,
+                insertionMode,
+                drafts,
+            });
+            const stored = await this.draftStore.commitBatchPrefix(
+                draftBatchId,
+                version,
+                prefixLength,
+                committed.insertionMode,
+                committed.chapters,
+                committed.writeback,
+            );
+
+            for (const chapter of committed.chapters) {
+                await searchIndex.indexChapter({
+                    id: chapter.chapterId,
+                    title: chapter.title,
+                    content: chapter.content,
+                    volumeId: chapter.volumeId,
+                    order: chapter.order,
+                    novelId: batch.novelId,
+                });
+                scheduleChapterSummaryRebuild(chapter.chapterId);
+            }
+            if (committed.reorderedChapterIds.length > 0) {
+                const reorderedChapters = await db.chapter.findMany({
+                    where: { id: { in: committed.reorderedChapterIds } },
+                    select: { id: true, title: true, content: true, volumeId: true },
+                });
+                for (const chapter of reorderedChapters) {
+                    await searchIndex.indexChapter({ ...chapter, novelId: batch.novelId });
+                }
+            }
+
+            return {
+                batch: stored.batch,
+                sessions: stored.sessions,
+                chapters: committed.chapters,
+                committedPrefixLength: prefixLength,
+                insertionMode: committed.insertionMode,
+                writeback: committed.writeback,
+            };
+        });
+    }
+
+    async undoDraftBatch(input: DraftBatchUndoInput): Promise<DraftUndoResponse> {
+        return this.serializeDraftBatchCommit(async () => {
+            const draftBatchId = assertRequiredString(input?.draftBatchId, 'draftBatchId');
+            const version = assertRequiredNumber(input?.version, 'version');
+            const writebackId = assertRequiredString(input?.writebackId, 'writebackId');
+            const batch = await this.draftStore.getBatchById(draftBatchId);
+            if (!batch) throw createAutomationError('NOT_FOUND', 'Draft batch not found');
+            if (batch.version !== version) throw createAutomationError('VERSION_CONFLICT', 'Draft batch version conflict');
+            const latestWriteback = [...(batch.writebacks ?? [])].reverse().find((item) => item.status === 'committed');
+            if (!latestWriteback || latestWriteback.writebackId !== writebackId) {
+                throw createAutomationError('INVALID_STATE', 'Only the latest writeback can be undone');
+            }
+
+            const restoredChapters = await undoDraftBatchWriteback(db, batch, latestWriteback);
+            const stored = await this.draftStore.undoBatchWriteback(
+                draftBatchId,
+                version,
+                writebackId,
+                restoredChapters,
+            );
+            for (const chapter of restoredChapters) {
+                await searchIndex.indexChapter({
+                    id: chapter.chapterId,
+                    title: chapter.title,
+                    content: chapter.content,
+                    volumeId: chapter.volumeId,
+                    order: chapter.order,
+                    novelId: batch.novelId,
+                });
+                scheduleChapterSummaryRebuild(chapter.chapterId);
+            }
+            return {
+                batch: stored.batch,
+                writeback: stored.writeback,
+            };
+        });
+    }
+
     async generateCreativeAssetsDraft(
         payload: CreativeAssetsGeneratePayload,
         context: AutomationInvokeContext,
@@ -280,7 +737,7 @@ export class AutomationService {
     ): Promise<DraftSessionRecord> {
         assertRequiredString(payload?.novelId, 'novelId');
         assertRequiredString(payload?.brief, 'brief');
-        const result = await this.aiService.generateCreativeAssets(payload);
+        const result = await this.aiService.generateCreativeAssets(payload, context.signal);
         const sanitizedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(result.draft));
         return this.draftStore.create({
             workspace: 'ai-workbench',
@@ -303,7 +760,7 @@ export class AutomationService {
             currentContent: string;
             presentation?: 'silent' | 'toast' | 'modal';
             locale?: string;
-            mode?: 'new_chapter' | 'continue_chapter';
+            mode?: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter';
             ideaIds?: string[];
             contextChapterCount?: number;
             recentRawChapterCount?: number;
@@ -315,6 +772,14 @@ export class AutomationService {
             userIntent?: string;
             currentLocation?: string;
             overrideUserPrompt?: string;
+            preparedContext?: import('../ai/context/ContextBuilder').ContinueWritingContext;
+            draftBatchId?: string;
+            childIndex?: number;
+            generationRevision?: number;
+            batchTitle?: string;
+            batchContext?: Record<string, unknown>;
+            batchMode?: 'sequence_continuation' | 'batch_rewrite';
+            targetChapterId?: string;
         },
         context: AutomationInvokeContext,
     ): Promise<DraftSessionRecord> {
@@ -325,38 +790,303 @@ export class AutomationService {
         const normalizedPresentation = requestedPresentation === 'silent' || requestedPresentation === 'toast' || requestedPresentation === 'modal'
             ? requestedPresentation
             : undefined;
-        const { presentation: _presentation, ...chapterGeneratePayload } = payload;
-        const result = await this.aiService.executeAction({
-            actionId: 'chapter.generate',
-            payload: chapterGeneratePayload,
-        } satisfies AiActionExecutePayload) as {
+        const draftBatchId = typeof payload.draftBatchId === 'string' ? payload.draftBatchId.trim() : '';
+        const childIndex = payload.childIndex;
+        if ((draftBatchId && !Number.isInteger(childIndex)) || (!draftBatchId && childIndex !== undefined)) {
+            throw createAutomationError('INVALID_INPUT', 'draftBatchId and integer childIndex must be supplied together');
+        }
+        let sourceSnapshot: ChapterDraftPayload['sourceSnapshot'];
+        if (!draftBatchId) {
+            const sourceChapter = await db.chapter.findUnique({
+                where: { id: payload.chapterId },
+                select: { id: true, version: true, content: true, deleted: true, volume: { select: { novelId: true } } },
+            });
+            if (!sourceChapter || sourceChapter.deleted || sourceChapter.volume.novelId !== payload.novelId) {
+                throw createAutomationError('NOT_FOUND', 'Chapter source is unavailable');
+            }
+            sourceSnapshot = {
+                chapterId: sourceChapter.id,
+                version: sourceChapter.version,
+                contentHash: createHash('sha256').update(sourceChapter.content || '', 'utf8').digest('hex'),
+            };
+        }
+        const {
+            presentation: _presentation,
+            draftBatchId: _draftBatchId,
+            childIndex: _childIndex,
+            batchTitle: _batchTitle,
+            generationRevision: _generationRevision,
+            batchMode: _batchMode,
+            targetChapterId: _targetChapterId,
+            ...chapterGeneratePayload
+        } = payload;
+        const result = await this.aiService.continueWriting(chapterGeneratePayload, context.signal) as {
             text: string;
             usedContext: string[];
             warnings?: string[];
+            contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
+            contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
             consistency: { ok: boolean; issues: string[] };
         };
 
+        let narrativeStateDelta: NarrativeStateDelta | undefined;
+        let stateExtractionWarning = '';
+        if (draftBatchId && Number.isInteger(childIndex)) {
+            const hardContext = payload.preparedContext?.hardContext;
+            const entityRefs = (values: Array<Record<string, unknown>> | undefined) => (values ?? [])
+                .map((item) => ({
+                    key: String(item.id || item.name || '').trim(),
+                    name: String(item.name || '').trim(),
+                }))
+                .filter((item) => item.key && item.name);
+            try {
+                const extracted = await this.aiService.extractNarrativeState({
+                    locale: payload.locale,
+                    generatedText: result.text,
+                    currentBeat: payload.batchContext?.currentBeat && typeof payload.batchContext.currentBeat === 'object'
+                        ? payload.batchContext.currentBeat as Record<string, unknown>
+                        : {},
+                    priorStateLedger: payload.batchContext?.stateLedger && typeof payload.batchContext.stateLedger === 'object'
+                        ? payload.batchContext.stateLedger as Record<string, unknown>
+                        : {},
+                    characters: entityRefs(hardContext?.characters),
+                    items: entityRefs(hardContext?.items),
+                }, context.signal);
+                narrativeStateDelta = extracted.delta;
+            } catch (error) {
+                if (context.signal?.aborted) throw error;
+                stateExtractionWarning = '章节状态抽取失败，已使用节拍台账继续生成。';
+                devLogError('AutomationService.chapter.state-extraction', error, {
+                    draftBatchId,
+                    childIndex,
+                    generationRevision: payload.generationRevision,
+                });
+            }
+        }
+
+        const isRewriteBatch = draftBatchId && payload.batchMode === 'batch_rewrite';
+        const targetChapterId = isRewriteBatch
+            ? assertRequiredString(payload.targetChapterId, 'targetChapterId')
+            : draftBatchId
+                ? `draft-batch:${draftBatchId}:${childIndex}`
+                : payload.chapterId;
+        const baseContent = isRewriteBatch ? payload.currentContent : draftBatchId ? '' : payload.currentContent;
         const chapterPayload: ChapterDraftPayload = {
-            chapterId: payload.chapterId,
-            baseContent: payload.currentContent,
+            chapterId: targetChapterId,
+            baseContent,
             generatedText: result.text,
-            content: `${payload.currentContent}${result.text}`,
+            content: isRewriteBatch ? result.text : appendPlainTextToLexical(baseContent, result.text),
             presentation: normalizedPresentation,
             usedContext: result.usedContext,
-            warnings: result.warnings,
+            warnings: [
+                ...(result.warnings ?? []),
+                ...(stateExtractionWarning ? [stateExtractionWarning] : []),
+            ],
+            narrativeStateDelta,
+            contextPolicy: result.contextPolicy,
+            contextSnapshot: result.contextSnapshot,
+            sourceSnapshot,
             consistency: result.consistency,
         };
 
-        return this.draftStore.create({
+        const sessionInput = {
             workspace: 'chapter-editor',
             type: 'chapter-draft',
             source: 'internal-ai',
             origin: context.origin ?? 'unknown',
             novelId: payload.novelId,
-            chapterId: payload.chapterId,
+            chapterId: targetChapterId,
             status: 'draft',
             payload: chapterPayload,
-            previewSummary: `章节草稿 ${result.text.length} 字符`,
+            previewSummary: `${payload.batchTitle?.trim() || '章节草稿'} ${result.text.length} 字符`,
+        } as const;
+        if (draftBatchId && Number.isInteger(childIndex)) {
+            const currentBeat = payload.batchContext?.currentBeat && typeof payload.batchContext.currentBeat === 'object'
+                ? payload.batchContext.currentBeat as Record<string, unknown>
+                : {};
+            const attached = await this.draftStore.createBatchChildSession(
+                draftBatchId,
+                childIndex as number,
+                sessionInput,
+                {
+                    title: String(currentBeat.title || payload.batchTitle || '').trim(),
+                    coreConflict: String(currentBeat.coreConflict || '').trim(),
+                    keyEvents: Array.isArray(currentBeat.keyEvents) ? currentBeat.keyEvents.map(String) : [],
+                    reveals: Array.isArray(currentBeat.reveals) ? currentBeat.reveals.map(String) : [],
+                    endingHook: String(currentBeat.endingHook || '').trim(),
+                    summary: result.text.length > 700
+                        ? `${result.text.slice(0, 350)} ... ${result.text.slice(-250)}`
+                        : result.text,
+                    stateDelta: narrativeStateDelta,
+                },
+                payload.generationRevision,
+            );
+            return attached.session;
+        }
+        return this.draftStore.create(sessionInput);
+    }
+
+    async reviseChapterDraftSession(
+        input: {
+            sourceDraftSessionId: string;
+            sourceDraftVersion: number;
+            reviewRequestId?: string;
+            comments: ReviewCommentRecord[];
+            locale?: string;
+        },
+        context: AutomationInvokeContext,
+    ): Promise<DraftSessionRecord> {
+        const sourceDraftSessionId = assertRequiredString(input?.sourceDraftSessionId, 'sourceDraftSessionId');
+        assertRequiredNumber(input?.sourceDraftVersion, 'sourceDraftVersion');
+        if (!Array.isArray(input?.comments) || input.comments.length === 0) {
+            throw createAutomationError('INVALID_INPUT', 'At least one review comment is required');
+        }
+        const source = await this.draftStore.getById(sourceDraftSessionId);
+        if (!source) throw createAutomationError('NOT_FOUND', 'Source draft session not found');
+        if (source.version !== input.sourceDraftVersion) {
+            throw createAutomationError('VERSION_CONFLICT', 'Source draft changed after the review comments were loaded');
+        }
+        if (source.type !== 'chapter-draft' || source.draftBatchId) {
+            throw createAutomationError('INVALID_DRAFT_TYPE', 'Only a standalone chapter draft can use chapter.revise_draft');
+        }
+        if (source.status !== 'draft') {
+            throw createAutomationError('INVALID_STATE', 'Only the current reviewable draft can be regenerated');
+        }
+        const sourcePayload = source.payload as ChapterDraftPayload;
+        const instructions = input.comments.map((comment, index) => {
+            const location = typeof comment.anchor.paragraphIndex === 'number'
+                ? `第 ${comment.anchor.paragraphIndex + 1} 段`
+                : comment.anchor.targetId;
+            const quote = comment.anchor.quote?.trim()
+                ? `\n原文摘录：${comment.anchor.quote.trim().slice(0, 500)}`
+                : '';
+            return `${index + 1}. ${location}：${comment.body.trim()}${quote}`;
+        }).join('\n');
+        const result = await this.aiService.continueWriting({
+            novelId: source.novelId,
+            chapterId: sourcePayload.sourceSnapshot?.chapterId || sourcePayload.chapterId,
+            currentContent: sourcePayload.generatedText,
+            locale: input.locale || 'zh-CN',
+            mode: 'rewrite_chapter',
+            userIntent: [
+                '根据以下审批意见重写当前待审核草稿。',
+                '只调整被指出的内容；没有审批意见的情节、事实、人物状态、伏笔和文风应尽量保持。',
+                '输出完整的新草稿正文，不要解释修改过程。',
+                instructions,
+            ].join('\n'),
+            presentation: 'silent',
+        }, context.signal) as {
+            text: string;
+            usedContext: string[];
+            warnings?: string[];
+            contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
+            contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
+            consistency: { ok: boolean; issues: string[] };
+        };
+        const generatedText = result.text.trim();
+        if (!generatedText) throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty revised draft');
+        return this.draftStore.create({
+            workspace: source.workspace,
+            type: 'chapter-draft',
+            source: 'internal-ai',
+            origin: context.origin ?? 'desktop-ui',
+            novelId: source.novelId,
+            chapterId: source.chapterId,
+            revisionOfDraftSessionId: source.draftSessionId,
+            reviewRequestId: input.reviewRequestId?.trim() || randomUUID(),
+            status: 'draft',
+            payload: {
+                ...sourcePayload,
+                generatedText,
+                content: appendPlainTextToLexical(sourcePayload.baseContent, generatedText),
+                usedContext: result.usedContext,
+                warnings: result.warnings,
+                contextPolicy: result.contextPolicy,
+                contextSnapshot: result.contextSnapshot,
+                consistency: result.consistency,
+            },
+            previewSummary: `审批意见修订草稿 ${generatedText.length} 字符`,
+        });
+    }
+
+    async reviseCreativeAssetsDraftSession(
+        input: {
+            sourceDraftSessionId: string;
+            sourceDraftVersion: number;
+            reviewRequestId?: string;
+            comments: ReviewCommentRecord[];
+            locale?: string;
+        },
+        context: AutomationInvokeContext,
+    ): Promise<DraftSessionRecord> {
+        const sourceDraftSessionId = assertRequiredString(input?.sourceDraftSessionId, 'sourceDraftSessionId');
+        assertRequiredNumber(input?.sourceDraftVersion, 'sourceDraftVersion');
+        if (!Array.isArray(input?.comments) || input.comments.length === 0) {
+            throw createAutomationError('INVALID_INPUT', 'At least one review comment is required');
+        }
+        const source = await this.draftStore.getById(sourceDraftSessionId);
+        if (!source) throw createAutomationError('NOT_FOUND', 'Source draft session not found');
+        if (source.version !== input.sourceDraftVersion) {
+            throw createAutomationError('VERSION_CONFLICT', 'Source draft changed after the review comments were loaded');
+        }
+        if (source.type !== 'creative-assets') {
+            throw createAutomationError('INVALID_DRAFT_TYPE', 'Only a creative assets draft can use creative_assets.revise_draft');
+        }
+        if (source.status !== 'draft') {
+            throw createAutomationError('INVALID_STATE', 'Only the current reviewable draft can be regenerated');
+        }
+        if (input.comments.some((comment) => comment.reviewVersionId !== source.draftSessionId)) {
+            throw createAutomationError('VERSION_CONFLICT', 'Review comments belong to another creative assets version');
+        }
+
+        const sourceDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(source.payload));
+        const targetSections = (Object.keys(sourceDraft) as Array<keyof CreativeAssetsDraft>)
+            .filter((section) => Array.isArray(sourceDraft[section]) && (sourceDraft[section]?.length ?? 0) > 0);
+        const instructions = input.comments.map((comment, index) => {
+            const location = comment.anchor.fieldPath || comment.anchor.targetId;
+            const quote = comment.anchor.quote?.trim()
+                ? `\n条目摘录：${comment.anchor.quote.trim().slice(0, 500)}`
+                : '';
+            return `${index + 1}. ${location}：${comment.body.trim()}${quote}`;
+        }).join('\n');
+        const promptDraft = JSON.stringify(sourceDraft, (key, value) => (
+            key === 'imageBase64' ? '[保留原图片数据]' : value
+        ), 2);
+        const result = await this.aiService.generateCreativeAssets({
+            novelId: source.novelId,
+            locale: input.locale || 'zh-CN',
+            brief: '根据审批意见重写当前创作素材审核包。',
+            targetSections,
+            includeExistingEntities: false,
+            filterCompletedPlotLines: false,
+            overrideUserPrompt: [
+                '你正在修订一个待审核的创作素材包。',
+                '必须返回完整 JSON 素材包，结构与原素材包一致。',
+                '只修改审批意见指出的条目或字段；其余情节、角色、设定、物品、技能和地图保持不变。',
+                '不要解释修改过程，不要省略未修改条目。',
+                '原素材包：',
+                promptDraft,
+                '审批意见：',
+                instructions,
+            ].join('\n'),
+        }, context.signal);
+        const revisedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(result.draft));
+        const revisedCount = Object.values(revisedDraft).reduce((total, items) => total + (items?.length ?? 0), 0);
+        if (revisedCount === 0) throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty creative assets revision');
+
+        return this.draftStore.create({
+            workspace: source.workspace,
+            type: 'creative-assets',
+            source: 'internal-ai',
+            origin: context.origin ?? 'desktop-ui',
+            novelId: source.novelId,
+            revisionOfDraftSessionId: source.draftSessionId,
+            reviewRequestId: input.reviewRequestId?.trim() || randomUUID(),
+            status: 'draft',
+            payload: revisedDraft,
+            selection: createSelectionFromDraft(revisedDraft),
+            validation: null,
+            previewSummary: summarizeCreativeDraft(revisedDraft),
         });
     }
 
@@ -369,7 +1099,12 @@ export class AutomationService {
     }): Promise<DraftSessionRecord> {
         assertRequiredString(input?.draftSessionId, 'draftSessionId');
         assertRequiredNumber(input?.version, 'version');
-        return this.draftStore.update(input.draftSessionId, input.version, (current) => ({
+        const beforeUpdate = await this.draftStore.getById(input.draftSessionId);
+        if (!beforeUpdate) throw createAutomationError('NOT_FOUND', 'Draft session not found');
+        if (beforeUpdate.status !== 'draft') {
+            throw createAutomationError('INVALID_STATE', 'Only an active draft can be edited');
+        }
+        const updated = await this.draftStore.update(input.draftSessionId, input.version, (current) => ({
             ...current,
             payload: input.payload ?? current.payload,
             selection: input.selection ?? current.selection,
@@ -378,6 +1113,22 @@ export class AutomationService {
                 ? `章节草稿 ${((input.payload ?? current.payload) as ChapterDraftPayload).generatedText?.length ?? 0} 字符`
                 : summarizeCreativeDraft(normalizeCreativeDraft(input.payload ?? current.payload)),
         }));
+        if (beforeUpdate.draftBatchId && typeof beforeUpdate.childIndex === 'number') {
+            const batch = await this.draftStore.getBatchById(beforeUpdate.draftBatchId);
+            const child = batch?.children[beforeUpdate.childIndex];
+            if (
+                batch
+                && child?.draftSessionId === beforeUpdate.draftSessionId
+                && beforeUpdate.childIndex < batch.children.length - 1
+            ) {
+                await this.draftStore.markBatchChildrenStale(
+                    batch.draftBatchId,
+                    batch.version,
+                    beforeUpdate.childIndex,
+                );
+            }
+        }
+        return updated;
     }
 
     async discardDraft(input: { draftSessionId: string; version: number }): Promise<DraftSessionRecord> {
@@ -419,6 +1170,10 @@ export class AutomationService {
     }
 
     async commitDraft(input: { draftSessionId: string; version: number }): Promise<DraftCommitResponse> {
+        return this.serializeDraftBatchCommit(() => this.commitDraftSerialized(input));
+    }
+
+    private async commitDraftSerialized(input: { draftSessionId: string; version: number }): Promise<DraftCommitResponse> {
         assertRequiredString(input?.draftSessionId, 'draftSessionId');
         assertRequiredNumber(input?.version, 'version');
         const session = await this.draftStore.getById(input.draftSessionId);
@@ -451,10 +1206,24 @@ export class AutomationService {
                 novelId: session.novelId,
                 draft: normalizedDraft,
             });
+            const writeback = confirmResult.success && confirmResult.createdEntities?.length
+                ? {
+                    writebackId: randomUUID(),
+                    mode: 'creative_assets' as const,
+                    status: 'committed' as const,
+                    chapters: [],
+                    creativeAssets: {
+                        entities: confirmResult.createdEntities,
+                        created: confirmResult.created,
+                    },
+                    committedAt: new Date().toISOString(),
+                }
+                : null;
             const committed = await this.draftStore.update(updatedForValidation.draftSessionId, updatedForValidation.version, (current) => ({
                 ...current,
                 status: confirmResult.success ? 'committed' : 'failed',
                 validation,
+                writebacks: writeback ? [...(current.writebacks ?? []), writeback] : current.writebacks,
             }));
             return {
                 session: committed,
@@ -464,26 +1233,227 @@ export class AutomationService {
         }
 
         if (session.type === 'chapter-draft') {
+            if (session.draftBatchId) {
+                throw createAutomationError(
+                    'INVALID_STATE',
+                    'Batch child drafts must be committed through draft.batch.commit_prefix',
+                    { draftBatchId: session.draftBatchId },
+                );
+            }
             const chapterPayload = session.payload as ChapterDraftPayload;
-            const saveResult = await this.aiService.executeAction({
-                actionId: 'chapter.save',
-                payload: {
-                    chapterId: chapterPayload.chapterId,
-                    content: chapterPayload.content,
-                    source: 'ai_agent',
-                },
+            const normalizedContent = appendPlainTextToLexical(chapterPayload.baseContent, chapterPayload.generatedText);
+            const sourceSnapshot = chapterPayload.sourceSnapshot;
+            const expectedHash = sourceSnapshot?.contentHash
+                ?? createHash('sha256').update(chapterPayload.baseContent || '', 'utf8').digest('hex');
+            const newWordCount = extractReadableText(normalizedContent).length;
+            const { sourceChapter, updatedChapter } = await db.$transaction(async (tx) => {
+                const sourceChapter = await tx.chapter.findUnique({
+                    where: { id: chapterPayload.chapterId },
+                    select: {
+                        id: true,
+                        title: true,
+                        content: true,
+                        wordCount: true,
+                        version: true,
+                        deleted: true,
+                        order: true,
+                        volumeId: true,
+                        volume: { select: { novelId: true } },
+                    },
+                });
+                const currentHash = sourceChapter
+                    ? createHash('sha256').update(sourceChapter.content || '', 'utf8').digest('hex')
+                    : '';
+                if (
+                    !sourceChapter
+                    || sourceChapter.deleted
+                    || sourceChapter.volume.novelId !== session.novelId
+                    || (sourceSnapshot && sourceChapter.version !== sourceSnapshot.version)
+                    || currentHash !== expectedHash
+                ) {
+                    throw createAutomationError(
+                        'VERSION_CONFLICT',
+                        '正文在草稿生成后已发生变化，请基于最新正文重新生成',
+                        { chapterId: chapterPayload.chapterId },
+                    );
+                }
+                const updated = await tx.chapter.update({
+                    where: { id: sourceChapter.id },
+                    data: {
+                        content: normalizedContent,
+                        wordCount: newWordCount,
+                        version: { increment: 1 },
+                        updatedAt: new Date(),
+                    },
+                });
+                const wordCountDelta = newWordCount - sourceChapter.wordCount;
+                if (wordCountDelta !== 0) {
+                    await tx.novel.update({
+                        where: { id: session.novelId },
+                        data: { wordCount: { increment: wordCountDelta }, updatedAt: new Date() },
+                    });
+                }
+                return { sourceChapter, updatedChapter: updated };
             });
+            const writeback = {
+                writebackId: randomUUID(),
+                mode: 'single_chapter' as const,
+                status: 'committed' as const,
+                chapters: [{
+                    chapterId: sourceChapter.id,
+                    volumeId: sourceChapter.volumeId,
+                    title: sourceChapter.title,
+                    order: sourceChapter.order,
+                    beforeContent: sourceChapter.content,
+                    beforeWordCount: sourceChapter.wordCount,
+                    beforeVersion: sourceChapter.version,
+                    afterContentHash: createHash('sha256').update(updatedChapter.content || '', 'utf8').digest('hex'),
+                    afterVersion: updatedChapter.version,
+                }],
+                committedAt: new Date().toISOString(),
+            };
             const committed = await this.draftStore.update(session.draftSessionId, session.version, (current) => ({
                 ...current,
                 status: 'committed',
+                writebacks: [...(current.writebacks ?? []), writeback],
+                payload: {
+                    ...(current.payload as ChapterDraftPayload),
+                    content: normalizedContent,
+                },
             }));
+            await searchIndex.indexChapter({
+                id: updatedChapter.id,
+                title: updatedChapter.title,
+                content: updatedChapter.content,
+                volumeId: updatedChapter.volumeId,
+                order: updatedChapter.order,
+                novelId: session.novelId,
+            });
+            scheduleChapterSummaryRebuild(updatedChapter.id);
             return {
                 session: committed,
-                saveResult,
+                saveResult: updatedChapter,
             };
         }
 
         throw Object.assign(new Error(`Unsupported draft type: ${session.type}`), { code: 'INVALID_INPUT' });
+    }
+
+    async undoDraft(input: { draftSessionId: string; version: number; writebackId: string }): Promise<DraftUndoResponse> {
+        return this.serializeDraftBatchCommit(async () => {
+            const draftSessionId = assertRequiredString(input?.draftSessionId, 'draftSessionId');
+            const version = assertRequiredNumber(input?.version, 'version');
+            const writebackId = assertRequiredString(input?.writebackId, 'writebackId');
+            const session = await this.draftStore.getById(draftSessionId);
+            if (!session) throw createAutomationError('NOT_FOUND', 'Draft session not found');
+            if (session.version !== version) throw createAutomationError('VERSION_CONFLICT', 'Draft session version conflict');
+            const latestWriteback = [...(session.writebacks ?? [])].reverse().find((item) => item.status === 'committed');
+            if (!latestWriteback || latestWriteback.writebackId !== writebackId) {
+                throw createAutomationError('INVALID_STATE', 'Only the latest writeback can be undone');
+            }
+            if (latestWriteback.mode === 'creative_assets') {
+                if (session.type !== 'creative-assets' && session.type !== 'outline-draft') {
+                    throw createAutomationError('INVALID_STATE', 'Creative assets writeback belongs to another draft type');
+                }
+                const { backgroundPaths } = await db.$transaction((tx) => (
+                    undoCreativeAssetsWriteback(tx as any, session.novelId, latestWriteback)
+                ));
+                const now = new Date().toISOString();
+                const undoneWriteback = { ...latestWriteback, status: 'undone' as const, undoneAt: now };
+                const updatedSession = await this.draftStore.update(session.draftSessionId, session.version, (record) => ({
+                    ...record,
+                    status: 'draft',
+                    writebacks: (record.writebacks ?? []).map((item) => (
+                        item.writebackId === writebackId ? undoneWriteback : item
+                    )),
+                }));
+                for (const backgroundPath of backgroundPaths) {
+                    try {
+                        this.aiService.deleteGeneratedMapAsset(backgroundPath);
+                    } catch (error) {
+                        devLogError('AutomationService.undoCreativeAssets.mapCleanup', error, {
+                            draftSessionId,
+                            backgroundPath,
+                        });
+                    }
+                }
+                await Promise.allSettled((latestWriteback.creativeAssets?.entities ?? []).flatMap((entity) => {
+                    if (entity.kind === 'mapCanvas') return [];
+                    return [this.aiService.deleteRagSourceIndex(session.novelId, entity.kind, entity.entityId)];
+                }));
+                return { session: updatedSession, writeback: undoneWriteback };
+            }
+            if (latestWriteback.mode !== 'single_chapter') {
+                throw createAutomationError('INVALID_STATE', 'This writeback must be undone through its batch workflow');
+            }
+            const snapshot = latestWriteback.chapters[0];
+            if (!snapshot) throw createAutomationError('INVALID_STATE', 'The writeback has no chapter snapshot');
+            const restoredChapter = await db.$transaction(async (tx) => {
+                const current = await tx.chapter.findUnique({
+                    where: { id: snapshot.chapterId },
+                    select: { id: true, content: true, wordCount: true, version: true, deleted: true },
+                });
+                const currentHash = current
+                    ? createHash('sha256').update(current.content || '', 'utf8').digest('hex')
+                    : '';
+                if (
+                    !current
+                    || current.deleted
+                    || current.version !== snapshot.afterVersion
+                    || currentHash !== snapshot.afterContentHash
+                ) {
+                    throw createAutomationError(
+                        'VERSION_CONFLICT',
+                        '正文已在写回后再次修改，无法安全撤销',
+                        { chapterId: snapshot.chapterId },
+                    );
+                }
+                const restored = await tx.chapter.update({
+                    where: { id: snapshot.chapterId },
+                    data: {
+                        content: snapshot.beforeContent,
+                        wordCount: snapshot.beforeWordCount,
+                        version: { increment: 1 },
+                        updatedAt: new Date(),
+                    },
+                });
+                const wordCountDelta = snapshot.beforeWordCount - current.wordCount;
+                if (wordCountDelta !== 0) {
+                    await tx.novel.update({
+                        where: { id: session.novelId },
+                        data: { wordCount: { increment: wordCountDelta }, updatedAt: new Date() },
+                    });
+                }
+                return restored;
+            });
+            const now = new Date().toISOString();
+            const undoneWriteback = { ...latestWriteback, status: 'undone' as const, undoneAt: now };
+            const updatedSession = await this.draftStore.update(session.draftSessionId, session.version, (record) => ({
+                ...record,
+                status: 'draft',
+                writebacks: (record.writebacks ?? []).map((item) => (
+                    item.writebackId === writebackId ? undoneWriteback : item
+                )),
+                payload: record.type === 'chapter-draft' ? {
+                    ...(record.payload as ChapterDraftPayload),
+                    sourceSnapshot: {
+                        chapterId: restoredChapter.id,
+                        version: restoredChapter.version,
+                        contentHash: createHash('sha256').update(restoredChapter.content || '', 'utf8').digest('hex'),
+                    },
+                } : record.payload,
+            }));
+            await searchIndex.indexChapter({
+                id: restoredChapter.id,
+                title: restoredChapter.title,
+                content: restoredChapter.content,
+                volumeId: restoredChapter.volumeId,
+                order: restoredChapter.order,
+                novelId: session.novelId,
+            });
+            scheduleChapterSummaryRebuild(restoredChapter.id);
+            return { session: updatedSession, writeback: undoneWriteback };
+        });
     }
 
     async previewPrompt(input: {
@@ -526,6 +1496,56 @@ export class AutomationService {
     async invoke(method: string, params: any, context: AutomationInvokeContext): Promise<unknown> {
         return this.withTimeout(method, params, context, async () => {
             switch (method) {
+                case 'agent.generate_chat':
+                    return this.aiService.generateAgentChat(params, context.signal);
+                case 'agent.generate_plan':
+                    return this.aiService.generateAgentPlan(params, context.signal);
+                case 'agent.revise_plan':
+                    return this.aiService.reviseAgentPlan(params, context.signal);
+                case 'agent.generate_report':
+                    return this.aiService.generateAgentReport(params, context.signal);
+                case 'agent.generate_consistency_review':
+                    return this.aiService.generateAgentConsistencyReview(params, context.signal);
+                case 'agent.generate_editor_range_review':
+                    return this.aiService.generateAgentEditorRangeReview(params, context.signal);
+                case 'agent.generate_writer_range_revision_plan':
+                    return this.aiService.generateAgentWriterRangeRevisionPlan(params, context.signal);
+                case 'agent.generate_reader_chapter_evaluation':
+                    return this.aiService.generateAgentReaderChapterEvaluation(params, context.signal);
+                case 'agent.generate_worldbuilding_range_consistency':
+                    return this.aiService.generateAgentWorldbuildingRangeConsistency(params, context.signal);
+                case 'agent.extract_research_claims':
+                    return this.aiService.extractAgentResearchClaims(params, context.signal);
+                case 'agent.generate_research_fact_check':
+                    return this.aiService.generateAgentResearchFactCheck(params, context.signal);
+                case 'agent.generate_scope_audit':
+                    return this.aiService.generateAgentScopeAudit(params, context.signal);
+                case 'agent.generate_plotline_analysis':
+                    return this.aiService.generateAgentPlotlineAnalysis(params, context.signal);
+                case 'agent.detect_creative_direction':
+                    return this.aiService.detectAgentCreativeDirection(params, context.signal);
+                case 'agent.generate_chapter_beats':
+                    return this.aiService.generateChapterBeats(params, context.signal);
+                case 'artifact.review.submit':
+                    return this.reviewStore.submitArtifactReview(params as ArtifactReviewSubmitInput);
+                case 'review.comment.list':
+                    return this.reviewCommentStore.list(params as ReviewCommentListFilters);
+                case 'review.comment.save':
+                    return this.reviewCommentStore.save(params as ReviewCommentSaveInput);
+                case 'review.comment.delete':
+                    return this.reviewCommentStore.delete((params as ReviewCommentDeleteInput)?.commentId);
+                case 'review.comment.mark_sent':
+                    return this.reviewCommentStore.markSent(params as ReviewCommentMarkSentInput);
+                case 'revision_task.list':
+                    return this.reviewStore.listRevisionTasks(params as RevisionTaskListFilters);
+                case 'revision_task.create_plan':
+                    return this.createRevisionTaskPlan(params as RevisionTaskCreatePlanInput, context);
+                case 'revision_task.update_status':
+                    return this.reviewStore.updateRevisionTaskStatus(params as import('../../shared/expertReport').RevisionTaskUpdateStatusInput);
+                case 'revision_task.sync_run':
+                    return this.reviewStore.syncRevisionTasksFromRun(params as import('../../shared/expertReport').RevisionTaskSyncRunInput);
+                case 'rag.ask':
+                    return this.aiService.askNovel(params, context.signal);
                 case 'draft.list':
                     return this.listDrafts(params);
                 case 'draft.get':
@@ -536,10 +1556,42 @@ export class AutomationService {
                     return this.updateDraft(params);
                 case 'draft.commit':
                     return this.commitDraft(params);
+                case 'draft.undo':
+                    return this.undoDraft(params);
                 case 'draft.discard':
                     return this.discardDraft(params);
+                case 'draft.batch.list':
+                    return this.listDraftBatches(params);
+                case 'draft.batch.get':
+                    return this.getDraftBatch(assertRequiredString(params?.draftBatchId, 'draftBatchId'));
+                case 'draft.batch.create':
+                    return this.createDraftBatch(params);
+                case 'draft.batch.update_outline':
+                    return this.updateDraftBatchOutline(params);
+                case 'draft.batch.approve_outline':
+                    return this.approveDraftBatchOutline(params);
+                case 'draft.batch.attach_child':
+                    return this.attachDraftBatchChild(params);
+                case 'draft.batch.mark_stale_after':
+                    return this.markDraftBatchStaleAfter(params);
+                case 'draft.batch.prepare_regeneration':
+                    return this.prepareDraftBatchRegeneration(params);
+                case 'draft.batch.mark_failed':
+                    return this.markDraftBatchChildFailed(params);
+                case 'draft.batch.inspect_reconciliation':
+                    return this.inspectDraftBatchReconciliation(params);
+                case 'draft.batch.reconcile_unknown':
+                    return this.reconcileDraftBatchUnknown(params);
+                case 'draft.batch.commit_prefix':
+                    return this.commitDraftBatchPrefix(params);
+                case 'draft.batch.undo':
+                    return this.undoDraftBatch(params);
+                case 'draft.batch.discard':
+                    return this.discardDraftBatch(params);
                 case 'creative_assets.generate_draft':
                     return this.generateCreativeAssetsDraft(params, context, 'creative-assets');
+                case 'creative_assets.revise_draft':
+                    return this.reviseCreativeAssetsDraftSession(params, context);
                 case 'outline.generate_draft':
                     return this.generateCreativeAssetsDraft({
                         ...params,
@@ -547,6 +1599,8 @@ export class AutomationService {
                     }, context, 'outline-draft');
                 case 'chapter.generate_draft':
                     return this.createChapterDraftSession(params, context);
+                case 'chapter.revise_draft':
+                    return this.reviseChapterDraftSession(params, context);
                 case 'creative_assets.validate_draft':
                     return this.validateCreativeDraftSession(params);
                 case 'outline.write':

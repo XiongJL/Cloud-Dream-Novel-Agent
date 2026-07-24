@@ -306,7 +306,7 @@ const tags = await db.tag.findMany({ ... });
 **位置**: 第 46 行
 
 ```typescript
-const PACKAGED_APP_NAME = '云梦小说编辑器';
+const PACKAGED_APP_NAME = '云梦小说智能体';
 ```
 
 ---

@@ -1,4 +1,4 @@
-﻿# Novel Editor User Guide
+# CloudDream Novel Agent User Guide
 
 ## 1. Interface Overview
 Use the left Activity Bar to switch major views:

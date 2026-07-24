@@ -1,6 +1,6 @@
 {
-  "name": "noval-editor-monorepo",
-  "version": "0.1.8",
+  "name": "clouddream-novel-agent-monorepo",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "setup": "pnpm --filter @novel-editor/core run build",

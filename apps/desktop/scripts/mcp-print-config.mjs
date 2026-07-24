@@ -119,7 +119,7 @@ function main() {
   const options = parseArgs(process.argv.slice(2));
   const output = buildConfig(options);
 
-  process.stdout.write(`Novel Editor MCP launcher:\n${output.cmdPath}\n`);
+  process.stdout.write(`CloudDream Novel Agent MCP launcher:\n${output.cmdPath}\n`);
 
   if (options.format === 'all' || options.format === 'codex') {
     printBlock('Codex config.toml', output.codexToml);

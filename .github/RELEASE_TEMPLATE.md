@@ -4,9 +4,9 @@
 
 ## Downloads
 
-- Windows installer: `云梦小说编辑器-Setup-<version>.exe`
-- Windows portable: `云梦小说编辑器-Portable-<version>.exe`
-- macOS DMG: `云梦小说编辑器-mac-<version>.dmg`
+- Windows installer: `云梦小说智能体-Setup-<version>.exe`
+- Windows portable: `云梦小说智能体-Portable-<version>.exe`
+- macOS DMG: `云梦小说智能体-mac-<version>.dmg`
 
 ## Notes
 

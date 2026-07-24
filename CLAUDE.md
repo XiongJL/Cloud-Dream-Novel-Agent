@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Novel Editor (云梦小说编辑器) — a desktop novel-writing tool with offline-first data, structured creative management, and AI-assisted writing. Monorepo managed by pnpm + Turborepo.
+CloudDream Novel Agent (云梦小说智能体) — a desktop novel-writing tool with offline-first data, structured creative management, and AI-assisted writing. Monorepo managed by pnpm + Turborepo.
 
 ## Essential Commands
 

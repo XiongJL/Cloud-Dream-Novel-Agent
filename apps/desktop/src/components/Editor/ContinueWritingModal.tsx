@@ -205,9 +205,9 @@ export const ContinueWritingModal: React.FC<ContinueWritingModalProps> = ({
                         <input
                             type="number"
                             min={1}
-                            max={8}
+                            max={20}
                             value={config.contextChapterCount}
-                            onChange={(e) => setConfig((prev) => ({ ...prev, contextChapterCount: Math.max(1, Math.min(8, Number(e.target.value) || 3)) }))}
+                            onChange={(e) => setConfig((prev) => ({ ...prev, contextChapterCount: Math.max(1, Math.min(20, Number(e.target.value) || 8)) }))}
                             className={clsx("w-full rounded-lg border px-2 py-2", theme === 'dark' ? 'bg-transparent border-white/10 text-neutral-200' : 'border-gray-200')}
                         />
                     </label>

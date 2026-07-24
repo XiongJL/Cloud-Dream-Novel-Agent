@@ -153,6 +153,17 @@ function cosine(a: number[], b: number[]): number {
     return sum;
 }
 
+function lexicalScore(query: string, text: string): number {
+    const queryTokens = Array.from(new Set(tokenize(query)));
+    if (queryTokens.length === 0) return 0;
+    const haystack = text.toLowerCase();
+    let hits = 0;
+    for (const token of queryTokens) {
+        if (haystack.includes(token)) hits += 1;
+    }
+    return hits / queryTokens.length;
+}
+
 function chunkText(text: string): string[] {
     const normalized = text.replace(/\s+/g, ' ').trim();
     if (!normalized) return [];
@@ -638,45 +649,44 @@ export async function queryRagVectorIndex(input: {
     limit?: number;
     settings?: AiEmbeddingSettings;
 }): Promise<RagEvidenceItem[]> {
-    await ensureRagVectorIndexForNovel(input.novelId, input.settings);
+    await ensureRagVectorIndex();
     const rows = await db.$queryRaw<StoredVectorChunk[]>`
         SELECT id, novel_id, source_type, source_id, title, content, embedding_json, embedding_blob, embedding_dim
         FROM rag_vector_chunks
         WHERE novel_id = ${input.novelId};
     `;
-    let queryVector = embedText(input.query);
+    if (rows.length === 0) return [];
+
+    const queryVector = embedText(input.query);
     const firstDim = rows.find((row) => Number(row.embedding_dim || 0) > 0)?.embedding_dim || 0;
-    const firstHasBlob = rows.some((row) => row.embedding_blob);
-    if (input.settings?.enabled && input.settings.baseUrl.trim() && firstHasBlob && firstDim !== VECTOR_DIM) {
-        try {
-            const client = new EmbeddingClient(input.settings);
-            const result = await client.embed([input.query]);
-            queryVector = result.embeddings[0] || queryVector;
-        } catch (error) {
-            if (!input.settings.fallbackToHash) throw error;
-            console.warn('[RAG] Query embedding API failed; falling back to local hash vector:', error);
-        }
-    }
+    const canUseLocalVector = firstDim === 0 || firstDim === VECTOR_DIM;
 
     return rows
         .map((row) => {
-            let vector = blobToVector(row.embedding_blob, row.embedding_dim);
-            if (vector.length === 0 && row.embedding_json) {
-                try {
-                    const parsed = JSON.parse(row.embedding_json);
-                    vector = Array.isArray(parsed) ? parsed.map((value) => Number(value) || 0) : [];
-                } catch {
-                    vector = [];
+            let similarity = lexicalScore(input.query, `${row.title}\n${row.content}`);
+            let retrieval = 'local_vector_lexical';
+            if (canUseLocalVector) {
+                let vector = blobToVector(row.embedding_blob, row.embedding_dim);
+                if (vector.length === 0 && row.embedding_json) {
+                    try {
+                        const parsed = JSON.parse(row.embedding_json);
+                        vector = Array.isArray(parsed) ? parsed.map((value) => Number(value) || 0) : [];
+                    } catch {
+                        vector = [];
+                    }
+                }
+                if (vector.length > 0) {
+                    similarity = Math.max(similarity, cosine(queryVector, vector));
+                    retrieval = 'local_vector_hash';
                 }
             }
-            const similarity = cosine(queryVector, vector);
             return {
                 id: row.id,
                 sourceType: row.source_type as RagEvidenceSourceType,
                 sourceId: row.source_id,
                 title: row.title,
                 excerpt: row.content,
-                metadata: { vectorSimilarity: Number(similarity.toFixed(4)), retrieval: 'local_vector_hash' },
+                metadata: { vectorSimilarity: Number(similarity.toFixed(4)), retrieval },
                 score: Math.round(similarity * 100),
             } satisfies RagEvidenceItem;
         })

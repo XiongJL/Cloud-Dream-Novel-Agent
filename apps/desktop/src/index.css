@@ -12,10 +12,42 @@
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;
 
+    /* Shared workspace surfaces. Light mode is the neutral product baseline. */
+    --ui-canvas: #ffffff;
+    --ui-surface-subtle: #f9fafb;
+    --ui-surface-muted: #f3f4f6;
+    --ui-surface-raised: #ffffff;
+    --ui-border: #e5e7eb;
+    --ui-border-strong: #d1d5db;
+    --ui-text-primary: #111827;
+    --ui-text-secondary: #4b5563;
+    --ui-text-muted: #6b7280;
+    --ui-text-disabled: #9ca3af;
+    --ui-primary: #4f46e5;
+    --ui-primary-soft: #eef2ff;
+    --ui-info: #2563eb;
+
     /* Light Theme Search Colors */
     --search-highlight: rgba(253, 224, 71, 0.4);
     --search-highlight-active: #f6b93b;
     --search-highlight-text: inherit;
+  }
+
+  [data-theme='dark'] {
+    /* Preserve the established dark workspace palette. */
+    --ui-canvas: #0a0a0f;
+    --ui-surface-subtle: #0f0f13;
+    --ui-surface-muted: #17171d;
+    --ui-surface-raised: #1a1a20;
+    --ui-border: rgba(255, 255, 255, 0.1);
+    --ui-border-strong: rgba(255, 255, 255, 0.2);
+    --ui-text-primary: #f5f5f5;
+    --ui-text-secondary: #d4d4d4;
+    --ui-text-muted: #a3a3a3;
+    --ui-text-disabled: #737373;
+    --ui-primary: #818cf8;
+    --ui-primary-soft: rgba(99, 102, 241, 0.15);
+    --ui-info: #60a5fa;
   }
 
   /* We might need a proper .dark selector if using class strategy */

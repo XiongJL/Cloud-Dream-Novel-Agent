@@ -22,6 +22,7 @@ const DEFAULT_SUMMARY_SETTINGS: AiSummarySettings = {
 const DEFAULT_AI_SETTINGS: AiSettings = {
     providerType: 'http',
     http: {
+        apiMode: 'chat-completions',
         baseUrl: '',
         apiKey: '',
         model: 'gpt-4.1-mini',
@@ -31,6 +32,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         imageWatermark: false,
         timeoutMs: 60000,
         maxTokens: 4096,
+        contextWindowTokens: 0,
         temperature: 0.7,
     },
     mcpCli: {
@@ -39,6 +41,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         workingDir: '',
         envJson: '{}',
         startupTimeoutMs: 60000,
+        contextWindowTokens: 0,
     },
     proxy: {
         mode: 'system',

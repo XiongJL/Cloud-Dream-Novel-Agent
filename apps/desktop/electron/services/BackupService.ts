@@ -122,7 +122,7 @@ export class BackupService {
             const { filePath } = await dialog.showSaveDialog({
                 title: 'Export Backup',
                 defaultPath: `NovelData_${new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_')}.nebak`,
-                filters: [{ name: 'Novel Editor Backup', extensions: ['nebak'] }]
+                filters: [{ name: 'CloudDream Novel Agent Backup', extensions: ['nebak'] }]
             });
             if (!filePath) throw new Error('Export cancelled');
             targetPath = filePath;

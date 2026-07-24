@@ -12,6 +12,11 @@ if (typeof electronSimple !== 'function') {
     throw new TypeError('vite-plugin-electron/simple did not export a callable plugin factory')
 }
 
+// Some shells inherit ELECTRON_RUN_AS_NODE=1 from tooling, which makes the
+// Electron binary behave like plain Node and breaks named imports such as
+// BrowserWindow in the main process.
+delete process.env.ELECTRON_RUN_AS_NODE
+
 // https://vitejs.dev/config/
 export default defineConfig(() => {
     const devHost = process.env.VITE_DEV_HOST || '127.0.0.1'
@@ -32,7 +37,7 @@ export default defineConfig(() => {
                     vite: {
                         build: {
                             rollupOptions: {
-                                external: ['@novel-editor/core', '@prisma/client', '.prisma/client'],
+                                external: ['@novel-editor/core', '@prisma/client', '.prisma/client', 'mammoth', 'pdf-parse'],
                             },
                         },
                         resolve: {

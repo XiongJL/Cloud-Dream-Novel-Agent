@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, PanelLeftClose, PanelLeftOpen, Settings, ChevronRight, LayoutGrid, FileText, Sparkles, ScrollText, Loader2 } from 'lucide-react';
+import { ArrowLeft, Bot, PanelLeftClose, PanelLeftOpen, Settings, ChevronRight, LayoutGrid, FileText, Sparkles, ScrollText, Loader2 } from 'lucide-react';
 import NarrativeMatrix from '../../components/StoryWorkbench/NarrativeMatrix';
 import Sidebar from '../../components/Sidebar';
 import ActivityBar, { ActivityTab } from '../../components/ActivityBar';
@@ -21,6 +21,7 @@ import { GlobalIdeaModal } from '../../components/GlobalIdeaModal';
 import WorldWorkbench from '../../components/WorldWorkbench/WorldWorkbench';
 import AIWorkbenchShell from '../../components/AIWorkbench/AIWorkbenchShell';
 import AIWorkbenchDraftDock from '../../components/AIWorkbench/AIWorkbenchDraftDock';
+import AgentWorkspace from '../../components/AgentWorkspace/AgentWorkspace';
 import type { DraftSessionRecord } from '../../components/AIWorkbench/types';
 import PlotSidebar from '../../components/StoryWorkbench/PlotSidebar';
 import PlotContextMenu from '../../components/StoryWorkbench/PlotContextMenu';
@@ -41,6 +42,8 @@ import { usePlotInteractions } from './hooks/usePlotInteractions';
 
 
 import { ContinueWritingModal } from '../../components/Editor/ContinueWritingModal';
+
+type ProductMode = 'writing' | 'agent';
 
 function extractPlainTextFromLexical(content: string): string {
     if (!content?.trim()) return '';
@@ -92,6 +95,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
     const [activeMapId, setActiveMapId] = useState<string | null>(null);
     const [mapCharacters, setMapCharacters] = useState<import('../../types').Character[]>([]);
     const editorRef = useRef<LexicalEditor | null>(null);
+    const agentModeStorageKey = `novel_editor_last_mode:${novelId}`;
 
     // --- 1. Core Data State ---
     const [activeChapterMeta, setActiveChapterMeta] = useState<{ id: string; title: string } | null>(null);
@@ -177,6 +181,14 @@ export default function Editor({ novelId, onBack }: EditorProps) {
 
     // --- 3. UI Control State ---
     const [activeTab, setActiveTab] = useState<ActivityTab>('explorer');
+    const [productMode, setProductMode] = useState<ProductMode>(() => {
+        try {
+            return localStorage.getItem(`novel_editor_last_mode:${novelId}`) === 'agent' ? 'agent' : 'writing';
+        } catch {
+            return 'writing';
+        }
+    });
+    const [pendingAgentGoal, setPendingAgentGoal] = useState('');
     const [isSidePanelOpen, setIsSidePanelOpen] = useState(true);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'novel' | 'shortcuts' | 'backup' | 'ai' | undefined>(undefined);
@@ -238,6 +250,14 @@ export default function Editor({ novelId, onBack }: EditorProps) {
         window.addEventListener('resize', onResize);
         return () => window.removeEventListener('resize', onResize);
     }, []);
+
+    useEffect(() => {
+        try {
+            localStorage.setItem(agentModeStorageKey, productMode);
+        } catch (error) {
+            console.warn('[Editor] failed to persist product mode:', error);
+        }
+    }, [agentModeStorageKey, productMode]);
 
     useEffect(() => {
         const reloadMapCharacters = async () => {
@@ -489,6 +509,12 @@ export default function Editor({ novelId, onBack }: EditorProps) {
         }
     }, [currentChapter, t]);
 
+    const sendCurrentChapterToAgent = useCallback((goal: string) => {
+        if (!currentChapter) return;
+        setPendingAgentGoal(goal);
+        setProductMode('agent');
+    }, [currentChapter]);
+
     const appendGeneratedTextToEditor = useCallback((generated: string, existingPlainText?: string) => {
         if (!generated.trim()) return;
         const deduped = stripRepeatedPrefixFromGeneration(existingPlainText || '', generated);
@@ -549,21 +575,24 @@ export default function Editor({ novelId, onBack }: EditorProps) {
 
     return (
         <motion.div
+            data-theme={preferences.theme}
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.9 }}
-            className={`fixed inset-0 z-50 flex ${preferences.theme === 'dark' ? 'bg-[#0a0a0f] text-neutral-200' : 'bg-white text-neutral-800'}`}
+            className={`fixed inset-0 z-50 flex ${preferences.theme === 'dark' ? 'bg-[#0a0a0f] text-neutral-200' : 'bg-[var(--ui-canvas)] text-[var(--ui-text-primary)]'}`}
         >
             {/* Activity Bar (Leftmost) */}
-            <ActivityBar
-                activeTab={isSidePanelOpen ? activeTab : null}
-                onTabChange={handleTabChange}
-                theme={preferences.theme}
-            />
+            {productMode === 'writing' && (
+                <ActivityBar
+                    activeTab={isSidePanelOpen ? activeTab : null}
+                    onTabChange={handleTabChange}
+                    theme={preferences.theme}
+                />
+            )}
 
             {/* Side Panel */}
             <AnimatePresence mode='wait'>
-                {isSidePanelOpen && (
+                {productMode === 'writing' && isSidePanelOpen && (
                     <motion.div
                         id="sidebar-root"
                         initial={{ x: -100, opacity: 0 }}
@@ -722,7 +751,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
             </AnimatePresence>
 
             {/* Main Content */}
-            <div className={`flex-1 flex flex-col h-full relative transition-all min-w-0 overflow-hidden ${preferences.theme === 'dark' ? 'bg-[#0a0a0f]' : 'bg-gray-50'}`}>
+            <div className={`flex-1 flex flex-col h-full relative transition-all min-w-0 overflow-hidden ${preferences.theme === 'dark' ? 'bg-[#0a0a0f]' : 'bg-[var(--ui-surface-subtle)]'}`}>
 
                 {/* Header */}
                 {/* Header */}
@@ -730,7 +759,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                 <div
                     className={clsx(
                         "flex items-center justify-between relative border-b",
-                        preferences.theme === 'dark' ? 'border-white/5 bg-[#0a0a0f] text-neutral-400' : 'border-gray-200 bg-white text-neutral-600',
+                        preferences.theme === 'dark' ? 'border-white/5 bg-[#0a0a0f] text-neutral-400' : 'border-[var(--ui-border)] bg-[var(--ui-canvas)] text-[var(--ui-text-muted)]',
                         "h-[70px] px-4 shrink-0"
                     )}
                     style={{ zIndex: 40 }}
@@ -740,9 +769,11 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                         <button onClick={onBack} className={`p-2 rounded-full transition-colors ${preferences.theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'}`}>
                             <ArrowLeft className="w-5 h-5" />
                         </button>
-                        <button onClick={() => setIsSidePanelOpen(!isSidePanelOpen)} className={`p-2 rounded-full transition-colors ${preferences.theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'}`}>
-                            {isSidePanelOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
-                        </button>
+                        {productMode === 'writing' && (
+                            <button onClick={() => setIsSidePanelOpen(!isSidePanelOpen)} className={`p-2 rounded-full transition-colors ${preferences.theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'}`}>
+                                {isSidePanelOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
+                            </button>
+                        )}
                     </div>
 
                     {/* Center: Title & View Switcher (Flex-1 to take available space) */}
@@ -753,7 +784,29 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                             </span>
                         )}
 
+                        {/* Product Mode Toggle */}
+                        <div className={clsx(
+                            "flex items-center p-1 rounded-full border shadow-sm shrink-0",
+                            preferences.theme === 'dark' ? "border-white/20 bg-black/40" : "border-[var(--ui-border-strong)] bg-[var(--ui-surface-raised)]"
+                        )}>
+                            <button
+                                onClick={() => setProductMode('writing')}
+                                className={clsx("px-3 py-2 rounded-full transition-all flex items-center gap-2 text-xs", productMode === 'writing' ? (preferences.theme === 'dark' ? "bg-white/20 text-white" : "bg-[var(--ui-surface-muted)] text-[var(--ui-text-primary)]") : "opacity-60 hover:opacity-100")}
+                                title="写作模式"
+                            >
+                                写作
+                            </button>
+                            <button
+                                onClick={() => setProductMode('agent')}
+                                className={clsx("px-3 py-2 rounded-full transition-all flex items-center gap-2 text-xs", productMode === 'agent' ? (preferences.theme === 'dark' ? "bg-white/20 text-white" : "bg-[var(--ui-surface-muted)] text-[var(--ui-text-primary)]") : "opacity-60 hover:opacity-100")}
+                                title="Agent 模式"
+                            >
+                                Agent
+                            </button>
+                        </div>
+
                         {/* View Mode Toggle */}
+                        {productMode === 'writing' && (
                         <div className={clsx(
                             "flex items-center p-1 rounded-full border shadow-sm shrink-0",
                             preferences.theme === 'dark' ? "border-white/20 bg-black/40" : "border-gray-300 bg-white"
@@ -796,6 +849,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                     )}
                                 </button>
                         </div>
+                        )}
                     </div>
 
                     {/* Right: Actions (Width fixed to match left) */}
@@ -818,8 +872,19 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                     </div>
                 </div>
 
-                {/* Editor Area, Matrix, or Map */}
-                {viewMode === 'map' && activeMapId ? (
+                {/* Editor Area, Matrix, Map, or Agent */}
+                {productMode === 'agent' ? (
+                    <AgentWorkspace
+                        novel={novel}
+                        novelId={novelId}
+                        currentChapter={currentChapter}
+                        currentContent={content}
+                        locale={i18n.language}
+                        theme={preferences.theme}
+                        initialGoal={pendingAgentGoal}
+                        onInitialGoalConsumed={() => setPendingAgentGoal('')}
+                    />
+                ) : viewMode === 'map' && activeMapId ? (
                     <MapCanvasView
                         mapId={activeMapId}
                         novelId={novelId}
@@ -880,6 +945,48 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                     saveIndicatorText={saveStatusText}
                                     toolbarActions={
                                         <>
+                                            <button
+                                                onClick={() => sendCurrentChapterToAgent(`请基于当前章节《${currentChapter.title}》生成执行计划。`)}
+                                                disabled={!currentChapter}
+                                                title="发送当前章给 Agent"
+                                                className={clsx(
+                                                    "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
+                                                    preferences.theme === 'dark'
+                                                        ? "border-white/10 text-neutral-300 hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                        : "border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                )}
+                                            >
+                                                <Bot className="w-4 h-4" />
+                                                <span>发送给 Agent</span>
+                                            </button>
+                                            <button
+                                                onClick={() => sendCurrentChapterToAgent(`请质检当前章节《${currentChapter.title}》，重点检查节奏、人物一致性和追更欲望。`)}
+                                                disabled={!currentChapter}
+                                                title="质检当前章节"
+                                                className={clsx(
+                                                    "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
+                                                    preferences.theme === 'dark'
+                                                        ? "border-white/10 text-neutral-300 hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                        : "border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                )}
+                                            >
+                                                <FileText className="w-4 h-4" />
+                                                <span>质检章节</span>
+                                            </button>
+                                            <button
+                                                onClick={() => sendCurrentChapterToAgent(`请为当前章节《${currentChapter.title}》生成下一段续写草稿。`)}
+                                                disabled={!currentChapter}
+                                                title="生成下一段"
+                                                className={clsx(
+                                                    "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
+                                                    preferences.theme === 'dark'
+                                                        ? "border-white/10 text-neutral-300 hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                        : "border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                )}
+                                            >
+                                                <Sparkles className="w-4 h-4" />
+                                                <span>下一段</span>
+                                            </button>
                                             <button
                                                 onClick={() => setIsContinueModalOpen(true)}
                                                 disabled={!currentChapter || isContinuing}

@@ -141,6 +141,106 @@ exports.Prisma.ChapterScalarFieldEnum = {
   deleted: 'deleted'
 };
 
+exports.Prisma.AgentConversationScalarFieldEnum = {
+  id: 'id',
+  novelId: 'novelId',
+  title: 'title',
+  description: 'description',
+  role: 'role',
+  runtimeConversationId: 'runtimeConversationId',
+  suggestedGoal: 'suggestedGoal',
+  planJson: 'planJson',
+  runJson: 'runJson',
+  contextSummaryJson: 'contextSummaryJson',
+  error: 'error',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
+exports.Prisma.AgentMessageScalarFieldEnum = {
+  id: 'id',
+  conversationId: 'conversationId',
+  role: 'role',
+  content: 'content',
+  metadataJson: 'metadataJson',
+  createdAt: 'createdAt'
+};
+
+exports.Prisma.AgentRunScalarFieldEnum = {
+  runId: 'runId',
+  conversationId: 'conversationId',
+  novelId: 'novelId',
+  threadId: 'threadId',
+  planId: 'planId',
+  status: 'status',
+  currentStepId: 'currentStepId',
+  progress: 'progress',
+  draftSessionId: 'draftSessionId',
+  cancelRequested: 'cancelRequested',
+  pendingApprovalJson: 'pendingApprovalJson',
+  approvalResponsesJson: 'approvalResponsesJson',
+  planJson: 'planJson',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
+exports.Prisma.AgentRunEventScalarFieldEnum = {
+  eventId: 'eventId',
+  sequence: 'sequence',
+  runId: 'runId',
+  planId: 'planId',
+  threadId: 'threadId',
+  stepId: 'stepId',
+  type: 'type',
+  agent: 'agent',
+  toolName: 'toolName',
+  status: 'status',
+  payloadJson: 'payloadJson',
+  createdAt: 'createdAt'
+};
+
+exports.Prisma.AgentArtifactScalarFieldEnum = {
+  artifactId: 'artifactId',
+  conversationId: 'conversationId',
+  runId: 'runId',
+  novelId: 'novelId',
+  planId: 'planId',
+  type: 'type',
+  title: 'title',
+  status: 'status',
+  summary: 'summary',
+  content: 'content',
+  referenceJson: 'referenceJson',
+  metadataJson: 'metadataJson',
+  reviewStatus: 'reviewStatus',
+  reviewRevision: 'reviewRevision',
+  reviewDecisionsJson: 'reviewDecisionsJson',
+  reviewStaleChapterIdsJson: 'reviewStaleChapterIdsJson',
+  reviewedAt: 'reviewedAt',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
+exports.Prisma.AgentRevisionTaskScalarFieldEnum = {
+  revisionTaskId: 'revisionTaskId',
+  novelId: 'novelId',
+  sourceArtifactId: 'sourceArtifactId',
+  sourceFindingId: 'sourceFindingId',
+  title: 'title',
+  description: 'description',
+  targetChapterIdsJson: 'targetChapterIdsJson',
+  sourceExpert: 'sourceExpert',
+  severity: 'severity',
+  recommendedRole: 'recommendedRole',
+  status: 'status',
+  sourceSnapshotJson: 'sourceSnapshotJson',
+  note: 'note',
+  planId: 'planId',
+  planJson: 'planJson',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+};
+
 exports.Prisma.SyncStateScalarFieldEnum = {
   id: 'id',
   cursor: 'cursor',
@@ -375,6 +475,12 @@ exports.Prisma.ModelName = {
   Novel: 'Novel',
   Volume: 'Volume',
   Chapter: 'Chapter',
+  AgentConversation: 'AgentConversation',
+  AgentMessage: 'AgentMessage',
+  AgentRun: 'AgentRun',
+  AgentRunEvent: 'AgentRunEvent',
+  AgentArtifact: 'AgentArtifact',
+  AgentRevisionTask: 'AgentRevisionTask',
   SyncState: 'SyncState',
   Character: 'Character',
   Item: 'Item',

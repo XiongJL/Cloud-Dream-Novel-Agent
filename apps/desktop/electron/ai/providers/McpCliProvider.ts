@@ -58,7 +58,7 @@ export class McpCliProvider implements AiProvider {
             promptEmbeddedInArgs: hasPromptPlaceholder,
         });
 
-        const { stdout } = await this.runProcess(parsedArgs, hasPromptPlaceholder ? '' : prompt, this.settings.mcpCli.startupTimeoutMs);
+        const { stdout } = await this.runProcess(parsedArgs, hasPromptPlaceholder ? '' : prompt, this.settings.mcpCli.startupTimeoutMs, req.signal);
 
         devLog('INFO', 'McpCliProvider.generate.response', 'MCP CLI generate response', {
             cliPath: this.settings.mcpCli.cliPath,
@@ -71,7 +71,7 @@ export class McpCliProvider implements AiProvider {
         };
     }
 
-    private async runProcess(args: string[], stdinText: string, timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+    private async runProcess(args: string[], stdinText: string, timeoutMs: number, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
         const { cliPath, workingDir, envJson } = this.settings.mcpCli;
         const extraEnv = this.parseEnvJson(envJson);
         const startedAt = Date.now();
@@ -87,11 +87,21 @@ export class McpCliProvider implements AiProvider {
             let stdout = '';
             let stderr = '';
             let done = false;
+            const removeAbortListener = () => signal?.removeEventListener('abort', onAbort);
+            const onAbort = () => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                child.kill('SIGTERM');
+                removeAbortListener();
+                reject(new Error('AI request cancelled'));
+            };
 
             const timer = setTimeout(() => {
                 if (done) return;
                 done = true;
                 child.kill('SIGTERM');
+                removeAbortListener();
                 devLog('ERROR', 'McpCliProvider.runProcess.timeout', 'MCP CLI process timeout', {
                     cliPath,
                     args,
@@ -99,6 +109,8 @@ export class McpCliProvider implements AiProvider {
                 });
                 reject(new Error('MCP CLI process timeout'));
             }, Math.max(1000, timeoutMs));
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
 
             child.stdout.on('data', (chunk) => {
                 stdout += chunk.toString();
@@ -112,6 +124,7 @@ export class McpCliProvider implements AiProvider {
                 if (done) return;
                 done = true;
                 clearTimeout(timer);
+                removeAbortListener();
                 devLogError('McpCliProvider.runProcess.error', error, {
                     cliPath,
                     args,
@@ -125,6 +138,7 @@ export class McpCliProvider implements AiProvider {
                 if (done) return;
                 done = true;
                 clearTimeout(timer);
+                removeAbortListener();
 
                 if (code !== 0) {
                     devLog('ERROR', 'McpCliProvider.runProcess.exit', 'MCP CLI exited with non-zero code', {

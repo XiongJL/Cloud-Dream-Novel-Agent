@@ -1,6 +1,6 @@
 # Backend Service (Spring Boot)
 
-小说编辑器云同步后端服务。
+云梦小说智能体云同步后端服务。
 
 ## 1. 环境要求 (Prerequisites)
 *   **JDK**: Level 17 or higher.

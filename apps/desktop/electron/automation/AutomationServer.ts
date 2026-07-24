@@ -20,6 +20,7 @@ export class AutomationServer {
     private readonly onDataChanged?: (method: string) => void;
     private server: http.Server | null = null;
     private runtime: RuntimeDescriptor | null = null;
+    private readonly activeRequests = new Map<string, AbortController>();
 
     constructor(
         automationService: AutomationService,
@@ -41,11 +42,28 @@ export class AutomationServer {
             'chapter.create',
             'chapter.save',
             'creative_assets.generate_draft',
+            'creative_assets.revise_draft',
+            'creative_assets.validate_draft',
             'outline.generate_draft',
             'chapter.generate_draft',
+            'chapter.revise_draft',
             'draft.update',
             'draft.commit',
+            'draft.undo',
             'draft.discard',
+            'draft.batch.create',
+            'draft.batch.update_outline',
+            'draft.batch.approve_outline',
+            'draft.batch.attach_child',
+            'draft.batch.mark_stale_after',
+            'draft.batch.prepare_regeneration',
+            'draft.batch.mark_failed',
+            'draft.batch.reconcile_unknown',
+            'draft.batch.commit_prefix',
+            'draft.batch.undo',
+            'draft.batch.discard',
+            'artifact.review.submit',
+            'revision_task.create_plan',
         ]);
         if (dataChangingMethods.has(method)) {
             this.onDataChanged?.(method);
@@ -142,11 +160,21 @@ export class AutomationServer {
                         origin: payload.origin ?? 'mcp-bridge',
                         params: redactForLog(payload.params),
                     });
-                    const data = await this.automationService.invoke(payload.method, payload.params, {
-                        source: 'http',
-                        origin: payload.origin ?? 'mcp-bridge',
-                        requestId,
-                    });
+                    const controller = new AbortController();
+                    this.activeRequests.set(requestId, controller);
+                    let data: unknown;
+                    try {
+                        data = await this.automationService.invoke(payload.method, payload.params, {
+                            source: 'http',
+                            origin: payload.origin ?? 'mcp-bridge',
+                            requestId,
+                            signal: controller.signal,
+                        });
+                    } finally {
+                        if (this.activeRequests.get(requestId) === controller) {
+                            this.activeRequests.delete(requestId);
+                        }
+                    }
                     devLog('INFO', 'AutomationServer.invoke.success', 'Automation HTTP invoke success', {
                         requestId,
                         method: payload.method,
@@ -155,6 +183,24 @@ export class AutomationServer {
                     });
                     this.notifyDataChanged(String(payload.method || ''));
                     this.sendJson(res, 200, { ok: true, code: 'OK', message: 'ok', data });
+                    return;
+                }
+
+                if (req.method === 'POST' && req.url === '/cancel') {
+                    const payload = await this.readJson(req);
+                    const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+                    if (!requestId) {
+                        this.sendJson(res, 400, { ok: false, code: 'INVALID_INPUT', message: 'requestId is required' });
+                        return;
+                    }
+                    const controller = this.activeRequests.get(requestId);
+                    controller?.abort(new Error('Automation request cancelled'));
+                    this.sendJson(res, 200, {
+                        ok: true,
+                        code: 'OK',
+                        message: controller ? 'cancelled' : 'request not active',
+                        data: { requestId, cancelled: Boolean(controller) },
+                    });
                     return;
                 }
 
@@ -187,6 +233,10 @@ export class AutomationServer {
     }
 
     async stop(): Promise<void> {
+        for (const controller of this.activeRequests.values()) {
+            controller.abort(new Error('Automation server stopped'));
+        }
+        this.activeRequests.clear();
         await this.removeRuntime();
         if (!this.server) return;
         await new Promise<void>((resolve, reject) => {

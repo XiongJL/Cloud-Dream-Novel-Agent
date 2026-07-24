@@ -42,7 +42,7 @@ export function useContinueWriting({
         ideaIds: [],
         targetLength: '500',
         creativityPreset: 'balanced',
-        contextChapterCount: 3,
+        contextChapterCount: 8,
         style: 'default',
         tone: 'balanced',
         pace: 'medium',

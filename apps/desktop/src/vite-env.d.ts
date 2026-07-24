@@ -3,6 +3,9 @@
 interface DBAPI {
     getNovels: () => Promise<Novel[]>
     createNovel: (title: string) => Promise<Novel>
+    getAgentConversations: (novelId: string) => Promise<AgentConversationRecord[]>
+    upsertAgentConversation: (conversation: AgentConversationRecord) => Promise<{ ok: boolean }>
+    deleteAgentConversation: (conversationId: string) => Promise<{ ok: boolean }>
     getVolumes: (novelId: string) => Promise<Volume[]>
     createVolume: (data: { novelId: string; title: string }) => Promise<Volume>
     createChapter: (data: { volumeId: string; title: string; order: number }) => Promise<Chapter>
@@ -314,6 +317,7 @@ interface SyncAPI {
 interface AISettings {
     providerType: 'http' | 'mcp-cli'
     http: {
+        apiMode: 'chat-completions' | 'responses'
         baseUrl: string
         apiKey: string
         model: string
@@ -323,6 +327,7 @@ interface AISettings {
         imageWatermark: boolean
         timeoutMs: number
         maxTokens: number
+        contextWindowTokens: number
         temperature: number
     }
     mcpCli: {
@@ -331,6 +336,7 @@ interface AISettings {
         workingDir: string
         envJson: string
         startupTimeoutMs: number
+        contextWindowTokens: number
     }
     proxy: {
         mode: 'system' | 'off' | 'custom'
@@ -444,7 +450,7 @@ interface McpCliSetupPayload {
 interface AIAPI {
     previewContinuePrompt: (payload: {
         locale?: string
-        mode?: 'new_chapter' | 'continue_chapter'
+        mode?: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter'
         novelId: string
         chapterId: string
         currentContent: string
@@ -633,6 +639,10 @@ interface ChapterDraftPayload {
         issues: string[]
     }
     warnings?: string[]
+    narrativeStateDelta?: import('../shared/draftBatch').NarrativeStateDelta
+    contextPolicy?: import('../shared/agentChapterScope').ContinuationContextPolicy
+    contextSnapshot?: import('../shared/agentChapterScope').ContinuationContextSnapshot
+    sourceSnapshot?: import('../shared/draftBatch').DraftBatchSourceSnapshot
 }
 
 interface DraftSessionRecord {
@@ -643,7 +653,13 @@ interface DraftSessionRecord {
     origin: 'codex' | 'claude-code' | 'openclaw' | 'desktop-ui' | 'mcp-bridge' | 'unknown'
     novelId: string
     chapterId?: string
-    status: 'draft' | 'committed' | 'discarded' | 'failed'
+    draftBatchId?: string
+    childIndex?: number
+    generationRevision?: number
+    dependsOnDraftSessionId?: string
+    revisionOfDraftSessionId?: string
+    reviewRequestId?: string
+    status: 'draft' | 'stale' | 'committed' | 'discarded' | 'failed'
     payload: Record<string, unknown> | ChapterDraftPayload
     selection?: CreativeDraftSelection
     validation?: {
@@ -656,11 +672,454 @@ interface DraftSessionRecord {
     version: number
     createdAt: string
     updatedAt: string
+    writebacks?: import('../shared/draftWriteback').DraftWritebackRecord[]
 }
 
 interface AutomationAPI {
     invoke: (method: string, params?: unknown, origin?: 'desktop-ui' | 'unknown') => Promise<unknown>
     onDataChanged: (callback: (payload: { method: string }) => void) => () => void
+}
+
+type DraftBatchRecord = import('../shared/draftBatch').DraftBatchRecord
+type DraftBatchCreateInput = import('../shared/draftBatch').DraftBatchCreateInput
+type DraftBatchCommitPrefixInput = import('../shared/draftBatch').DraftBatchCommitPrefixInput
+type DraftBatchCommittedChapter = import('../shared/draftBatch').DraftBatchCommittedChapter
+type DraftBatchPrepareRegenerationInput = import('../shared/draftBatch').DraftBatchPrepareRegenerationInput
+type DraftBatchMarkFailedInput = import('../shared/draftBatch').DraftBatchMarkFailedInput
+type DraftBatchReconciliationInspection = import('../shared/draftBatch').DraftBatchReconciliationInspection
+type DraftBatchReconcileUnknownInput = import('../shared/draftBatch').DraftBatchReconcileUnknownInput
+
+type AgentName = 'supervisor' | 'writer' | 'editor' | 'reader' | 'worldbuilding' | 'research_rag'
+type AgentStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
+type AgentRunStatus = 'idle' | 'waiting_approval' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling'
+type AgentRunEventType =
+    | 'run_started'
+    | 'plan_pending'
+    | 'plan_approved'
+    | 'plan_rejected'
+    | 'message'
+    | 'step_started'
+    | 'step_completed'
+    | 'step_failed'
+    | 'tool_call'
+    | 'tool_result'
+    | 'toolchain_started'
+    | 'toolchain_node_started'
+    | 'toolchain_node_completed'
+    | 'toolchain_completed'
+    | 'toolchain_failed'
+    | 'draft_created'
+    | 'artifact_created'
+    | 'approval_required'
+    | 'error'
+    | 'run_completed'
+    | 'run_failed'
+    | 'run_cancelled'
+    | 'request_retry_scheduled'
+    | 'request_retry_started'
+    | 'request_retry_succeeded'
+    | 'request_retry_exhausted'
+    | 'run_retry_started'
+
+type AgentRoleMode = 'team' | 'writer' | 'editor' | 'reader' | 'worldbuilding' | 'research_rag'
+
+interface AgentConversationMessageRecord {
+    id: string
+    role: 'user' | 'assistant' | 'system'
+    content: string
+    createdAt: string
+    contextReads?: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>
+    contextDiagnostics?: AgentContextDiagnostics
+}
+
+interface AgentConversationSummaryEntry {
+    id: string
+    text: string
+    sourceMessageIds: string[]
+    sourceRole: 'user' | 'assistant'
+    createdAt?: string
+}
+
+interface AgentConversationArtifactRef {
+    artifactId: string
+    runId?: string
+    type?: string
+    title: string
+    status?: string
+    summary?: string
+    createdAt?: string
+}
+
+interface AgentConversationSummary {
+    version: 'agent-conversation-summary-v1'
+    revision: number
+    coveredMessageIds: string[]
+    coverage: {
+        startMessageId?: string
+        endMessageId?: string
+        messageCount: number
+    }
+    facts: AgentConversationSummaryEntry[]
+    userDecisions: AgentConversationSummaryEntry[]
+    unresolvedQuestions: AgentConversationSummaryEntry[]
+    outcomes: AgentConversationSummaryEntry[]
+    artifactRefs: AgentConversationArtifactRef[]
+    updatedAt: string
+}
+
+interface AgentConversationRecord {
+    id: string
+    novelId: string
+    title: string
+    description: string
+    role: AgentRoleMode
+    runtimeConversationId: string | null
+    updatedAt: string
+    messages: AgentConversationMessageRecord[]
+    suggestedGoal: string | null
+    plan: AgentPlan | null
+    run: AgentRun | null
+    runs?: AgentRun[]
+    contextSummary?: AgentConversationSummary | null
+    error: string
+}
+
+interface AgentPlanStep {
+    stepId: string
+    agent: AgentName
+    title: string
+    tools: string[]
+    toolchain?: {
+        id: string
+        version: string
+        input: Record<string, unknown>
+    } | null
+    status: AgentStepStatus
+}
+
+interface AgentPresetTask {
+    id: string
+    label: string
+    description: string
+    goal: string
+    deliverable: 'report' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft'
+}
+
+interface AgentRoleDefinition {
+    id: 'team' | AgentName
+    agent: AgentName
+    label: string
+    description: string
+    tools: string[]
+    skills: string[]
+    presets: AgentPresetTask[]
+}
+
+interface AgentPlan {
+    planId: string
+    threadId: string
+    title: string
+    goal: string
+    requiresApproval: boolean
+    steps: AgentPlanStep[]
+    preferredRole?: 'team' | AgentName
+    deliverable?: 'report' | 'expert_report' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft'
+    requestedEffect?: 'unknown' | 'none' | 'read_only' | 'draft_write' | 'data_write' | 'external'
+}
+
+interface AgentRunEvent {
+    eventId: string
+    sequence: number
+    runId: string
+    planId?: string
+    threadId?: string
+    stepId?: string
+    type: AgentRunEventType
+    agent?: AgentName
+    toolName?: string
+    status?: string
+    payload: Record<string, unknown>
+    createdAt: string
+}
+
+interface AgentArtifact {
+    artifactId: string
+    runId: string
+    planId: string
+    type: 'report' | 'context_bundle' | 'chapter_scope_context' | 'consistency_review' | 'plotline_analysis' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft' | 'writer_revision_plan' | 'chapter_range_review' | 'reader_journey' | 'worldbuilding_consistency' | 'research_fact_check' | 'scope_audit'
+    title: string
+    status: 'ready' | 'committed' | 'discarded' | 'failed'
+    summary?: string | null
+    content?: string | null
+    reference: Record<string, unknown>
+    metadata: Record<string, unknown>
+    reviewStatus?: 'unreviewed' | 'in_review' | 'reviewed' | 'stale'
+    reviewRevision?: number
+    reviewDecisions?: Array<{ findingId: string; status: 'accepted' | 'rejected' | 'deferred'; note?: string }>
+    reviewStaleChapterIds?: string[]
+    reviewedAt?: string | null
+    createdAt: string
+}
+
+interface AgentApprovalOption {
+    id: string
+    label: string
+    description?: string
+}
+
+interface AgentApprovalRequest {
+    checkpointId: string
+    checkpointType?: string
+    title: string
+    question: string
+    reason?: string
+    options: AgentApprovalOption[]
+    allowFreeText: boolean
+    stepId?: string
+}
+
+interface AgentApprovalResponse {
+    checkpointId: string
+    checkpointType?: string
+    selectedOptionIds: string[]
+    freeText?: string
+}
+
+interface AgentRun {
+    runId: string
+    threadId: string
+    planId: string
+    status: AgentRunStatus
+    currentStepId?: string
+    progress: number
+    events: AgentRunEvent[]
+    artifacts?: AgentArtifact[]
+    draftSessionId?: string
+    draftBatchId?: string
+    cancelRequested?: boolean
+    pendingApproval?: AgentApprovalRequest | null
+    approvalResponses?: AgentApprovalResponse[]
+    planSnapshot?: AgentPlan
+    retryOfRunId?: string
+    retryRootRunId?: string
+    retryAttempt?: number
+    failureRevision?: number
+    resumedFrom?: Record<string, unknown>
+}
+
+interface AgentRunStatusResult {
+    runId: string
+    planId: string
+    threadId: string
+    status: AgentRunStatus
+    currentStepId?: string
+    currentStepTitle?: string
+    totalSteps: number
+    completedSteps: number
+    lastSequence: number
+    lastEventAt?: string
+    draftSessionId?: string
+    draftBatchId?: string
+    artifacts: AgentArtifact[]
+    retryOfRunId?: string
+    retryRootRunId?: string
+    retryAttempt: number
+    failureRevision: number
+}
+
+interface AgentChatResponse {
+    conversationId: string
+    assistantMessage: {
+        messageId: string
+        role: 'assistant'
+        content: string
+        createdAt: string
+    }
+    suggestedActions: Array<{ label: string; method: string }>
+    awaitingUserInput: boolean
+    contextReads: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>
+    contextDiagnostics?: AgentContextDiagnostics
+    contextCompression?: AgentContextCompression
+    conversationSummary?: AgentConversationSummary
+    intentDecision?: AgentIntentDecision
+}
+
+interface AgentIntentTargetRef {
+    kind: 'novel' | 'volume' | 'chapter' | 'selection' | 'conversation'
+    source: 'explicit_id' | 'current_selection' | 'conversation_reference'
+    id?: string
+}
+
+interface AgentIntentOperation {
+    type: string
+    target: AgentIntentTargetRef
+    suggestedToolchainId?: string
+    suggestedToolchainVersion?: string
+    requestedEffect: 'unknown' | 'none' | 'read_only' | 'draft_write' | 'data_write' | 'external'
+    confidence: number
+}
+
+interface AgentIntentDecision {
+    interaction: 'conversation' | 'task' | 'clarification_response'
+    route: 'respond' | 'clarify' | 'plan' | 'retry_failed_run'
+    operations: AgentIntentOperation[]
+    deliverable: 'none' | 'report' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft'
+    contextNeeds: string[]
+    missingUserDecisions: string[]
+    suggestedRole?: string
+    requestedEffect: 'unknown' | 'none' | 'read_only' | 'draft_write' | 'data_write' | 'external'
+    needsClarification: boolean
+    confidence: number
+    reasonCodes: string[]
+    responseContent: string
+    explorationPerformed: boolean
+    recovery?: {
+        failedRunId: string
+        expectedFailureRevision: number
+        mode: 'failed_node'
+    }
+}
+
+interface AgentContextHistorySource {
+    mode: 'raw' | 'compressed' | 'summary' | 'omitted'
+    startMessageIndex: number
+    endMessageIndex: number
+    startMessageId?: string
+    endMessageId?: string
+}
+
+interface AgentContextSectionSource {
+    id: string
+    kind: 'decision' | 'plan' | 'artifact' | 'retrieval' | 'tool' | 'metadata'
+    priority: 'required' | 'high' | 'normal' | 'low'
+    mode: 'raw' | 'compressed' | 'omitted'
+    sourceRef?: string
+    estimatedTokens: number
+}
+
+interface AgentContextDiagnostics {
+    contextVersion: 'agent-context-v1'
+    providerType: 'http' | 'mcp-cli'
+    model: string
+    contextWindowTokens: number
+    contextWindowSource: 'configured' | 'model-profile'
+    outputTokens: number
+    safetyTokens: number
+    systemTokens: number
+    inputBudgetTokens: number
+    estimatedInputTokens: number
+    compressionApplied: boolean
+    currentRequestCompressed: boolean
+    historyMessagesTotal: number
+    historyMessagesKept: number
+    historyMessagesSummarized: number
+    historyMessagesOmitted: number
+    historyMessagesCompacted: number
+    persistentConstraintsCount: number
+    persistentSummaryRevision: number
+    persistentSummaryMessageCount: number
+    recalledMessageIds: string[]
+    recalledArtifactIds: string[]
+    currentRequestMode: 'raw' | 'compressed'
+    historySources: AgentContextHistorySource[]
+    sectionSources: AgentContextSectionSource[]
+    compressedSectionIds: string[]
+    omittedSectionIds: string[]
+    warnings: string[]
+}
+
+interface AgentContextCompression {
+    applied: true
+    model: string
+    contextWindowTokens: number
+    inputBudgetTokens: number
+    estimatedInputTokens: number
+    historyMessagesTotal: number
+    historyMessagesKept: number
+    historyMessagesSummarized: number
+    historyMessagesOmitted: number
+    historyMessagesCompacted: number
+    persistentSummaryRevision: number
+    persistentSummaryMessageCount: number
+    recalledMessageCount: number
+    recalledArtifactCount: number
+    compressedSectionIds: string[]
+    omittedSectionIds: string[]
+}
+
+interface AgentHealthResult {
+    ok: boolean
+    code?: string
+    message?: string
+    data?: {
+        phase?: 'idle' | 'starting_python' | 'loading_modules' | 'loading_web_server' | 'loading_graph_engine' | 'loading_tool_protocol' | 'loading_runtime' | 'initializing_state' | 'loading_tools' | 'restoring_state' | 'starting_server' | 'ready' | 'failed'
+        elapsedMs?: number
+        phaseElapsedMs?: number
+        port?: number
+        capabilities?: string[]
+        toolTransport?: string
+        availability?: 'starting' | 'ready' | 'slow' | 'recovering' | 'failed'
+        consecutiveHealthFailures?: number
+        activeInvocations?: number
+        autoRestartAttempted?: boolean
+        recovering?: boolean
+        canManualRetry?: boolean
+    }
+}
+
+interface AgentAPI {
+    health: () => Promise<AgentHealthResult>
+    ensureReady: () => Promise<AgentHealthResult>
+    restart: () => Promise<AgentHealthResult>
+    roles: (payload?: Record<string, unknown>) => Promise<AgentRoleDefinition[]>
+    chat: (payload: Record<string, unknown>) => Promise<AgentChatResponse>
+    plan: (payload: Record<string, unknown>) => Promise<AgentPlan>
+    registerPlan: (payload: Record<string, unknown>) => Promise<AgentPlan>
+    revisePlan: (payload: Record<string, unknown>) => Promise<AgentPlan>
+    executePlan: (payload: Record<string, unknown>) => Promise<AgentRun>
+    retryRun: (payload: Record<string, unknown>) => Promise<AgentRun>
+    reviseDraft: (payload: Record<string, unknown>) => Promise<AgentRun>
+    regenerateBatch: (payload: Record<string, unknown>) => Promise<AgentRun>
+    inspectSideEffect: (payload: Record<string, unknown>) => Promise<AgentSideEffectInspection>
+    reconcileSideEffect: (payload: Record<string, unknown>) => Promise<AgentSideEffectReconciliationResult>
+    runStatus: (payload: Record<string, unknown>) => Promise<AgentRunStatusResult>
+    cancel: (payload: Record<string, unknown>) => Promise<AgentRun>
+    submitApproval: (payload: Record<string, unknown>) => Promise<AgentRun>
+    subscribeRun: (runId: string, options?: { afterSequence?: number }) => Promise<{ ok: boolean }>
+    unsubscribeRun: (runId: string) => Promise<{ ok: boolean }>
+    onRunEvent: (callback: (event: AgentRunEvent) => void) => () => void
+    onRunDisconnected: (callback: (payload: { runId: string; message: string }) => void) => () => void
+}
+
+interface AgentSideEffectInspection {
+    batch: DraftBatchRecord
+    child: DraftBatchRecord['children'][number]
+    candidates: import('../shared/draftBatch').DraftBatchReconciliationCandidate[]
+    invocation: {
+        invocationKey: string
+        requestId: string
+        runId: string
+        stepId?: string
+        method: string
+        status: string
+        createdAt: string
+        updatedAt: string
+        errorCode?: string
+    }
+    canAcceptExisting: boolean
+    canConfirmAbsent: boolean
+}
+
+interface AgentSideEffectReconciliationResult {
+    batch: DraftBatchRecord
+    resolution: import('../shared/draftBatch').DraftBatchReconciliationResolution
+    invocation: {
+        invocationKey: string
+        requestId: string
+        method: string
+        status: string
+        updatedAt: string
+    }
 }
 
 interface Window {
@@ -680,4 +1139,5 @@ interface Window {
     }
     ai: AIAPI
     automation: AutomationAPI
+    agent: AgentAPI
 }

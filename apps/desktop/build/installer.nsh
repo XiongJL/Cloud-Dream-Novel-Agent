@@ -13,7 +13,7 @@
   Function un.UninstallOptionsPageCreate
     StrCpy $unDeleteUserDataRequested "0"
 
-    !insertmacro MUI_HEADER_TEXT "卸载云梦小说编辑器" "选择卸载方式"
+    !insertmacro MUI_HEADER_TEXT "卸载云梦小说智能体" "选择卸载方式"
 
     nsDialogs::Create 1018
     Pop $0
@@ -22,7 +22,7 @@
       Abort
     ${EndIf}
 
-    ${NSD_CreateLabel} 0 0 100% 24u "安装向导将从此电脑卸载云梦小说编辑器。"
+    ${NSD_CreateLabel} 0 0 100% 24u "安装向导将从此电脑卸载云梦小说智能体。"
     Pop $0
 
     ${NSD_CreateLabel} 0 28u 100% 34u "如勾选下方选项，还会删除本机数据库、AI 配置、备份和图片资源。此操作不可恢复。"

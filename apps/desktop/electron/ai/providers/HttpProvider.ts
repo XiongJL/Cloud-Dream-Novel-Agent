@@ -1,9 +1,28 @@
 import { AiGenerateRequest, AiGenerateResponse, AiHealthCheckResult, AiImageRequest, AiImageResponse, AiProvider, AiSettings } from '../types';
+import { AiActionError, type AiErrorCode } from '../errors';
 import { devLog, devLogError, redactForLog } from '../../debug/devLogger';
 import { net } from 'electron';
+import { consumeResponsesStream, extractResponsesOutput } from './responsesStream';
 
 function joinUrl(baseUrl: string, path: string): string {
     return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
+}
+
+function resolveEndpointUrl(baseUrl: string, endpoint: 'chat/completions' | 'responses' | 'images/generations'): string {
+    const normalized = baseUrl.trim().replace(/\/+$/, '');
+    if (endpoint === 'responses' && /\/responses$/u.test(normalized)) return normalized;
+    if (endpoint === 'chat/completions' && /\/chat\/completions$/u.test(normalized)) return normalized;
+    if (endpoint === 'images/generations' && /\/images\/generations$/u.test(normalized)) return normalized;
+    return joinUrl(normalized, endpoint);
+}
+
+function resolveModelsUrl(baseUrl: string): string {
+    const normalized = baseUrl.trim().replace(/\/+$/, '');
+    const apiRoot = normalized
+        .replace(/\/chat\/completions$/u, '')
+        .replace(/\/responses$/u, '')
+        .replace(/\/images\/generations$/u, '');
+    return joinUrl(apiRoot, 'models');
 }
 
 function parseJsonSafe(text: string): any {
@@ -28,12 +47,59 @@ function describeNetworkError(error: any): string {
     return parts.join(' | ');
 }
 
-async function transportFetch(url: string, init: RequestInit): Promise<Response> {
-    try {
-        return await net.fetch(url, init as any);
-    } catch {
-        return await fetch(url, init);
+function summarizeGenerationBody(body: Record<string, any>): Record<string, any> {
+    const summary = { ...body };
+    if (typeof summary.instructions === 'string') {
+        summary.instructions = `[${summary.instructions.length} chars]`;
     }
+    if (typeof summary.input === 'string') {
+        summary.input = `[${summary.input.length} chars]`;
+    }
+    if (Array.isArray(summary.messages)) {
+        summary.messages = summary.messages.map((message: any) => ({
+            role: message?.role,
+            contentChars: typeof message?.content === 'string' ? message.content.length : undefined,
+        }));
+    }
+    return summary;
+}
+
+function describeHttpError(response: Response, text: string, json: any): string {
+    if (typeof json?.error?.message === 'string' && json.error.message.trim()) {
+        return json.error.message.trim();
+    }
+    const htmlTitle = text.match(/<title[^>]*>([^<]+)<\/title>/iu)?.[1]?.replace(/\s+/gu, ' ').trim();
+    if (htmlTitle) return `HTTP ${response.status}: ${htmlTitle}`;
+    const preview = text.replace(/<[^>]+>/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 240);
+    return `HTTP ${response.status}${preview ? `: ${preview}` : response.statusText ? `: ${response.statusText}` : ''}`;
+}
+
+async function transportFetch(url: string, init: RequestInit): Promise<Response> {
+    return net.fetch(url, init as any);
+}
+
+function providerHttpError(response: Response): AiActionError {
+    const status = response.status;
+    let code: AiErrorCode = 'INVALID_INPUT';
+    let retryable = false;
+    if (status === 401 || status === 403) {
+        code = 'PROVIDER_AUTH';
+    } else if (status === 408) {
+        code = 'PROVIDER_TIMEOUT';
+        retryable = true;
+    } else if (status === 425 || status === 429) {
+        code = 'PROVIDER_RATE_LIMITED';
+        retryable = true;
+    } else if (status >= 500) {
+        code = 'PROVIDER_UNAVAILABLE';
+        retryable = true;
+    }
+    return new AiActionError(
+        code,
+        retryable ? '模型服务暂时不可用。' : '模型服务拒绝了当前请求。',
+        undefined,
+        { httpStatus: status, retryable },
+    );
 }
 
 export class HttpProvider implements AiProvider {
@@ -64,7 +130,7 @@ export class HttpProvider implements AiProvider {
             didTimeout = true;
             controller.abort();
         }, effectiveTimeout);
-        const url = joinUrl(baseUrl, 'models');
+        const url = resolveModelsUrl(baseUrl);
         const startedAt = Date.now();
 
         try {
@@ -87,6 +153,12 @@ export class HttpProvider implements AiProvider {
                     status: res.status,
                     elapsedMs: Date.now() - startedAt,
                 });
+                if ((this.settings.http.apiMode ?? 'chat-completions') === 'responses' && (res.status === 404 || res.status === 405)) {
+                    return {
+                        ok: true,
+                        detail: `Models endpoint is unavailable (${res.status}); use test generate to verify the Responses endpoint.`,
+                    };
+                }
                 return { ok: false, detail: `HTTP provider rejected: ${res.status}` };
             }
             devLog('INFO', 'HttpProvider.healthCheck.response', 'HTTP health check ok', {
@@ -117,6 +189,9 @@ export class HttpProvider implements AiProvider {
         }
 
         const controller = new AbortController();
+        const abortFromCaller = () => controller.abort(req.signal?.reason);
+        if (req.signal?.aborted) abortFromCaller();
+        else req.signal?.addEventListener('abort', abortFromCaller, { once: true });
         let didTimeout = false;
         const timeout = Math.max(1000, req.timeoutMs ?? this.settings.http.timeoutMs);
         const timer = setTimeout(() => {
@@ -124,33 +199,68 @@ export class HttpProvider implements AiProvider {
             controller.abort();
         }, timeout);
 
-        const body = {
-            model: this.settings.http.model,
-            messages: [
-                ...(req.systemPrompt ? [{ role: 'system', content: req.systemPrompt }] : []),
-                { role: 'user', content: prompt },
-            ],
-            max_tokens: req.maxTokens ?? this.settings.http.maxTokens,
-            temperature: req.temperature ?? this.settings.http.temperature,
-        };
-        const url = joinUrl(this.settings.http.baseUrl, 'chat/completions');
+        const apiMode = this.settings.http.apiMode ?? 'chat-completions';
+        const body = apiMode === 'responses'
+            ? {
+                model: this.settings.http.model,
+                ...(req.systemPrompt ? { instructions: req.systemPrompt } : {}),
+                input: prompt,
+                max_output_tokens: req.maxTokens ?? this.settings.http.maxTokens,
+                temperature: req.temperature ?? this.settings.http.temperature,
+                stream: true,
+            }
+            : {
+                model: this.settings.http.model,
+                messages: [
+                    ...(req.systemPrompt ? [{ role: 'system', content: req.systemPrompt }] : []),
+                    { role: 'user', content: prompt },
+                ],
+                max_tokens: req.maxTokens ?? this.settings.http.maxTokens,
+                temperature: req.temperature ?? this.settings.http.temperature,
+            };
+        const url = resolveEndpointUrl(
+            this.settings.http.baseUrl,
+            apiMode === 'responses' ? 'responses' : 'chat/completions',
+        );
         const startedAt = Date.now();
 
         try {
             devLog('INFO', 'HttpProvider.generate.request', 'AI text generation request', {
                 url,
                 timeoutMs: timeout,
-                body: redactForLog(body),
+                body: redactForLog(summarizeGenerationBody(body)),
             });
             const res = await transportFetch(url, {
                 method: 'POST',
                 headers: {
                     Authorization: `Bearer ${this.settings.http.apiKey}`,
                     'Content-Type': 'application/json',
+                    ...(apiMode === 'responses' ? { Accept: 'text/event-stream' } : {}),
                 },
                 body: JSON.stringify(body),
                 signal: controller.signal,
             });
+
+            const contentType = res.headers.get('content-type') || '';
+            if (res.ok && apiMode === 'responses' && contentType.includes('text/event-stream')) {
+                const streamed = await consumeResponsesStream(res);
+                devLog('INFO', 'HttpProvider.generate.response', 'AI text generation stream completed', {
+                    url,
+                    status: res.status,
+                    elapsedMs: Date.now() - startedAt,
+                    responseId: streamed.responseId,
+                    model: streamed.model,
+                    eventCount: streamed.eventCount,
+                    outputChars: streamed.text.length,
+                });
+                if (!streamed.text) {
+                    throw new Error('Responses stream completed without output text');
+                }
+                return {
+                    text: streamed.text,
+                    model: streamed.model || this.settings.http.model,
+                };
+            }
 
             const text = await res.text();
             const json = parseJsonSafe(text);
@@ -158,16 +268,25 @@ export class HttpProvider implements AiProvider {
                 url,
                 status: res.status,
                 elapsedMs: Date.now() - startedAt,
-                text,
+                contentType,
+                outputChars: text.length,
+                responsePreview: text.slice(0, 1000),
             });
 
             if (!res.ok) {
-                throw new Error(json?.error?.message || `HTTP ${res.status}: ${text.slice(0, 300)}`);
+                const diagnosticMessage = describeHttpError(res, text, json);
+                devLog('WARN', 'HttpProvider.generate.rejected', 'AI text generation rejected', {
+                    url,
+                    status: res.status,
+                    diagnosticMessage,
+                });
+                throw providerHttpError(res);
             }
 
             const output =
                 json?.choices?.[0]?.message?.content ||
                 json?.output_text ||
+                extractResponsesOutput(json) ||
                 json?.content?.[0]?.text ||
                 '';
 
@@ -180,14 +299,31 @@ export class HttpProvider implements AiProvider {
                 url,
                 elapsedMs: Date.now() - startedAt,
                 didTimeout,
-                requestBody: redactForLog(body),
+                requestBody: redactForLog(summarizeGenerationBody(body)),
             });
-            if (didTimeout || error?.name === 'AbortError') {
-                throw new Error(`HTTP request timeout after ${timeout}ms`);
+            if (req.signal?.aborted && !didTimeout) {
+                throw new AiActionError('CANCELLED', 'AI request cancelled', undefined, { retryable: false });
             }
-            throw new Error(`HTTP request failed: ${describeNetworkError(error)} | url=${url}`);
+            if (didTimeout || error?.name === 'AbortError') {
+                throw new AiActionError(
+                    'PROVIDER_TIMEOUT',
+                    '模型请求超时。',
+                    undefined,
+                    { retryable: true, timeoutMs: timeout },
+                );
+            }
+            if (error instanceof AiActionError) {
+                throw error;
+            }
+            throw new AiActionError(
+                'NETWORK_ERROR',
+                '无法连接模型服务。',
+                undefined,
+                { retryable: true },
+            );
         } finally {
             clearTimeout(timer);
+            req.signal?.removeEventListener('abort', abortFromCaller);
         }
     }
 
@@ -211,7 +347,7 @@ export class HttpProvider implements AiProvider {
             output_format: req.outputFormat || 'png',
             watermark: req.watermark ?? true,
         };
-        const url = joinUrl(this.settings.http.baseUrl, 'images/generations');
+        const url = resolveEndpointUrl(this.settings.http.baseUrl, 'images/generations');
         const startedAt = Date.now();
 
         try {

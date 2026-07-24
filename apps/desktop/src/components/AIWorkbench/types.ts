@@ -1,3 +1,11 @@
+export type {
+    ChapterBeat,
+    ChapterBeatInput,
+    DraftBatchChildRecord,
+    DraftBatchCreateInput,
+    DraftBatchRecord,
+} from '../../../shared/draftBatch';
+
 export type DraftPlotPoint = {
     title: string;
     description?: string;
@@ -85,7 +93,7 @@ export type ConfirmResult = {
     transactionMode: 'atomic';
 };
 
-export type DraftSessionStatus = 'draft' | 'committed' | 'discarded' | 'failed';
+export type DraftSessionStatus = 'draft' | 'stale' | 'committed' | 'discarded' | 'failed';
 
 export type DraftSessionRecord = {
     draftSessionId: string;
@@ -95,6 +103,12 @@ export type DraftSessionRecord = {
     origin: 'codex' | 'claude-code' | 'openclaw' | 'desktop-ui' | 'mcp-bridge' | 'unknown';
     novelId: string;
     chapterId?: string;
+    draftBatchId?: string;
+    childIndex?: number;
+    generationRevision?: number;
+    dependsOnDraftSessionId?: string;
+    revisionOfDraftSessionId?: string;
+    reviewRequestId?: string;
     status: DraftSessionStatus;
     payload: CreativeAssetsDraft | Record<string, unknown>;
     selection?: DraftSelection;
@@ -103,4 +117,5 @@ export type DraftSessionRecord = {
     version: number;
     createdAt: string;
     updatedAt: string;
+    writebacks?: import('../../../shared/draftWriteback').DraftWritebackRecord[];
 };

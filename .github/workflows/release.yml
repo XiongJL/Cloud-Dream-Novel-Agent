@@ -82,9 +82,9 @@ jobs:
             $_.Name -like '*Setup-*.exe.blockmap'
           } | ForEach-Object {
             $targetName = switch -Wildcard ($_.Name) {
-              '*Setup-*.exe.blockmap' { "novel-editor-setup-$version.exe.blockmap"; break }
-              '*Setup-*.exe' { "novel-editor-setup-$version.exe"; break }
-              '*Portable-*.exe' { "novel-editor-portable-$version.exe"; break }
+              '*Setup-*.exe.blockmap' { "clouddream-novel-agent-setup-$version.exe.blockmap"; break }
+              '*Setup-*.exe' { "clouddream-novel-agent-setup-$version.exe"; break }
+              '*Portable-*.exe' { "clouddream-novel-agent-portable-$version.exe"; break }
               default { throw "Unexpected Windows asset: $($_.Name)" }
             }
 
@@ -166,13 +166,13 @@ jobs:
             base="$(basename "$file")"
             case "$base" in
               *.dmg.blockmap)
-                target_name="novel-editor-mac-${version}.dmg.blockmap"
+                target_name="clouddream-novel-agent-mac-${version}.dmg.blockmap"
                 ;;
               *.dmg)
-                target_name="novel-editor-mac-${version}.dmg"
+                target_name="clouddream-novel-agent-mac-${version}.dmg"
                 ;;
               *.zip)
-                target_name="novel-editor-mac-${version}.zip"
+                target_name="clouddream-novel-agent-mac-${version}.zip"
                 ;;
               latest*.yml)
                 target_name="$base"

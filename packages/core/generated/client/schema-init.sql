@@ -41,6 +41,120 @@ CREATE TABLE "Chapter" (
 );
 
 -- CreateTable
+CREATE TABLE "AgentConversation" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "novelId" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "description" TEXT,
+    "role" TEXT NOT NULL,
+    "runtimeConversationId" TEXT,
+    "suggestedGoal" TEXT,
+    "planJson" TEXT,
+    "runJson" TEXT,
+    "contextSummaryJson" TEXT,
+    "error" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "AgentConversation_novelId_fkey" FOREIGN KEY ("novelId") REFERENCES "Novel" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "AgentMessage" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "conversationId" TEXT NOT NULL,
+    "role" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "metadataJson" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "AgentMessage_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "AgentConversation" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "AgentRun" (
+    "runId" TEXT NOT NULL PRIMARY KEY,
+    "conversationId" TEXT NOT NULL,
+    "novelId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "planId" TEXT NOT NULL,
+    "status" TEXT NOT NULL,
+    "currentStepId" TEXT,
+    "progress" REAL NOT NULL DEFAULT 0,
+    "draftSessionId" TEXT,
+    "cancelRequested" INTEGER NOT NULL DEFAULT 0,
+    "pendingApprovalJson" TEXT,
+    "approvalResponsesJson" TEXT,
+    "planJson" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "AgentRun_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "AgentConversation" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "AgentRun_novelId_fkey" FOREIGN KEY ("novelId") REFERENCES "Novel" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "AgentRunEvent" (
+    "eventId" TEXT NOT NULL PRIMARY KEY,
+    "sequence" INTEGER NOT NULL,
+    "runId" TEXT NOT NULL,
+    "planId" TEXT,
+    "threadId" TEXT,
+    "stepId" TEXT,
+    "type" TEXT NOT NULL,
+    "agent" TEXT,
+    "toolName" TEXT,
+    "status" TEXT,
+    "payloadJson" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "AgentRunEvent_runId_fkey" FOREIGN KEY ("runId") REFERENCES "AgentRun" ("runId") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "AgentArtifact" (
+    "artifactId" TEXT NOT NULL PRIMARY KEY,
+    "conversationId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "novelId" TEXT NOT NULL,
+    "planId" TEXT NOT NULL,
+    "type" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "status" TEXT NOT NULL,
+    "summary" TEXT,
+    "content" TEXT,
+    "referenceJson" TEXT,
+    "metadataJson" TEXT,
+    "reviewStatus" TEXT NOT NULL DEFAULT 'unreviewed',
+    "reviewRevision" INTEGER NOT NULL DEFAULT 0,
+    "reviewDecisionsJson" TEXT,
+    "reviewStaleChapterIdsJson" TEXT,
+    "reviewedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "AgentArtifact_conversationId_fkey" FOREIGN KEY ("conversationId") REFERENCES "AgentConversation" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "AgentArtifact_runId_fkey" FOREIGN KEY ("runId") REFERENCES "AgentRun" ("runId") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "AgentArtifact_novelId_fkey" FOREIGN KEY ("novelId") REFERENCES "Novel" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "AgentRevisionTask" (
+    "revisionTaskId" TEXT NOT NULL PRIMARY KEY,
+    "novelId" TEXT NOT NULL,
+    "sourceArtifactId" TEXT NOT NULL,
+    "sourceFindingId" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "description" TEXT NOT NULL,
+    "targetChapterIdsJson" TEXT NOT NULL,
+    "sourceExpert" TEXT NOT NULL,
+    "severity" TEXT NOT NULL,
+    "recommendedRole" TEXT NOT NULL,
+    "status" TEXT NOT NULL,
+    "sourceSnapshotJson" TEXT NOT NULL,
+    "note" TEXT,
+    "planId" TEXT,
+    "planJson" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+-- CreateTable
 CREATE TABLE "SyncState" (
     "id" TEXT NOT NULL PRIMARY KEY DEFAULT 'global',
     "cursor" BIGINT NOT NULL DEFAULT 0,
@@ -305,6 +419,33 @@ CREATE TABLE "_IdeaToTag" (
     CONSTRAINT "_IdeaToTag_A_fkey" FOREIGN KEY ("A") REFERENCES "Idea" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "_IdeaToTag_B_fkey" FOREIGN KEY ("B") REFERENCES "Tag" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+-- CreateIndex
+CREATE INDEX "idx_agent_conversation_novel_updated" ON "AgentConversation"("novelId", "updatedAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_message_conversation_created" ON "AgentMessage"("conversationId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_run_conversation_updated" ON "AgentRun"("conversationId", "updatedAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_run_event_run_sequence" ON "AgentRunEvent"("runId", "sequence");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_artifact_conversation_created" ON "AgentArtifact"("conversationId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_artifact_run_created" ON "AgentArtifact"("runId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_revision_task_novel_status" ON "AgentRevisionTask"("novelId", "status", "updatedAt");
+
+-- CreateIndex
+CREATE INDEX "idx_agent_revision_task_artifact" ON "AgentRevisionTask"("sourceArtifactId", "sourceFindingId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "AgentRevisionTask_sourceArtifactId_sourceFindingId_key" ON "AgentRevisionTask"("sourceArtifactId", "sourceFindingId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "ItemOwnership_characterId_itemId_key" ON "ItemOwnership"("characterId", "itemId");

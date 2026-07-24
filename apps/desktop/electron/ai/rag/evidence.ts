@@ -79,6 +79,7 @@ export async function collectRagEvidence(input: {
     detection: RagDetectionResult;
     question: string;
     maxEvidenceItems?: number;
+    analysisScope?: 'current_chapter' | 'nearby_chapters' | 'volume_structure' | 'compare_two_paths';
     locale?: string;
     embeddingSettings?: AiEmbeddingSettings;
 }): Promise<{ evidence: RagEvidenceItem[]; warnings: string[]; usedContext: string[] }> {
@@ -134,12 +135,12 @@ export async function collectRagEvidence(input: {
         (db as any).chapterSummary.findMany({
             where: { novelId: input.novelId, isLatest: true, status: 'active' },
             orderBy: { updatedAt: 'desc' },
-            take: 12,
+            take: 100,
         }),
         input.chapterId
             ? db.chapter.findUnique({
                 where: { id: input.chapterId },
-                select: { id: true, title: true, order: true, volume: { select: { title: true, order: true } } },
+                select: { id: true, title: true, order: true, volumeId: true, volume: { select: { title: true, order: true } } },
             })
             : null,
     ]);
@@ -323,7 +324,9 @@ export async function collectRagEvidence(input: {
         }
     }
 
-    for (const summary of narrativeSummaries) {
+    const analysisScope = input.analysisScope || 'current_chapter';
+    const includeNarrativeSummaries = analysisScope === 'volume_structure' || analysisScope === 'compare_two_paths';
+    for (const summary of includeNarrativeSummaries ? narrativeSummaries : []) {
         const unresolvedThreads = parseJsonArray(summary.unresolvedThreads);
         const keyFacts = parseJsonArray(summary.keyFacts);
         const hardConstraints = parseJsonArray(summary.hardConstraints);
@@ -347,7 +350,16 @@ export async function collectRagEvidence(input: {
         usedContext.add('narrative_summaries');
     }
 
-    for (const summary of chapterSummaries) {
+    const scopedChapterSummaries = chapterSummaries.filter((summary: any) => {
+        if (!currentChapter) return analysisScope !== 'current_chapter' || summary.chapterId === input.chapterId;
+        if (analysisScope === 'current_chapter') return summary.chapterId === currentChapter.id;
+        if (analysisScope === 'nearby_chapters') {
+            return typeof summary.chapterOrder === 'number' && Math.abs(summary.chapterOrder - currentChapter.order) <= 3;
+        }
+        if (analysisScope === 'volume_structure') return summary.volumeId === currentChapter.volumeId;
+        return true;
+    });
+    for (const summary of scopedChapterSummaries) {
         const openQuestions = parseJsonArray(summary.openQuestions);
         const timelineHints = parseJsonArray(summary.timelineHints);
         const keyFacts = parseJsonArray(summary.keyFacts);

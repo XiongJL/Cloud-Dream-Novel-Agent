@@ -1,4 +1,4 @@
-# Novel Editor MCP CLI Setup
+# CloudDream Novel Agent MCP CLI Setup
 
 This document describes the currently working local MCP setup for `Codex`, `Claude Code`, and compatible MCP clients.
 
@@ -233,7 +233,7 @@ This is useful if a client says MCP startup failed.
 
 - Current `Codex` on Windows sends bare JSON / NDJSON during MCP startup instead of only `Content-Length` framed messages.
 - The local bridge now supports both framed MCP messages and bare JSON startup messages.
-- During startup, some clients probe `resources/list` and `resources/templates/list`. At the moment the bridge advertises tools only; resources are not used by the Novel Editor flow.
+- During startup, some clients probe `resources/list` and `resources/templates/list`. At the moment the bridge advertises tools only; resources are not used by the CloudDream Novel Agent flow.
 
 ## Troubleshooting
 

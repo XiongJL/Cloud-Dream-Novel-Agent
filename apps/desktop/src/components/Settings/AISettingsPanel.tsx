@@ -105,6 +105,10 @@ export function AISettingsPanel({ isDark }: Props) {
                         timeoutMs: res.embedding?.timeoutMs ?? 60000,
                         fallbackToHash: res.embedding?.fallbackToHash ?? true,
                     },
+                    http: {
+                        ...res.http,
+                        apiMode: res.http?.apiMode ?? 'chat-completions',
+                    },
                 } as AISettings;
                 setSettings(merged);
                 setCreativityLevel(temperatureToCreativityLevel(merged.http.temperature));
@@ -170,7 +174,7 @@ export function AISettingsPanel({ isDark }: Props) {
         });
     };
 
-    const applyPreset = (preset: 'doubao-ark' | 'openai-compatible' | 'gemini-openai-compatible') => {
+    const applyPreset = (preset: 'doubao-ark' | 'openai-compatible' | 'openai-responses' | 'gemini-openai-compatible') => {
         if (!settings) return;
 
         if (preset === 'doubao-ark') {
@@ -180,6 +184,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 providerType: 'http',
                 http: {
                     ...settings.http,
+                    apiMode: 'chat-completions',
                     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
                     model: 'doubao-seed-2-0-pro-260215',
                     imageModel: 'doubao-seedream-5-0-260128',
@@ -203,6 +208,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 providerType: 'http',
                 http: {
                     ...settings.http,
+                    apiMode: 'chat-completions',
                     baseUrl: 'https://api.openai.com/v1',
                     model: 'gpt-4.1-mini',
                     imageModel: 'gpt-image-1',
@@ -219,12 +225,37 @@ export function AISettingsPanel({ isDark }: Props) {
             return;
         }
 
+        if (preset === 'openai-responses') {
+            setCreativityLevel(temperatureToCreativityLevel(0.7));
+            setSettings({
+                ...settings,
+                providerType: 'http',
+                http: {
+                    ...settings.http,
+                    apiMode: 'responses',
+                    baseUrl: 'https://api.openai.com/v1',
+                    model: 'gpt-4.1-mini',
+                    imageModel: 'gpt-image-1',
+                    imageSize: '1024x1024',
+                    imageOutputFormat: 'png',
+                    imageWatermark: true,
+                    timeoutMs: 60000,
+                    maxTokens: 4096,
+                    temperature: 0.7,
+                },
+            });
+            setStatusTone('success');
+            setStatus(t('settings.ai.status.presetOpenaiResponses'));
+            return;
+        }
+
         setCreativityLevel(temperatureToCreativityLevel(0.7));
         setSettings({
             ...settings,
             providerType: 'http',
             http: {
                 ...settings.http,
+                apiMode: 'chat-completions',
                 baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
                 model: 'gemini-2.5-pro',
                 imageModel: 'imagen-3.0-generate-002',
@@ -356,6 +387,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     <div className="flex flex-wrap gap-2 pt-1">
                         <button onClick={() => applyPreset('doubao-ark')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-amber-400/30 text-amber-300 hover:bg-white/5' : 'border-amber-300 text-amber-700 hover:bg-amber-50')}>{t('settings.ai.preset.doubao')}</button>
                         <button onClick={() => applyPreset('openai-compatible')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-indigo-400/30 text-indigo-300 hover:bg-white/5' : 'border-indigo-200 text-indigo-700 hover:bg-indigo-50')}>{t('settings.ai.preset.openai')}</button>
+                        <button onClick={() => applyPreset('openai-responses')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-purple-400/30 text-purple-300 hover:bg-white/5' : 'border-purple-200 text-purple-700 hover:bg-purple-50')}>{t('settings.ai.preset.openaiResponses')}</button>
                         <button onClick={() => applyPreset('gemini-openai-compatible')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-emerald-400/30 text-emerald-300 hover:bg-white/5' : 'border-emerald-200 text-emerald-700 hover:bg-emerald-50')}>{t('settings.ai.preset.gemini')}</button>
                     </div>
                 ) : null}
@@ -368,6 +400,16 @@ export function AISettingsPanel({ isDark }: Props) {
                         <div className={clsx('text-xs font-medium uppercase tracking-widest', isDark ? 'text-neutral-500' : 'text-gray-500')}>{t('settings.ai.section.httpBase')}</div>
                         <div className={clsx('p-4 rounded-xl border', isDark ? 'bg-white/5 border-white/5' : 'bg-gray-50/50 border-gray-100')}>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <SettingField label={t('settings.ai.apiMode.label')} hint={t('settings.ai.apiMode.hint')} className="md:col-span-2">
+                                    <select
+                                        value={settings.http.apiMode ?? 'chat-completions'}
+                                        onChange={(e) => setSettings({ ...settings, http: { ...settings.http, apiMode: e.target.value as 'chat-completions' | 'responses' } })}
+                                        className={inputClass}
+                                    >
+                                        <option value="chat-completions">{t('settings.ai.apiMode.chatCompletions')}</option>
+                                        <option value="responses">{t('settings.ai.apiMode.responses')}</option>
+                                    </select>
+                                </SettingField>
                                 <SettingField label={t('settings.ai.baseUrl')} className="md:col-span-2">
                                     <input value={settings.http.baseUrl} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, baseUrl: e.target.value } })} placeholder="https://api.openai.com/v1" className={inputClass} />
                                 </SettingField>
@@ -396,6 +438,9 @@ export function AISettingsPanel({ isDark }: Props) {
                                 </SettingField>
                                 <SettingField label={t('settings.ai.maxTokens')} hint={t('settings.ai.maxTokensHint')}>
                                     <input type="number" value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || 4096 } })} placeholder="4096" className={inputClass} />
+                                </SettingField>
+                                <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensHint')}>
+                                    <input type="number" min={0} value={settings.http.contextWindowTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, contextWindowTokens: Math.max(0, Number(e.target.value) || 0) } })} placeholder="0" className={inputClass} />
                                 </SettingField>
                                 <SettingField label={t('settings.ai.creativity.label')}>
                                     <select value={creativityLevel} onChange={(e) => updateCreativityLevel(e.target.value as CreativityLevel)} className={inputClass}>
@@ -593,6 +638,9 @@ export function AISettingsPanel({ isDark }: Props) {
                                 <p className={clsx('text-sm font-medium', isDark ? 'text-white' : 'text-gray-900')}>{t('settings.ai.mcpCopy.title')}</p>
                                 <p className={clsx('text-xs leading-5', isDark ? 'text-neutral-400' : 'text-gray-600')}>{t('settings.ai.mcpCopy.desc')}</p>
                             </div>
+                            <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensMcpHint')}>
+                                <input type="number" min={0} value={settings.mcpCli.contextWindowTokens} onChange={(e) => setSettings({ ...settings, mcpCli: { ...settings.mcpCli, contextWindowTokens: Math.max(0, Number(e.target.value) || 0) } })} placeholder="0" className={inputClass} />
+                            </SettingField>
                             <SettingField label={t('settings.ai.mcpCopy.codexLabel')} hint={t('settings.ai.mcpCopy.codexHint')}>
                                 <textarea value={mcpSetup?.codexToml || ''} readOnly placeholder={t('settings.ai.mcpCopy.loading')} rows={5} className={textareaClass} />
                             </SettingField>

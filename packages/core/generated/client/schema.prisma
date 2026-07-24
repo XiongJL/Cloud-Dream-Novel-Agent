@@ -18,19 +18,22 @@ model Novel {
   version     Int      @default(1)
   deleted     Boolean  @default(false)
 
-  wordCount   Int      @default(0)
-  formatting  String   @default("{}") // JSON: { "volume": "...", "chapter": "..." }
+  wordCount  Int    @default(0)
+  formatting String @default("{}") // JSON: { "volume": "...", "chapter": "..." }
 
-  volumes    Volume[]
-  characters Character[]
-  items      Item[]
-  ideas      Idea[]
-  tags       Tag[]
-  plotLines  PlotLine[]
-  plotPoints PlotPoint[]
-  worldSettings WorldSetting[]
-  chapterSummaries ChapterSummary[]
+  volumes            Volume[]
+  characters         Character[]
+  items              Item[]
+  ideas              Idea[]
+  tags               Tag[]
+  plotLines          PlotLine[]
+  plotPoints         PlotPoint[]
+  worldSettings      WorldSetting[]
+  chapterSummaries   ChapterSummary[]
   narrativeSummaries NarrativeSummary[]
+  agentConversations AgentConversation[]
+  agentRuns          AgentRun[]
+  agentArtifacts     AgentArtifact[]
 }
 
 model Volume {
@@ -39,60 +42,193 @@ model Volume {
   order   Int
   novelId String
   novel   Novel  @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  
-  version     Int      @default(1)
-  deleted     Boolean  @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
 
-  chapters Chapter[]
-  chapterSummaries ChapterSummary[]
+  version   Int      @default(1)
+  deleted   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chapters           Chapter[]
+  chapterSummaries   ChapterSummary[]
   narrativeSummaries NarrativeSummary[]
 }
 
 model Chapter {
-  id       String @id @default(cuid())
-  title    String
-  content  String
-  wordCount Int @default(0)
-  order    Int
-  volumeId String
-  volume   Volume @relation(fields: [volumeId], references: [id], onDelete: Cascade)
+  id        String @id @default(cuid())
+  title     String
+  content   String
+  wordCount Int    @default(0)
+  order     Int
+  volumeId  String
+  volume    Volume @relation(fields: [volumeId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  version     Int      @default(1)
-  deleted     Boolean  @default(false)
-  
-  ideas Idea[]
-  anchors PlotPointAnchor[]
+  version   Int      @default(1)
+  deleted   Boolean  @default(false)
+
+  ideas     Idea[]
+  anchors   PlotPointAnchor[]
   summaries ChapterSummary[]
 }
 
+model AgentConversation {
+  id                    String   @id
+  novelId               String
+  title                 String
+  description           String?
+  role                  String
+  runtimeConversationId String?
+  suggestedGoal         String?
+  planJson              String?
+  runJson               String?
+  contextSummaryJson    String?
+  error                 String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  novel    Novel          @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  messages AgentMessage[]
+  runs     AgentRun[]
+  artifacts AgentArtifact[]
+
+  @@index([novelId, updatedAt], map: "idx_agent_conversation_novel_updated")
+}
+
+model AgentMessage {
+  id             String   @id
+  conversationId String
+  role           String
+  content        String
+  metadataJson   String?
+  createdAt      DateTime @default(now())
+
+  conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt], map: "idx_agent_message_conversation_created")
+}
+
+model AgentRun {
+  runId                 String   @id
+  conversationId        String
+  novelId               String
+  threadId              String
+  planId                String
+  status                String
+  currentStepId         String?
+  progress              Float    @default(0)
+  draftSessionId        String?
+  cancelRequested       Int      @default(0)
+  pendingApprovalJson   String?
+  approvalResponsesJson String?
+  planJson              String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  novel        Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  events       AgentRunEvent[]
+  artifacts    AgentArtifact[]
+
+  @@index([conversationId, updatedAt], map: "idx_agent_run_conversation_updated")
+}
+
+model AgentRunEvent {
+  eventId     String   @id
+  sequence    Int
+  runId       String
+  planId      String?
+  threadId    String?
+  stepId      String?
+  type        String
+  agent       String?
+  toolName    String?
+  status      String?
+  payloadJson String?
+  createdAt   DateTime @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [runId], onDelete: Cascade)
+
+  @@index([runId, sequence], map: "idx_agent_run_event_run_sequence")
+}
+
+model AgentArtifact {
+  artifactId    String   @id
+  conversationId String
+  runId         String
+  novelId       String
+  planId        String
+  type          String
+  title         String
+  status        String
+  summary       String?
+  content       String?
+  referenceJson String?
+  metadataJson  String?
+  reviewStatus  String   @default("unreviewed")
+  reviewRevision Int     @default(0)
+  reviewDecisionsJson String?
+  reviewStaleChapterIdsJson String?
+  reviewedAt    DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  run          AgentRun          @relation(fields: [runId], references: [runId], onDelete: Cascade)
+  novel        Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt], map: "idx_agent_artifact_conversation_created")
+  @@index([runId, createdAt], map: "idx_agent_artifact_run_created")
+}
+
+model AgentRevisionTask {
+  revisionTaskId       String   @id
+  novelId              String
+  sourceArtifactId     String
+  sourceFindingId      String
+  title                String
+  description          String
+  targetChapterIdsJson String
+  sourceExpert         String
+  severity             String
+  recommendedRole      String
+  status               String
+  sourceSnapshotJson   String
+  note                 String?
+  planId               String?
+  planJson              String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([sourceArtifactId, sourceFindingId])
+  @@index([novelId, status, updatedAt], map: "idx_agent_revision_task_novel_status")
+  @@index([sourceArtifactId, sourceFindingId], map: "idx_agent_revision_task_artifact")
+}
+
 model SyncState {
-  id        String   @id @default("global") 
+  id        String   @id @default("global")
   cursor    BigInt   @default(0)
   updatedAt DateTime @updatedAt
 }
 
 model Character {
-  id          String  @id @default(cuid())
-  name        String
-  role        String? // 主角, 配角, 反派...
-  avatar      String? // Base64 or file path
+  id             String  @id @default(cuid())
+  name           String
+  role           String? // 主角, 配角, 反派...
+  avatar         String? // Base64 or file path
   fullBodyImages String? // JSON array of file paths
-  description String? // 简介
-  profile     String  @default("{}") // JSON: 自定义属性 { "年龄": "18", "生日": "1月1日" }
-  sortOrder   Float   @default(0)
-  isStarred   Boolean @default(false)
+  description    String? // 简介
+  profile        String  @default("{}") // JSON: 自定义属性 { "年龄": "18", "生日": "1月1日" }
+  sortOrder      Float   @default(0)
+  isStarred      Boolean @default(false)
 
   novelId String
   novel   Novel  @relation(fields: [novelId], references: [id], onDelete: Cascade)
 
-  items     ItemOwnership[]
-  relationsAsSource Relationship[] @relation("RelationSource")
-  relationsAsTarget Relationship[] @relation("RelationTarget")
-  mapMarkers CharacterMapMarker[]
+  items             ItemOwnership[]
+  relationsAsSource Relationship[]       @relation("RelationSource")
+  relationsAsTarget Relationship[]       @relation("RelationTarget")
+  mapMarkers        CharacterMapMarker[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -106,14 +242,14 @@ model Item {
   description String?
   profile     String  @default("{}") // JSON: 自定义属性
 
-  novelId     String
-  novel       Novel   @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  novelId String
+  novel   Novel  @relation(fields: [novelId], references: [id], onDelete: Cascade)
 
-  sortOrder   Float   @default(0)
-  owners      ItemOwnership[]
+  sortOrder Float           @default(0)
+  owners    ItemOwnership[]
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model ItemOwnership {
@@ -122,25 +258,25 @@ model ItemOwnership {
   character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
   itemId      String
   item        Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
-  note        String?   // 备注 (如 "已损坏")
+  note        String? // 备注 (如 "已损坏")
   createdAt   DateTime  @default(now())
 
   @@unique([characterId, itemId])
 }
 
 model WorldSetting {
-  id          String   @id @default(cuid())
-  name        String
-  content     String   @default("") // Rich text content
-  type        String   @default("other") // 'history' | 'geography' | 'magic_system' | 'faction' | 'technology' | 'other'
-  icon        String?  // Custom icon name
-  sortOrder   Float    @default(0)
+  id        String  @id @default(cuid())
+  name      String
+  content   String  @default("") // Rich text content
+  type      String  @default("other") // 'history' | 'geography' | 'magic_system' | 'faction' | 'technology' | 'other'
+  icon      String? // Custom icon name
+  sortOrder Float   @default(0)
 
-  novelId     String
-  novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  novelId String
+  novel   Novel  @relation(fields: [novelId], references: [id], onDelete: Cascade)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Relationship {
@@ -149,27 +285,27 @@ model Relationship {
   source      Character @relation("RelationSource", fields: [sourceId], references: [id], onDelete: Cascade)
   targetId    String
   target      Character @relation("RelationTarget", fields: [targetId], references: [id], onDelete: Cascade)
-  relation    String    // 关系名称, e.g. "父亲", "敌对", "师徒"
-  description String?   // 关系详细描述
+  relation    String // 关系名称, e.g. "父亲", "敌对", "师徒"
+  description String? // 关系详细描述
 
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@unique([sourceId, targetId])
 }
 
 model Idea {
-  id        String   @id @default(cuid())
+  id        String  @id @default(cuid())
   content   String
-  quote     String?  // 选中的原文 (可选)
-  cursor    String?  // 游标/定位信息 (可选)
-  isStarred Boolean  @default(false)
+  quote     String? // 选中的原文 (可选)
+  cursor    String? // 游标/定位信息 (可选)
+  isStarred Boolean @default(false)
   tags      Tag[]
-  
-  novelId   String
-  novel     Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  
-  chapterId String?  // 关联章节 (可选)
+
+  novelId String
+  novel   Novel  @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  chapterId String? // 关联章节 (可选)
   chapter   Chapter? @relation(fields: [chapterId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
@@ -187,78 +323,78 @@ model Tag {
 }
 
 model PlotLine {
-  id          String   @id @default(cuid())
+  id          String  @id @default(cuid())
   novelId     String
-  novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  novel       Novel   @relation(fields: [novelId], references: [id], onDelete: Cascade)
   name        String
   description String?
-  color       String   // Hex color code
-  
-  points      PlotPoint[]
-  
-  sortOrder   Float    @default(0)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  color       String // Hex color code
+
+  points PlotPoint[]
+
+  sortOrder Float    @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model PlotPoint {
-  id          String   @id @default(cuid())
-  novelId     String
-  novel       Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  
-  plotLineId  String
-  plotLine    PlotLine @relation(fields: [plotLineId], references: [id], onDelete: Cascade)
-  
+  id      String @id @default(cuid())
+  novelId String
+  novel   Novel  @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  plotLineId String
+  plotLine   PlotLine @relation(fields: [plotLineId], references: [id], onDelete: Cascade)
+
   title       String
   description String?
-  type        String   // 'foreshadowing' | 'mystery' | 'promise' | 'event'
-  status      String   // 'active' | 'resolved'
-  icon        String?  // Custom icon name (e.g. from Lucide)
-  
-  order       Float    @default(0)
-  
-  anchors     PlotPointAnchor[]
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  type        String // 'foreshadowing' | 'mystery' | 'promise' | 'event'
+  status      String // 'active' | 'resolved'
+  icon        String? // Custom icon name (e.g. from Lucide)
+
+  order Float @default(0)
+
+  anchors PlotPointAnchor[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model PlotPointAnchor {
-  id          String   @id @default(cuid())
+  id          String    @id @default(cuid())
   plotPointId String
   plotPoint   PlotPoint @relation(fields: [plotPointId], references: [id], onDelete: Cascade)
-  
-  chapterId   String
-  chapter     Chapter   @relation(fields: [chapterId], references: [id], onDelete: Cascade)
-  
-  type        String    // 'setup' | 'payoff'
-  
-  lexicalKey  String?   // Key of the node in Lexical
-  offset      Int?      // Character offset
-  length      Int?      // Length of selection
-  
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+
+  chapterId String
+  chapter   Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+
+  type String // 'setup' | 'payoff'
+
+  lexicalKey String? // Key of the node in Lexical
+  offset     Int? // Character offset
+  length     Int? // Length of selection
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ── 地图系统 ──
 
 model MapCanvas {
-  id          String   @id @default(cuid())
+  id          String  @id @default(cuid())
   novelId     String
   name        String
-  type        String   @default("world") // world | region | scene
+  type        String  @default("world") // world | region | scene
   description String?
-  background  String?  // 底图相对路径
-  width       Int      @default(1200)
-  height      Int      @default(800)
-  sortOrder   Float    @default(0)
+  background  String? // 底图相对路径
+  width       Int     @default(1200)
+  height      Int     @default(800)
+  sortOrder   Float   @default(0)
 
-  markers     CharacterMapMarker[]
-  elements    MapElement[]
+  markers  CharacterMapMarker[]
+  elements MapElement[]
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([novelId])
 }
@@ -266,29 +402,29 @@ model MapCanvas {
 model MapElement {
   id      String  @id @default(cuid())
   mapId   String
-  type    String  // poi | label
-  x       Float   // 0-1 相对坐标
+  type    String // poi | label
+  x       Float // 0-1 相对坐标
   y       Float
   text    String?
   iconKey String?
   style   String  @default("{}")
   z       Int     @default(0)
 
-  map     MapCanvas @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  map MapCanvas @relation(fields: [mapId], references: [id], onDelete: Cascade)
 
   @@index([mapId])
 }
 
 model CharacterMapMarker {
-  id          String    @id @default(cuid())
+  id          String  @id @default(cuid())
   characterId String
   mapId       String
-  x           Float     // 0-1 相对坐标
+  x           Float // 0-1 相对坐标
   y           Float
   label       String?
 
-  character   Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
-  map         MapCanvas @relation(fields: [mapId], references: [id], onDelete: Cascade)
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  map       MapCanvas @relation(fields: [mapId], references: [id], onDelete: Cascade)
 
   @@unique([characterId, mapId])
 }
@@ -296,19 +432,19 @@ model CharacterMapMarker {
 // 鈹€鈹€ AI Summary / Memory 鈹€鈹€
 
 model ChapterSummary {
-  id                String   @id @default(cuid())
-  novelId           String
-  volumeId          String
-  chapterId         String
+  id        String @id @default(cuid())
+  novelId   String
+  volumeId  String
+  chapterId String
 
   // Summary payload
-  summaryType       String   @default("standard") // standard | concise | facts | style
-  summaryText       String
-  compressedMemory  String?  // Prompt-ready compressed memory text
-  keyFacts          String   @default("[]") // JSON array
-  entitiesSnapshot  String   @default("{}") // JSON object
-  timelineHints     String   @default("[]") // JSON array
-  openQuestions     String   @default("[]") // JSON array
+  summaryType      String  @default("standard") // standard | concise | facts | style
+  summaryText      String
+  compressedMemory String? // Prompt-ready compressed memory text
+  keyFacts         String  @default("[]") // JSON array
+  entitiesSnapshot String  @default("{}") // JSON object
+  timelineHints    String  @default("[]") // JSON array
+  openQuestions    String  @default("[]") // JSON array
 
   // Source snapshot
   sourceContentHash String
@@ -317,27 +453,27 @@ model ChapterSummary {
   chapterOrder      Int?
 
   // Generation metadata
-  provider          String?
-  model             String?
-  promptVersion     String?
-  temperature       Float?
-  maxTokens         Int?
-  inputTokens       Int?
-  outputTokens      Int?
-  latencyMs         Int?
-  qualityScore      Float?
+  provider      String?
+  model         String?
+  promptVersion String?
+  temperature   Float?
+  maxTokens     Int?
+  inputTokens   Int?
+  outputTokens  Int?
+  latencyMs     Int?
+  qualityScore  Float?
 
   // Lifecycle / diagnostics
-  status            String   @default("active") // active | stale | archived | failed
-  errorCode         String?
-  errorDetail       String?
-  isLatest          Boolean  @default(true)
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  status      String   @default("active") // active | stale | archived | failed
+  errorCode   String?
+  errorDetail String?
+  isLatest    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  novel             Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  volume            Volume   @relation(fields: [volumeId], references: [id], onDelete: Cascade)
-  chapter           Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  novel   Novel   @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  volume  Volume  @relation(fields: [volumeId], references: [id], onDelete: Cascade)
+  chapter Chapter @relation(fields: [chapterId], references: [id], onDelete: Cascade)
 
   @@unique([chapterId, sourceContentHash, summaryType])
   @@index([chapterId, isLatest])
@@ -347,44 +483,44 @@ model ChapterSummary {
 }
 
 model NarrativeSummary {
-  id                  String   @id @default(cuid())
-  novelId             String
-  volumeId            String?
+  id       String  @id @default(cuid())
+  novelId  String
+  volumeId String?
 
   // Aggregate layer: volume or novel
-  level               String   @default("novel") // volume | novel
-  title               String?
-  summaryText         String
-  keyFacts            String   @default("[]") // JSON array
-  unresolvedThreads   String   @default("[]") // JSON array
-  styleGuide          String   @default("[]") // JSON array
-  hardConstraints     String   @default("[]") // JSON array
-  coverageChapterIds  String   @default("[]") // JSON array
-  chapterRangeStart   Int?
-  chapterRangeEnd     Int?
-  sourceFingerprint   String
+  level              String  @default("novel") // volume | novel
+  title              String?
+  summaryText        String
+  keyFacts           String  @default("[]") // JSON array
+  unresolvedThreads  String  @default("[]") // JSON array
+  styleGuide         String  @default("[]") // JSON array
+  hardConstraints    String  @default("[]") // JSON array
+  coverageChapterIds String  @default("[]") // JSON array
+  chapterRangeStart  Int?
+  chapterRangeEnd    Int?
+  sourceFingerprint  String
 
   // Generation metadata
-  provider            String?
-  model               String?
-  promptVersion       String?
-  temperature         Float?
-  maxTokens           Int?
-  inputTokens         Int?
-  outputTokens        Int?
-  latencyMs           Int?
-  qualityScore        Float?
+  provider      String?
+  model         String?
+  promptVersion String?
+  temperature   Float?
+  maxTokens     Int?
+  inputTokens   Int?
+  outputTokens  Int?
+  latencyMs     Int?
+  qualityScore  Float?
 
   // Lifecycle / diagnostics
-  status              String   @default("active") // active | stale | archived | failed
-  errorCode           String?
-  errorDetail         String?
-  isLatest            Boolean  @default(true)
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  status      String   @default("active") // active | stale | archived | failed
+  errorCode   String?
+  errorDetail String?
+  isLatest    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  novel               Novel    @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  volume              Volume?  @relation(fields: [volumeId], references: [id], onDelete: Cascade)
+  novel  Novel   @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  volume Volume? @relation(fields: [volumeId], references: [id], onDelete: Cascade)
 
   @@unique([novelId, volumeId, level, sourceFingerprint])
   @@index([novelId, level, status, createdAt])

@@ -5,7 +5,7 @@
 
 ## 2. 备份格式规范 (Backup Format Specification)
 
-采用 **ZIP** 压缩包格式，扩展名为 `.nebak` (Novel Editor Backup)。
+采用 **ZIP** 压缩包格式，扩展名为 `.nebak` (CloudDream Novel Agent Backup)。
 文件结构如下：
 
 ```

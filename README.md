@@ -1,4 +1,4 @@
-﻿# 小说编辑器（Novel Editor）
+# CloudDream Novel Agent（云梦小说智能体）
 
 一个面向长篇创作的桌面写作工具，支持离线写作、结构化创作管理与 AI 辅助。
 下一版本迭代为Agent
@@ -8,10 +8,10 @@
 - 发布版本统一放在 GitHub 仓库的 `Releases` 页面：
   - https://github.com/XiongJL/Novel-Editor/releases
 - Windows：
-  - 安装版：`云梦小说编辑器-Setup-<version>.exe`
-  - 便携版：`云梦小说编辑器-Portable-<version>.exe`
+  - 安装版：`云梦小说智能体-Setup-<version>.exe`
+  - 便携版：`云梦小说智能体-Portable-<version>.exe`
 - macOS：
-  - 安装包：`云梦小说编辑器-mac-<version>.dmg`
+  - 安装包：`云梦小说智能体-mac-<version>.dmg`
 
 可直接在仓库顶部 `Releases` 或上方链接下载对应平台安装包。
 

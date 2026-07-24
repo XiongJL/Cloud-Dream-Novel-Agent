@@ -17,6 +17,9 @@ contextBridge.exposeInMainWorld('db', {
     deleteNovel: (novelId: string) => ipcRenderer.invoke('db:delete-novel', novelId),
     uploadNovelCover: (novelId: string) => ipcRenderer.invoke('db:upload-novel-cover', novelId),
     importNovelFile: () => ipcRenderer.invoke('db:import-novel-file'),
+    getAgentConversations: (novelId: string) => ipcRenderer.invoke('db:get-agent-conversations', novelId),
+    upsertAgentConversation: (conversation: any) => ipcRenderer.invoke('db:upsert-agent-conversation', conversation),
+    deleteAgentConversation: (conversationId: string) => ipcRenderer.invoke('db:delete-agent-conversation', conversationId),
 
     // Idea
     getIdeas: (novelId: string) => ipcRenderer.invoke('db:get-ideas', novelId),
@@ -162,5 +165,38 @@ contextBridge.exposeInMainWorld('automation', {
         const listener = (_event: unknown, payload: { method: string }) => callback(payload);
         ipcRenderer.on('automation:data-changed', listener);
         return () => ipcRenderer.removeListener('automation:data-changed', listener);
+    },
+})
+
+contextBridge.exposeInMainWorld('agent', {
+    health: () => ipcRenderer.invoke('agent:health'),
+    ensureReady: () => ipcRenderer.invoke('agent:ensure-ready'),
+    restart: () => ipcRenderer.invoke('agent:restart'),
+    roles: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.roles', params: payload ?? {}, context: payload?.context }),
+    chat: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.chat', params: payload, context: payload?.context }),
+    plan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.plan', params: payload, context: payload?.context }),
+    registerPlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.register_plan', params: payload, context: payload?.context }),
+    revisePlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.revise_plan', params: payload, context: payload?.context }),
+    executePlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.execute_plan', params: payload, context: payload?.context }),
+    retryRun: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.retry_run', params: payload, context: payload?.context }),
+    reviseDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.revise_draft', params: payload, context: payload?.context }),
+    regenerateBatch: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.regenerate_batch', params: payload, context: payload?.context }),
+    inspectSideEffect: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.inspect_side_effect', params: payload, context: payload?.context }),
+    reconcileSideEffect: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.reconcile_side_effect', params: payload, context: payload?.context }),
+    runStatus: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.run_status', params: payload, context: payload?.context }),
+    cancel: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.cancel', params: payload, context: payload?.context }),
+    submitApproval: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.submit_approval', params: payload, context: payload?.context }),
+    subscribeRun: (runId: string, options?: { afterSequence?: number }) =>
+        ipcRenderer.invoke('agent:subscribe-run', { runId, afterSequence: options?.afterSequence }),
+    unsubscribeRun: (runId: string) => ipcRenderer.invoke('agent:unsubscribe-run', { runId }),
+    onRunEvent: (callback: (event: any) => void) => {
+        const listener = (_event: unknown, payload: any) => callback(payload);
+        ipcRenderer.on('agent:run-event', listener);
+        return () => ipcRenderer.removeListener('agent:run-event', listener);
+    },
+    onRunDisconnected: (callback: (payload: { runId: string; message: string }) => void) => {
+        const listener = (_event: unknown, payload: { runId: string; message: string }) => callback(payload);
+        ipcRenderer.on('agent:run-disconnected', listener);
+        return () => ipcRenderer.removeListener('agent:run-disconnected', listener);
     },
 })

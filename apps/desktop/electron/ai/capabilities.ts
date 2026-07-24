@@ -2,6 +2,9 @@ import { db } from '@novel-editor/core';
 import * as searchIndex from '../search/searchIndex';
 import { AiActionError, normalizeAiError } from './errors';
 import { scheduleChapterSummaryRebuild } from './summary/chapterSummary';
+import type { AgentChapterScopeBuildPayload, ChapterScopeBundle } from '../../shared/agentChapterScope';
+import type { ContinueWritingContext } from './context/ContextBuilder';
+import type { ContinueWritingPayload } from './types';
 
 export type CapabilityPermission = 'read' | 'write' | 'destructive';
 export type CapabilityHandler = (payload?: unknown) => Promise<unknown>;
@@ -17,6 +20,8 @@ export interface CapabilityDefinition {
 }
 
 export interface CapabilityDeps {
+    buildChapterScopeContext: (payload: AgentChapterScopeBuildPayload) => Promise<ChapterScopeBundle>;
+    buildContinuationContext: (payload: ContinueWritingPayload) => Promise<ContinueWritingContext>;
     continueWriting: (payload: {
         locale?: string;
         mode?: 'new_chapter' | 'continue_chapter';
@@ -139,19 +144,48 @@ export function createCapabilityDefinitions(deps: CapabilityDeps): CapabilityDef
                 type: 'object',
                 properties: {
                     volumeId: { type: 'string' },
+                    offset: { type: 'number' },
+                    limit: { type: 'number' },
+                    includeContent: { type: 'boolean' },
                 },
                 required: ['volumeId'],
             },
             outputSchema: { type: 'array' },
             handler: async (payload) => {
-                const input = payload as { volumeId?: string };
+                const input = payload as { volumeId?: string; offset?: number; limit?: number; includeContent?: boolean };
                 if (!input?.volumeId) {
                     throw new AiActionError('INVALID_INPUT', 'volumeId is required');
                 }
-
+                const paginated = Number.isFinite(input.offset) || Number.isFinite(input.limit) || input.includeContent === false;
+                if (!paginated) {
+                    return db.chapter.findMany({
+                        where: { volumeId: input.volumeId },
+                        orderBy: { order: 'asc' },
+                    });
+                }
+                const offset = Math.max(0, Math.floor(input.offset ?? 0));
+                const limit = Math.max(1, Math.min(20, Math.floor(input.limit ?? 20)));
+                if (input.includeContent === false) {
+                    return db.chapter.findMany({
+                        where: { volumeId: input.volumeId },
+                        select: {
+                            id: true,
+                            volumeId: true,
+                            title: true,
+                            order: true,
+                            wordCount: true,
+                            updatedAt: true,
+                        },
+                        orderBy: { order: 'asc' },
+                        skip: offset,
+                        take: limit,
+                    });
+                }
                 return db.chapter.findMany({
                     where: { volumeId: input.volumeId },
                     orderBy: { order: 'asc' },
+                    skip: offset,
+                    take: limit,
                 });
             },
         },
@@ -220,6 +254,64 @@ export function createCapabilityDefinitions(deps: CapabilityDeps): CapabilityDef
                     include: { volume: { select: { novelId: true } } },
                 });
             },
+        },
+        {
+            actionId: 'chapter.scope_context.build',
+            title: 'Build chapter scope context',
+            description: 'Resolve an approved chapter scope and return an ordered, versioned context bundle.',
+            permission: 'read',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    scopeId: { type: 'string' },
+                    novelId: { type: 'string' },
+                    kind: {
+                        type: 'string',
+                        enum: ['current_chapter', 'selected_chapters', 'chapter_range', 'current_volume', 'novel'],
+                    },
+                    volumeId: { type: 'string' },
+                    chapterId: { type: 'string' },
+                    chapterIds: { type: 'array', items: { type: 'string' } },
+                    anchorChapterId: { type: 'string' },
+                    processingMode: { type: 'string', enum: ['detailed', 'batched'] },
+                    currentContent: { type: 'string' },
+                    goal: { type: 'string' },
+                    locale: { type: 'string' },
+                    batchSize: { type: 'number', minimum: 1, maximum: 10 },
+                    maxDetailedChapters: { type: 'number', minimum: 1, maximum: 20 },
+                    maxEstimatedTokens: { type: 'number', minimum: 4000, maximum: 200000 },
+                },
+                required: ['novelId'],
+            },
+            outputSchema: { type: 'object' },
+            handler: async (payload) => deps.buildChapterScopeContext(payload as AgentChapterScopeBuildPayload),
+        },
+        {
+            actionId: 'chapter.continuation_context.build',
+            title: 'Build continuation context',
+            description: 'Build the ordered, layered and versioned context used by chapter continuation.',
+            permission: 'read',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    novelId: { type: 'string' },
+                    chapterId: { type: 'string' },
+                    currentContent: { type: 'string' },
+                    ideaIds: { type: 'array', items: { type: 'string' } },
+                    contextChapterCount: { type: 'number', minimum: 1, maximum: 20 },
+                    recentRawChapterCount: { type: 'number', minimum: 1, maximum: 3 },
+                    targetLength: { type: 'number', minimum: 100 },
+                    style: { type: 'string' },
+                    tone: { type: 'string' },
+                    pace: { type: 'string' },
+                    userIntent: { type: 'string' },
+                    currentLocation: { type: 'string' },
+                    locale: { type: 'string' },
+                },
+                required: ['novelId', 'chapterId'],
+            },
+            outputSchema: { type: 'object' },
+            handler: async (payload) => deps.buildContinuationContext(payload as ContinueWritingPayload),
         },
         {
             actionId: 'chapter.save',

@@ -80,6 +80,34 @@ if ((generateResult.status ?? 1) !== 0) {
     process.exit(generateResult.status ?? 1);
 }
 
+const fallbackGeneratedClientDir = path.join(packageRoot, 'node_modules', '.prisma', 'client');
+const requiredClientFiles = [
+    'default.js',
+    'edge.js',
+    'index-browser.js',
+    'index.js',
+    'package.json',
+];
+
+if (!fs.existsSync(path.join(generatedClientDir, 'index.js')) && fs.existsSync(fallbackGeneratedClientDir)) {
+    if (!fs.existsSync(generatedClientDir)) {
+        fs.mkdirSync(generatedClientDir, { recursive: true });
+    }
+    for (const file of requiredClientFiles) {
+        const source = path.join(fallbackGeneratedClientDir, file);
+        const target = path.join(generatedClientDir, file);
+        if (fs.existsSync(source)) {
+            fs.copyFileSync(source, target);
+        }
+    }
+    const fallbackDenoDir = path.join(fallbackGeneratedClientDir, 'deno');
+    const generatedDenoDir = path.join(generatedClientDir, 'deno');
+    if (fs.existsSync(fallbackDenoDir) && !fs.existsSync(generatedDenoDir)) {
+        fs.cpSync(fallbackDenoDir, generatedDenoDir, { recursive: true });
+    }
+    console.log(`[Prisma Generate] Restored JS client files from ${fallbackGeneratedClientDir}`);
+}
+
 const diffResult = spawnSync(
     process.execPath,
     [prismaCliPath, 'migrate', 'diff', '--from-empty', '--to-schema-datamodel', schemaPath, '--script'],

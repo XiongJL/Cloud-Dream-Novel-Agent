@@ -4,12 +4,63 @@ import type {
     CreativeAssetsDraftValidationResult,
     PromptPreviewResult,
 } from '../ai/types';
+import type {
+    DraftBatchChildRecord,
+    DraftBatchCommittedChapter,
+    DraftBatchCommitPrefixInput,
+    DraftBatchCreateInput,
+    DraftBatchInspectReconciliationInput,
+    DraftBatchListFilters,
+    DraftBatchMarkFailedInput,
+    DraftBatchPrepareRegenerationInput,
+    DraftBatchReconcileUnknownInput,
+    DraftBatchReconciliationInspection,
+    DraftBatchRecord,
+    DraftBatchUndoInput,
+} from '../../shared/draftBatch';
+import type { DraftWritebackRecord } from '../../shared/draftWriteback';
+import type {
+    AgentArtifactReviewRecord,
+    AgentRevisionTask,
+    ArtifactReviewSubmitInput,
+    ArtifactReviewSubmitResult,
+    ExpertReportPayload,
+    RevisionTaskCreatePlanInput,
+    RevisionTaskCreatePlanResult,
+    RevisionTaskListFilters,
+    RevisionTaskUpdateStatusInput,
+} from '../../shared/expertReport';
+
+export type {
+    DraftBatchChildRecord,
+    DraftBatchCommittedChapter,
+    DraftBatchCommitPrefixInput,
+    DraftBatchCreateInput,
+    DraftBatchInspectReconciliationInput,
+    DraftBatchListFilters,
+    DraftBatchMarkFailedInput,
+    DraftBatchPrepareRegenerationInput,
+    DraftBatchReconcileUnknownInput,
+    DraftBatchReconciliationInspection,
+    DraftBatchRecord,
+    DraftBatchUndoInput,
+    DraftWritebackRecord,
+    AgentArtifactReviewRecord,
+    AgentRevisionTask,
+    ArtifactReviewSubmitInput,
+    ArtifactReviewSubmitResult,
+    ExpertReportPayload,
+    RevisionTaskCreatePlanInput,
+    RevisionTaskCreatePlanResult,
+    RevisionTaskListFilters,
+    RevisionTaskUpdateStatusInput,
+};
 
 export type AutomationWorkspace = 'ai-workbench' | 'chapter-editor';
 export type AutomationDraftType = 'creative-assets' | 'chapter-draft' | 'outline-draft';
 export type AutomationDraftSource = 'internal-ai' | 'external-cli';
 export type AutomationDraftOrigin = 'codex' | 'claude-code' | 'openclaw' | 'desktop-ui' | 'mcp-bridge' | 'unknown';
-export type AutomationDraftStatus = 'draft' | 'committed' | 'discarded' | 'failed';
+export type AutomationDraftStatus = 'draft' | 'stale' | 'committed' | 'discarded' | 'failed';
 
 export interface CreativeDraftSelection {
     plotLines: boolean[];
@@ -32,6 +83,10 @@ export interface ChapterDraftPayload {
         issues: string[];
     };
     warnings?: string[];
+    narrativeStateDelta?: import('../../shared/draftBatch').NarrativeStateDelta;
+    contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
+    contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
+    sourceSnapshot?: import('../../shared/draftBatch').DraftBatchSourceSnapshot;
 }
 
 export interface DraftSessionRecord {
@@ -42,6 +97,12 @@ export interface DraftSessionRecord {
     origin: AutomationDraftOrigin;
     novelId: string;
     chapterId?: string;
+    draftBatchId?: string;
+    childIndex?: number;
+    generationRevision?: number;
+    dependsOnDraftSessionId?: string;
+    revisionOfDraftSessionId?: string;
+    reviewRequestId?: string;
     status: AutomationDraftStatus;
     payload: CreativeAssetsDraft | ChapterDraftPayload;
     selection?: CreativeDraftSelection;
@@ -50,12 +111,14 @@ export interface DraftSessionRecord {
     version: number;
     createdAt: string;
     updatedAt: string;
+    writebacks?: DraftWritebackRecord[];
 }
 
 export interface AutomationInvokeContext {
     source: 'renderer' | 'http';
     origin?: AutomationDraftOrigin;
     requestId?: string;
+    signal?: AbortSignal;
 }
 
 export interface AutomationErrorShape {
@@ -73,6 +136,8 @@ export interface AutomationEnvelope<T = unknown> {
 
 export interface DraftListFilters {
     novelId?: string;
+    draftBatchId?: string;
+    includeBatchChildren?: boolean;
     workspace?: AutomationWorkspace;
     type?: AutomationDraftType;
     status?: AutomationDraftStatus;
@@ -89,4 +154,25 @@ export interface DraftCommitResponse {
     validation?: CreativeAssetsDraftValidationResult;
     confirmResult?: ConfirmCreativeAssetsResult;
     saveResult?: unknown;
+}
+
+export interface DraftBatchCommitPrefixResponse {
+    batch: DraftBatchRecord;
+    sessions: DraftSessionRecord[];
+    chapters: DraftBatchCommittedChapter[];
+    committedPrefixLength: number;
+    insertionMode: import('../../shared/draftBatch').DraftBatchInsertionMode;
+    writeback?: DraftWritebackRecord;
+}
+
+export interface DraftUndoResponse {
+    session?: DraftSessionRecord;
+    batch?: DraftBatchRecord;
+    writeback: DraftWritebackRecord;
+}
+
+export interface DraftBatchPrepareRegenerationResponse {
+    batch: DraftBatchRecord;
+    fromChildIndex: number;
+    preservedDrafts: DraftSessionRecord[];
 }

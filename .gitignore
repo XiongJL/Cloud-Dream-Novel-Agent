@@ -21,6 +21,17 @@ pnpm-debug.log*
 .env
 .env.local
 .env.*.local
+.venv/
+agent_runtime/.venv/
+/agent_runtime/.codex-debug*/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
 target
 
 # SQLite database
@@ -36,3 +47,22 @@ release*/
 !docs/
 !docs/releases/
 !docs/releases/*.md
+
+# Local AI assistant state
+/.agent/
+/.agents/
+/.claude/
+/.codex-tmp/
+
+# Local browser/test output
+/.playwright-cli/
+/apps/desktop/.playwright-cli/
+/apps/desktop/output/
+
+# Local package inspection artifacts
+/package/
+/*.tgz
+
+# Private Markdown notes (never commit these)
+*.local.md
+*.private.md

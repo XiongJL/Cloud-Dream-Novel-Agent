@@ -1,4 +1,4 @@
-﻿import { app, BrowserWindow, ipcMain, dialog, nativeImage, protocol, net, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, nativeImage, protocol, net, session } from 'electron'
 import { initDb, db, ensureDbSchema } from '@novel-editor/core'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -14,6 +14,8 @@ import { formatAiErrorForDisplay, normalizeAiError } from './ai/errors'
 import { devLog, devLogError, initDevLogger, isDevDebugEnabled, redactForLog } from './debug/devLogger'
 import { AutomationService } from './automation/AutomationService'
 import { AutomationServer } from './automation/AutomationServer'
+import { PythonRuntimeClient } from './agent/PythonRuntimeClient'
+import { AgentConversationStore, type AgentConversationRecord } from './agent/AgentConversationStore'
 import { readNovelFileAsStructure } from './importers/novelImport'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -45,8 +47,9 @@ process.on('unhandledRejection', (reason, promise) => {
 
 let win: BrowserWindow | null
 let consolePatched = false
-const PACKAGED_APP_NAME = '云梦小说编辑器';
-const DEV_APP_NAME = 'Novel Editor Dev';
+const PACKAGED_APP_NAME = '云梦小说智能体';
+const LEGACY_PACKAGED_APP_NAME = '云梦小说编辑器';
+const DEV_APP_NAME = 'CloudDream Novel Agent Dev';
 
 function resolveWindowsAppUserModelId(): string {
     if (app.isPackaged && process.platform === 'win32') {
@@ -112,6 +115,25 @@ function migrateLegacyInstalledDataToUserData(): void {
 
     copyDirectoryContentsIfMissing(legacyDataDir, targetDataDir);
     console.log('[Main] Migrated legacy packaged data from exe/data to userData.');
+}
+
+function migrateLegacyProductDataToCurrentUserData(): void {
+    if (!app.isPackaged || isPortableMode()) {
+        return;
+    }
+
+    const appDataPath = app.getPath('appData');
+    const legacyDataDir = path.join(appDataPath, LEGACY_PACKAGED_APP_NAME);
+    const targetDataDir = app.getPath('userData');
+    const legacyDbPath = path.join(legacyDataDir, 'novel_editor.db');
+    const targetDbPath = path.join(targetDataDir, 'novel_editor.db');
+
+    if (!fs.existsSync(legacyDbPath) || fs.existsSync(targetDbPath)) {
+        return;
+    }
+
+    copyDirectoryContentsIfMissing(legacyDataDir, targetDataDir);
+    console.log('[Main] Migrated legacy product data from old app name to current userData.');
 }
 
 function resolveWindowIcon(): string | undefined {
@@ -747,6 +769,33 @@ ipcMain.handle('db:get-volumes', async (_, novelId: string) => {
     }
 })
 
+ipcMain.handle('db:get-agent-conversations', async (_, novelId: string) => {
+    try {
+        return await agentConversationStore.list(novelId);
+    } catch (e) {
+        console.error('[Main] db:get-agent-conversations failed:', e);
+        throw e;
+    }
+});
+
+ipcMain.handle('db:upsert-agent-conversation', async (_, conversation: AgentConversationRecord) => {
+    try {
+        return await agentConversationStore.upsert(conversation);
+    } catch (e) {
+        console.error('[Main] db:upsert-agent-conversation failed:', e);
+        throw e;
+    }
+});
+
+ipcMain.handle('db:delete-agent-conversation', async (_, conversationId: string) => {
+    try {
+        return await agentConversationStore.delete(conversationId);
+    } catch (e) {
+        console.error('[Main] db:delete-agent-conversation failed:', e);
+        throw e;
+    }
+});
+
 ipcMain.handle('db:create-volume', async (_, { novelId, title }: { novelId: string, title: string }) => {
     try {
         const lastVol = await db.volume.findFirst({
@@ -1353,6 +1402,9 @@ const syncManager = new SyncManager();
 let aiService!: AiService;
 let automationService!: AutomationService;
 let automationServer: AutomationServer | null = null;
+let agentRuntimeClient: PythonRuntimeClient | null = null;
+const agentConversationStore = new AgentConversationStore(db);
+const agentRunSubscriptions = new Map<string, () => void>();
 
 async function refreshRagChapterIndex(chapterId: string, reason: string): Promise<void> {
     return refreshRagSourceIndex('chapter', chapterId, reason);
@@ -1767,11 +1819,32 @@ ipcMain.handle('automation:invoke', async (_, payload: { method: string; params?
             'chapter.create',
             'chapter.save',
             'creative_assets.generate_draft',
+            'creative_assets.revise_draft',
+            'creative_assets.validate_draft',
             'outline.generate_draft',
             'chapter.generate_draft',
+            'chapter.revise_draft',
             'draft.update',
             'draft.commit',
+            'draft.undo',
             'draft.discard',
+            'draft.batch.create',
+            'draft.batch.update_outline',
+            'draft.batch.approve_outline',
+            'draft.batch.attach_child',
+            'draft.batch.mark_stale_after',
+            'draft.batch.prepare_regeneration',
+            'draft.batch.mark_failed',
+            'draft.batch.reconcile_unknown',
+            'draft.batch.commit_prefix',
+            'draft.batch.undo',
+            'draft.batch.discard',
+            'artifact.review.submit',
+            'review.comment.save',
+            'review.comment.delete',
+            'review.comment.mark_sent',
+            'revision_task.create_plan',
+            'revision_task.update_status',
         ]);
         if (dataChangingMethods.has(payload.method)) {
             win?.webContents.send('automation:data-changed', { method: payload.method });
@@ -1787,6 +1860,88 @@ ipcMain.handle('automation:invoke', async (_, payload: { method: string; params?
         logAiIpcError('automation:invoke', payload, e);
         throw e;
     }
+});
+
+ipcMain.handle('agent:health', async () => {
+    if (!agentRuntimeClient) {
+        return { ok: false, code: 'AGENT_RUNTIME_NOT_INITIALIZED', message: 'Agent runtime client is not initialized' };
+    }
+    return agentRuntimeClient.health();
+});
+
+ipcMain.handle('agent:ensure-ready', async () => {
+    if (!agentRuntimeClient) {
+        return { ok: false, code: 'AGENT_RUNTIME_NOT_INITIALIZED', message: 'Agent runtime client is not initialized' };
+    }
+    return agentRuntimeClient.ensureReady();
+});
+
+ipcMain.handle('agent:restart', async () => {
+    if (!agentRuntimeClient) {
+        return { ok: false, code: 'AGENT_RUNTIME_NOT_INITIALIZED', message: 'Agent runtime client is not initialized' };
+    }
+    return agentRuntimeClient.restart();
+});
+
+ipcMain.handle('agent:invoke', async (_, payload: {
+    method: string;
+    params?: Record<string, unknown>;
+    context?: Record<string, unknown>;
+}) => {
+    if (!agentRuntimeClient) {
+        throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
+    }
+    return agentRuntimeClient.invoke({
+        requestId: randomUUID(),
+        method: payload.method,
+        params: payload.params || {},
+        context: payload.context || {},
+    });
+});
+
+ipcMain.handle('agent:subscribe-run', async (_, payload: { runId: string; afterSequence?: number }) => {
+    if (!agentRuntimeClient) {
+        throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
+    }
+    const runId = String(payload?.runId || '').trim();
+    if (!runId) {
+        throw Object.assign(new Error('runId is required'), { code: 'INVALID_INPUT' });
+    }
+    agentRunSubscriptions.get(runId)?.();
+    const unsubscribe = await agentRuntimeClient.subscribeRunEvents(
+        runId,
+        { afterSequence: payload.afterSequence },
+        (event) => {
+            devLog('INFO', 'Main.agent.runEvent', 'Agent run event', {
+                runId: event.runId,
+                sequence: event.sequence,
+                type: event.type,
+                toolName: event.toolName,
+                status: event.status,
+                payload: redactForLog(event.payload),
+            });
+            win?.webContents.send('agent:run-event', event);
+            if (['run_completed', 'run_failed', 'run_cancelled'].includes(event.type)) {
+                agentRunSubscriptions.get(runId)?.();
+                agentRunSubscriptions.delete(runId);
+            }
+        },
+        (disconnect) => {
+            devLog('WARN', 'Main.agent.runDisconnected', 'Agent run event stream disconnected', disconnect);
+            win?.webContents.send('agent:run-disconnected', disconnect);
+            agentRunSubscriptions.delete(runId);
+        },
+    );
+    agentRunSubscriptions.set(runId, unsubscribe);
+    return { ok: true };
+});
+
+ipcMain.handle('agent:unsubscribe-run', async (_, payload: { runId: string }) => {
+    const runId = String(payload?.runId || '').trim();
+    if (!runId) return { ok: true };
+    agentRunSubscriptions.get(runId)?.();
+    agentRunSubscriptions.delete(runId);
+    return { ok: true };
 });
 
 ipcMain.handle('sync:pull', async () => {
@@ -1815,7 +1970,7 @@ ipcMain.handle('backup:import', async (_, { filePath, password }: { filePath?: s
         if (!filePath) {
             const result = await dialog.showOpenDialog({
                 title: 'Import Backup',
-                filters: [{ name: 'Novel Editor Backup', extensions: ['nebak'] }],
+                filters: [{ name: 'CloudDream Novel Agent Backup', extensions: ['nebak'] }],
                 properties: ['openFile']
             });
             if (result.canceled || result.filePaths.length === 0) return { success: false, code: 'CANCELLED' };
@@ -2885,9 +3040,18 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+    for (const unsubscribe of agentRunSubscriptions.values()) {
+        unsubscribe();
+    }
+    agentRunSubscriptions.clear();
     if (automationServer) {
         void automationServer.stop().catch((error) => {
             console.error('[Main] Failed to stop automation server:', error);
+        });
+    }
+    if (agentRuntimeClient) {
+        void agentRuntimeClient.stop().catch((error) => {
+            console.error('[Main] Failed to stop agent runtime:', error);
         });
     }
 });
@@ -2920,6 +3084,15 @@ app.whenReady().then(async () => {
     patchDevConsoleLogging();
     console.log('[Main] App Ready. Starting DB Setup...');
     console.log('[Main] User Data Path:', app.getPath('userData'));
+
+    if (!aiDiagParse.command) {
+        agentRuntimeClient = new PythonRuntimeClient({
+            getUserDataPath: () => app.getPath('userData'),
+            getAutomationRuntimePath,
+            isPackaged: app.isPackaged,
+        });
+        agentRuntimeClient.prewarm();
+    }
 
     if (aiDiagParse.command && app.isPackaged) {
         console.error('[AI-Diag] --ai-diag is only available in development mode.');
@@ -2956,6 +3129,7 @@ app.whenReady().then(async () => {
     }
 
     migrateLegacyInstalledDataToUserData();
+    migrateLegacyProductDataToCurrentUserData();
 
     const dbPath = aiDiagParse.command?.dbPath
         ? path.resolve(aiDiagParse.command.dbPath)
@@ -3006,7 +3180,7 @@ app.whenReady().then(async () => {
                 console.error('[Main] Prisma binary NOT found at:', prismaPath);
             } else {
                 try {
-                    const command = `"${prismaPath}" db push --schema="${schemaPath}" --accept-data-loss`;
+                    const command = `"${prismaPath}" db push --schema="${schemaPath}" --accept-data-loss --skip-generate`;
                     console.log('[Main] Executing command:', command);
 
                     const output = execSync(command, {
@@ -3035,6 +3209,7 @@ app.whenReady().then(async () => {
         if (schemaApplied) {
             console.log('[Main] Bundled database schema applied successfully.');
         }
+        await agentConversationStore.ensureSchema();
     } catch (error) {
         console.error('[Main] Failed to ensure bundled database schema:', error);
         throw error;

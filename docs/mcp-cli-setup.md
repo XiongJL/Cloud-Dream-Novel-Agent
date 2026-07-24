@@ -1,4 +1,4 @@
-# Novel Editor MCP CLI 接入说明
+# CloudDream Novel Agent MCP CLI 接入说明
 
 本文档说明当前已经验证可用的本地 MCP 接入方式，适用于：
 
@@ -239,7 +239,7 @@ Get-Content "$env:TEMP\novel-editor-mcp.log" -Tail 200
   - `resources/list`
   - `resources/templates/list`
 
-当前 Novel Editor 这条链路主要使用 tools，不依赖 resources。
+当前 CloudDream Novel Agent 这条链路主要使用 tools，不依赖 resources。
 
 ## 故障排查
 

@@ -4,26 +4,38 @@
     | 'CONFLICT'
     | 'PROVIDER_AUTH'
     | 'PROVIDER_TIMEOUT'
+    | 'PROVIDER_RATE_LIMITED'
     | 'PROVIDER_UNAVAILABLE'
     | 'PROVIDER_FILTERED'
     | 'NETWORK_ERROR'
     | 'PERSISTENCE_ERROR'
+    | 'CANCELLED'
     | 'UNKNOWN';
 
 export class AiActionError extends Error {
     public readonly code: AiErrorCode;
     public readonly detail?: string;
+    public readonly details?: Record<string, unknown>;
 
-    constructor(code: AiErrorCode, message: string, detail?: string) {
+    constructor(
+        code: AiErrorCode,
+        message: string,
+        detail?: string,
+        details?: Record<string, unknown>,
+    ) {
         super(message);
         this.code = code;
         this.detail = detail;
+        this.details = details;
         this.name = 'AiActionError';
     }
 }
 
 function fromMessage(message: string): AiActionError {
     const text = message.toLowerCase();
+    if (text.includes('cancelled') || text.includes('canceled')) {
+        return new AiActionError('CANCELLED', message);
+    }
     if (text.includes('timed out') || text.includes('timeout') || text.includes('aborterror') || text.includes('aborted')) {
         return new AiActionError('PROVIDER_TIMEOUT', message);
     }
@@ -63,6 +75,8 @@ export function formatAiErrorForDisplay(code: AiErrorCode, fallback?: string): s
             return '模型鉴权失败，请检查 API Key 或权限。';
         case 'PROVIDER_TIMEOUT':
             return '模型请求超时，请稍后重试。';
+        case 'PROVIDER_RATE_LIMITED':
+            return '模型服务请求较多，请稍后重试。';
         case 'PROVIDER_UNAVAILABLE':
             return '模型暂不可用，请稍后重试或切换模型。';
         case 'PROVIDER_FILTERED':
@@ -71,6 +85,8 @@ export function formatAiErrorForDisplay(code: AiErrorCode, fallback?: string): s
             return '网络连接失败，请检查网络或代理设置。';
         case 'PERSISTENCE_ERROR':
             return '写入失败，数据未成功保存。';
+        case 'CANCELLED':
+            return '请求已取消。';
         case 'UNKNOWN':
         default:
             return fallback || '未知错误，请稍后重试。';

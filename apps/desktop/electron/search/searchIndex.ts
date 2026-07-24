@@ -243,7 +243,7 @@ export async function search(
         }[]>`
             SELECT entity_type, entity_id, chapter_id, novel_id, title, volume_title, content, chapter_order, volume_order, volume_id
             FROM search_index
-            WHERE novel_id = ${novelId} 
+            WHERE novel_id = ${novelId}
             AND (content LIKE ${likePattern} OR title LIKE ${likePattern} OR volume_title LIKE ${likePattern})
             ORDER BY volume_order ASC, chapter_order ASC
             LIMIT ${limit} OFFSET ${offset};

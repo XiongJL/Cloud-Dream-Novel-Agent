@@ -15,6 +15,7 @@ export interface RagAskPayload {
     currentLocation?: string;
     locale?: string;
     maxEvidenceItems?: number;
+    analysisScope?: 'current_chapter' | 'nearby_chapters' | 'volume_structure' | 'compare_two_paths';
     overrideUserPrompt?: string;
 }
 

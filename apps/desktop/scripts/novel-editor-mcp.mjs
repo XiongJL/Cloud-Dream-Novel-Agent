@@ -64,6 +64,7 @@ function resolveRuntimeCandidates() {
   if (explicitUserData) {
     candidates.push(path.join(explicitUserData, 'automation', 'runtime.json'));
   }
+  candidates.push(path.join(appData, '云梦小说智能体', 'automation', 'runtime.json'));
   candidates.push(path.join(appData, '云梦小说编辑器', 'automation', 'runtime.json'));
   candidates.push(path.join(appData, '@novel-editor', 'desktop-dev', 'automation', 'runtime.json'));
   return candidates;

@@ -9,6 +9,10 @@ import { McpCliProvider } from './providers/McpCliProvider';
 import {
     AiCapabilityCoverageResult,
     AiActionExecutePayload,
+    ChapterBeatGenerationPayload,
+    ChapterBeatGenerationResult,
+    NarrativeStateExtractionPayload,
+    NarrativeStateExtractionResult,
     ConfirmCreativeAssetsResult,
     CreativeAssetsDraftIssue,
     CreativeAssetsDraftValidationResult,
@@ -29,12 +33,25 @@ import {
     TitleCandidate,
     TitleGenerationPayload,
 } from './types';
+import { parseFirstJsonObject as parseJsonObject } from '../../shared/agentJson';
+import { createCreativeAssetEntitySnapshot } from '../automation/CreativeAssetsWriteback';
+import type { CreativeAssetWritebackEntitySnapshot } from '../../shared/draftWriteback';
 import { ContextBuilder } from './context/ContextBuilder';
+import {
+    AgentContextAssembler,
+    type AgentContextAssembly,
+    type AgentContextArtifact,
+    type AgentContextDiagnostics,
+    type AgentContextMessage,
+    type AgentContextSection,
+    type AgentConversationSummary,
+} from './context/AgentContextAssembler';
 import { NovelRagService } from './rag/NovelRagService';
 import type { RagAskPayload, RagAskResult } from './rag/types';
 import { buildVectorDocumentForSource, deleteRagVectorSource, getRagVectorChunkCount, rebuildRagVectorIndex, upsertRagChapterIndex, upsertRagSourceIndex } from './rag/vectorIndex';
 import type { RagEvidenceSourceType } from './rag/types';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
+import { filterNarrativeStateDeltaEvidence, normalizeNarrativeStateDelta } from '../../shared/narrativeState';
 
 const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 const DRAFT_MAX_FIELD_LENGTH = 2000;
@@ -119,6 +136,7 @@ const CAPABILITY_COVERAGE_BASELINE: Array<{
 const DEFAULT_AI_SETTINGS: AiSettings = {
     providerType: 'http',
     http: {
+        apiMode: 'chat-completions',
         baseUrl: '',
         apiKey: '',
         model: 'gpt-4.1-mini',
@@ -128,6 +146,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         imageWatermark: false,
         timeoutMs: 60000,
         maxTokens: 4096,
+        contextWindowTokens: 0,
         temperature: 0.7,
     },
     mcpCli: {
@@ -136,6 +155,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         workingDir: '',
         envJson: '{}',
         startupTimeoutMs: 60000,
+        contextWindowTokens: 0,
     },
     proxy: {
         mode: 'system',
@@ -249,6 +269,74 @@ function dedupeStrings(values: string[], maxCount: number): string[] {
     return output;
 }
 
+function collectAgentContextArtifacts(value: unknown): AgentContextArtifact[] {
+    if (!value || typeof value !== 'object') return [];
+    const context = value as Record<string, unknown>;
+    const runs = [
+        ...(context.activeRun && typeof context.activeRun === 'object' ? [context.activeRun] : []),
+        ...(Array.isArray(context.priorRuns) ? context.priorRuns : []),
+    ];
+    const byId = new Map<string, AgentContextArtifact>();
+    for (const runValue of runs) {
+        if (!runValue || typeof runValue !== 'object') continue;
+        const run = runValue as Record<string, unknown>;
+        for (const artifactValue of Array.isArray(run.artifacts) ? run.artifacts : []) {
+            if (!artifactValue || typeof artifactValue !== 'object') continue;
+            const artifact = artifactValue as Record<string, unknown>;
+            const artifactId = trimText(artifact.artifactId, 160);
+            if (!artifactId) continue;
+            byId.set(artifactId, {
+                artifactId,
+                ...(artifact.runId || run.runId ? { runId: trimText(artifact.runId || run.runId, 160) } : {}),
+                ...(artifact.type ? { type: trimText(artifact.type, 80) } : {}),
+                ...(artifact.title ? { title: trimText(artifact.title, 240) } : {}),
+                ...(artifact.status ? { status: trimText(artifact.status, 80) } : {}),
+                ...(artifact.summary ? { summary: trimText(artifact.summary, 4000) } : {}),
+                ...(artifact.content ? { content: trimText(artifact.content, 40_000) } : {}),
+                ...(artifact.reference && typeof artifact.reference === 'object'
+                    ? { reference: artifact.reference as Record<string, unknown> }
+                    : {}),
+                ...(artifact.metadata && typeof artifact.metadata === 'object'
+                    ? { metadata: artifact.metadata as Record<string, unknown> }
+                    : {}),
+                ...(artifact.createdAt ? { createdAt: trimText(artifact.createdAt, 80) } : {}),
+            });
+        }
+    }
+    return [...byId.values()];
+}
+
+function compactConversationArtifacts(value: unknown): Record<string, unknown> {
+    if (!value || typeof value !== 'object') return {};
+    const context = value as Record<string, unknown>;
+    const compactRun = (runValue: unknown): unknown => {
+        if (!runValue || typeof runValue !== 'object') return runValue;
+        const run = runValue as Record<string, unknown>;
+        return {
+            ...run,
+            artifacts: (Array.isArray(run.artifacts) ? run.artifacts : []).flatMap((artifactValue) => {
+                if (!artifactValue || typeof artifactValue !== 'object') return [];
+                const artifact = artifactValue as Record<string, unknown>;
+                return [{
+                    artifactId: artifact.artifactId,
+                    runId: artifact.runId || run.runId,
+                    type: artifact.type,
+                    title: artifact.title,
+                    status: artifact.status,
+                    summary: trimText(artifact.summary, 800),
+                    reference: artifact.reference,
+                    createdAt: artifact.createdAt,
+                }];
+            }),
+        };
+    };
+    return {
+        ...context,
+        activeRun: compactRun(context.activeRun),
+        priorRuns: Array.isArray(context.priorRuns) ? context.priorRuns.map(compactRun) : [],
+    };
+}
+
 export class AiService {
     private readonly userDataPath: string;
     private readonly settingsFilePath: string;
@@ -258,6 +346,7 @@ export class AiService {
     private readonly capabilityDefinitions: CapabilityDefinition[];
     private readonly capabilityRegistry: Map<string, CapabilityHandler>;
     private readonly contextBuilder: ContextBuilder;
+    private readonly agentContextAssembler: AgentContextAssembler;
     private readonly novelRagService: NovelRagService;
 
     constructor(userDataPathGetter: () => string) {
@@ -267,8 +356,11 @@ export class AiService {
         this.settingsCache = this.loadSettings();
         this.mapImageStatsCache = this.loadMapImageStats();
         this.contextBuilder = new ContextBuilder();
+        this.agentContextAssembler = new AgentContextAssembler();
         this.novelRagService = new NovelRagService();
         this.capabilityDefinitions = createCapabilityDefinitions({
+            buildChapterScopeContext: (payload) => this.contextBuilder.buildForChapterScope(payload),
+            buildContinuationContext: (payload) => this.contextBuilder.buildForContinueWriting(payload),
             continueWriting: (payload) => this.continueWriting(payload),
             askNovel: (payload) => this.askNovel(payload),
             rebuildRagIndex: (novelId) => this.rebuildRagIndex(novelId),
@@ -572,6 +664,1438 @@ export class AiService {
         }
     }
 
+    private assembleAgentContext(input: {
+        operation: string;
+        systemPrompt: string;
+        outputTokens: number;
+        currentRequest: unknown;
+        history?: AgentContextMessage[];
+        sections?: AgentContextSection[];
+        persistentSummary?: AgentConversationSummary | Record<string, unknown> | null;
+        artifacts?: AgentContextArtifact[];
+    }): AgentContextAssembly {
+        const providerType = this.settingsCache.providerType;
+        const model = providerType === 'http' ? this.settingsCache.http.model : 'mcp-cli';
+        const contextWindowTokens = providerType === 'http'
+            ? this.settingsCache.http.contextWindowTokens
+            : this.settingsCache.mcpCli.contextWindowTokens;
+        const assembly = this.agentContextAssembler.assemble({
+            providerType,
+            model,
+            contextWindowTokens,
+            outputTokens: input.outputTokens,
+            systemPrompt: input.systemPrompt,
+            currentRequest: input.currentRequest,
+            history: input.history,
+            sections: input.sections,
+            persistentSummary: input.persistentSummary,
+            artifacts: input.artifacts,
+        });
+        devLog('INFO', 'AiService.agentContext.assembled', 'Agent model context assembled', {
+            operation: input.operation,
+            ...assembly.diagnostics,
+        });
+        return assembly;
+    }
+
+    private assembleAgentPrompt(input: {
+        operation: string;
+        systemPrompt: string;
+        outputTokens: number;
+        currentRequest: unknown;
+        history?: AgentContextMessage[];
+        sections?: AgentContextSection[];
+    }): string {
+        return this.assembleAgentContext(input).prompt;
+    }
+
+    private assembleDraftGenerationPrompt(input: {
+        operation: string;
+        systemPrompt: string;
+        outputTokens: number;
+        structured: PromptPreviewResult['structured'];
+        effectiveUserPrompt: string;
+        usedContext: string[];
+    }): string {
+        return this.assembleAgentPrompt({
+            operation: input.operation,
+            systemPrompt: input.systemPrompt,
+            outputTokens: input.outputTokens,
+            currentRequest: input.structured,
+            sections: [
+                {
+                    id: 'draft-generation-context',
+                    kind: 'artifact',
+                    priority: 'required',
+                    value: input.effectiveUserPrompt,
+                    sourceRef: 'context-builder',
+                },
+                {
+                    id: 'context-references',
+                    kind: 'metadata',
+                    priority: 'low',
+                    value: input.usedContext,
+                },
+            ],
+        });
+    }
+
+    async generateAgentChat(payload: {
+        message: string;
+        role: string;
+        locale?: string;
+        approvalMode?: string;
+        history?: Array<{ role: 'user' | 'assistant'; content: string; createdAt?: string; messageId?: string }>;
+        availableReadTools?: string[];
+        availableOperations?: Array<Record<string, unknown>>;
+        intentPreflight?: Record<string, unknown>;
+        selectionContext?: Record<string, unknown>;
+        toolObservations?: Array<{ toolName?: string; args?: unknown; result?: unknown; error?: string; ok?: boolean }>;
+        conversationContext?: Record<string, unknown>;
+        persistentSummary?: AgentConversationSummary | Record<string, unknown> | null;
+    }, signal?: AbortSignal): Promise<{
+        content: string;
+        shouldPlan: boolean;
+        needsClarification: boolean;
+        requestedOperations: string[];
+        deliverable?: string;
+        suggestedRole?: string;
+        confidence: number;
+        toolCalls: Array<{ name: string; args: Record<string, unknown> }>;
+        contextDiagnostics: AgentContextDiagnostics;
+        conversationSummary?: AgentConversationSummary;
+        contextCompression?: {
+            applied: true;
+            model: string;
+            contextWindowTokens: number;
+            inputBudgetTokens: number;
+            estimatedInputTokens: number;
+            historyMessagesTotal: number;
+            historyMessagesKept: number;
+            historyMessagesSummarized: number;
+            historyMessagesOmitted: number;
+            historyMessagesCompacted: number;
+            persistentSummaryRevision: number;
+            persistentSummaryMessageCount: number;
+            recalledMessageCount: number;
+            recalledArtifactCount: number;
+            compressedSectionIds: string[];
+            omittedSectionIds: string[];
+        };
+    }> {
+        const message = trimText(payload.message, 8000);
+        if (!message) throw new AiActionError('INVALID_INPUT', 'message is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const roleLabels: Record<string, string> = {
+            team: isZh ? '创作团队统筹' : 'creative team supervisor',
+            writer: isZh ? '小说作者' : 'novel writer',
+            editor: isZh ? '小说编辑' : 'novel editor',
+            reader: isZh ? '普通读者评审' : 'reader reviewer',
+            worldbuilding: isZh ? '世界观编辑' : 'worldbuilding editor',
+            research_rag: isZh ? '考据与证据整理员' : 'research assistant',
+        };
+        const role = roleLabels[payload.role] || roleLabels.team;
+        const history = (payload.history || []).map((item) => ({
+            role: item.role,
+            content: String(item.content || '').trim(),
+            ...(item.createdAt ? { createdAt: String(item.createdAt) } : {}),
+            ...(item.messageId ? { messageId: String(item.messageId) } : {}),
+        })).filter((item) => item.content);
+        const availableReadTools = dedupeStrings(payload.availableReadTools || [], 20);
+        const availableOperations = Array.isArray(payload.availableOperations) ? payload.availableOperations.slice(0, 30) : [];
+        const availableOperationIds = new Set(availableOperations.flatMap((item) => (
+            typeof item?.id === 'string' ? [item.id] : []
+        )));
+        const toolObservations = (payload.toolObservations || []).map((item) => ({
+            toolName: trimText(item.toolName, 80),
+            args: item.args,
+            result: item.result ?? null,
+            error: trimText(item.error, 1000),
+            ok: item.ok !== false,
+        }));
+        const rawSelection = payload.selectionContext && typeof payload.selectionContext === 'object'
+            ? payload.selectionContext
+            : {};
+        const rawChapterScope = rawSelection.chapterScope && typeof rawSelection.chapterScope === 'object'
+            ? rawSelection.chapterScope as Record<string, unknown>
+            : null;
+        const selectionIdentity = {
+            novelId: trimText(rawSelection.novelId, 160),
+            novelTitle: trimText(rawSelection.novelTitle, 300),
+            volumeId: trimText(rawSelection.volumeId, 160),
+            chapterId: trimText(rawSelection.chapterId, 160),
+            chapterTitle: trimText(rawSelection.chapterTitle, 300),
+            ...(rawChapterScope ? {
+                chapterScope: {
+                    kind: trimText(rawChapterScope.kind, 40),
+                    volumeId: trimText(rawChapterScope.volumeId, 160),
+                    chapterIds: dedupeStrings(Array.isArray(rawChapterScope.chapterIds) ? rawChapterScope.chapterIds : [], 20),
+                    anchorChapterId: trimText(rawChapterScope.anchorChapterId, 160),
+                    processingMode: trimText(rawChapterScope.processingMode, 20),
+                    experts: dedupeStrings(Array.isArray(rawChapterScope.experts) ? rawChapterScope.experts : [], 4),
+                },
+            } : {}),
+        };
+        const currentEditorContent = trimText(rawSelection.currentContent, 120000);
+        const systemPrompt = isZh
+            ? [
+                `你是云梦小说智能体中的${role}。`,
+                '自然、具体地回答创作问题。只有 ToolObservations 或 CurrentEditorContent 中存在结果时，才能声称已经读取对应的项目内容。',
+                'PersistentSummary 是带来源 ID 的会话压缩投影，RecalledMessages/RecalledArtifacts 是按引用召回的原来源摘录；优先采用召回原文与工具证据，不得把旧助手结论当成项目事实。',
+                '判断用户是在普通讨论，还是提出了需要读取项目上下文、检索、生成草稿或修改数据的明确任务。',
+                'SelectionContext 是当前编辑器显式选中的项目范围。存在 chapterId 时，“这篇文章”“本章”“当前章”等指代必须直接绑定该章节，不得再次询问用户选择章节，也不得为定位它调用 novel.list、volume.list 或 chapter.list。需要持久化章节资料时直接使用该 chapterId 调用 chapter.get；CurrentEditorContent 是用户当前可见正文，优先于数据库中的旧正文。',
+                '你可以从 AvailableReadTools 主动选择只读工具。回答依赖项目事实且 ToolObservations 不足时，先返回 toolCalls；每轮最多 3 个，不得调用名单外工具。',
+                '仅当 SelectionContext 没有可用目标，或用户明确要求跨章节、当前卷或全书范围时，才用 `volume.list` 发现真实 volumeId/chapterId；`chapter.list` 需要真实 volumeId，`chapter.get` 需要一个真实 chapterId。禁止虚构 ALL、ALL_IF_SUPPORTED 等占位 ID。',
+                '收到 ToolObservations 后先综合结果；信息仍不足可继续调用只读工具，否则给出回答并将 toolCalls 设为空数组。',
+                '从 AvailableOperations 中选择有序的 requestedOperations；复合任务必须保留用户要求的先后顺序，不得创造 Operation ID。',
+                'requestedOperations 只包含用户当前明确要求执行的动作。问题、缺口、建议和可能的后续步骤不是执行授权：“检查需要补充说明之处”只请求审核，不请求生成素材；“给出润色建议”不请求改写；“评估续写准备度”不请求续写。只有用户明确要求起草、生成、续写或改写时，才选择 draft_write Operation。',
+                'Role 只决定分析视角、能力范围和默认负责人，不得改变用户请求的 Operation、deliverable 或副作用等级。世界观角色下的只读检查仍然只能建议 report，不得因为角色擅长设定而追加 creative_asset.draft。',
+                '尊重否定和交互约束。用户说“不要生成”“先别改”“只讨论”时，不得选择对应草稿 Operation；如果用户明确说“先检查，再起草”，则保留两个有序 Operation。',
+                '同时建议 deliverable（none、report、expert_report、chapter_draft、chapter_draft_batch、creative_assets_draft）和 suggestedRole；结构化专家审核使用 expert_report，多章连续续写使用 chapter_draft_batch。这些只是语义建议，Runtime 会重新校验。',
+                '只返回严格 JSON：{"content":"回复或当前意图","shouldPlan":true或false,"needsClarification":true或false,"requestedOperations":["chapter.consistency_review"],"deliverable":"report","suggestedRole":"editor","confidence":0.9,"toolCalls":[{"name":"plotline.list","args":{}}]}。',
+                '项目中已有的大纲、章节、角色、设定和当前进度属于执行阶段可通过工具读取的信息；不要要求用户重复提供，也不要为读取这些信息而澄清，直接设置 shouldPlan=true。',
+                '只有缺少无法通过项目工具获得、且会实质改变目标的用户偏好或创作决策时，才提出一个聚焦的澄清问题，设置 needsClarification=true 且 shouldPlan=false。',
+                '在用户回答澄清问题之前不得生成计划；信息足以形成计划时，设置 needsClarification=false。',
+                '明确且信息充分的任务 shouldPlan=true；寒暄、能力咨询和无需项目数据的轻量讨论 shouldPlan=false。',
+            ].join(' ')
+            : [
+                `You are the ${role} inside CloudDream Novel Agent.`,
+                'Answer naturally and specifically. Claim to have read project data only when ToolObservations or CurrentEditorContent contain the corresponding material.',
+                'PersistentSummary is a traceable conversation projection. Prefer RecalledMessages, RecalledArtifacts, and tool evidence over summarized assistant outcomes, which are not project facts.',
+                'SelectionContext is the explicit editor selection. When it includes chapterId, references such as "this article", "this chapter", or "current chapter" bind to it. Do not ask the user to select the chapter again and do not call novel.list, volume.list, or chapter.list merely to locate it. Use chapter.get with that exact ID when persisted data is needed. CurrentEditorContent is the visible editor text and takes precedence over an older saved body.',
+                'When an answer depends on project facts and observations are insufficient, choose up to three tools from AvailableReadTools. After observations arrive, continue reading or answer with an empty toolCalls array.',
+                'Use `volume.list` to discover IDs only when SelectionContext has no usable target or the user explicitly requests a multi-chapter, volume, or novel scope. `chapter.list` requires a real volumeId and `chapter.get` requires one real chapterId. Never invent placeholder IDs such as ALL or ALL_IF_SUPPORTED.',
+                'Select ordered requestedOperations only from AvailableOperations. Preserve the requested order for compound tasks and never invent operation IDs.',
+                'Include only actions the user explicitly asks to perform now. Findings, gaps, advice, and plausible next steps are not authorization. A request to identify missing explanations is review-only; polishing advice is not a rewrite; continuation readiness is not continuation. Select a draft_write operation only when the user explicitly requests drafting, generation, continuation, or rewriting.',
+                'Role affects perspective, capability scope, and default ownership only. It must not change the requested operations, deliverable, or effect level. A read-only review remains read-only in the worldbuilding role.',
+                'Respect negation and interaction constraints such as "do not generate", "do not rewrite", and "just discuss". Preserve both operations only when the user explicitly requests an ordered compound task such as review first, then draft.',
+                'Suggest deliverable, suggestedRole, and confidence. They are untrusted semantic hints that the Runtime validates.',
+                'Return strict JSON only: {"content":"reply or current intent","shouldPlan":boolean,"needsClarification":boolean,"requestedOperations":["chapter.consistency_review"],"deliverable":"report","suggestedRole":"editor","confidence":0.9,"toolCalls":[{"name":"plotline.list","args":{}}]}.',
+                'Existing outlines, chapters, characters, lore, and project progress are available to approved execution tools. Do not ask the user to repeat them; set shouldPlan=true so the plan can read them.',
+                'Ask one focused clarification question only when a user preference or creative decision unavailable from project tools would materially change the goal.',
+                'Do not propose a plan until the user answers. Set needsClarification=false once enough information is available.',
+                'Set shouldPlan=true only for sufficiently specified tasks that require project context, retrieval, draft generation, or data changes.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 1600);
+        const sections: AgentContextSection[] = [
+            {
+                id: 'available-read-tools',
+                kind: 'metadata',
+                priority: 'low',
+                value: availableReadTools,
+            },
+            {
+                id: 'available-operations',
+                kind: 'metadata',
+                priority: 'high',
+                value: availableOperations,
+            },
+        ];
+        if (payload.intentPreflight) {
+            sections.push({
+                id: 'intent-preflight',
+                kind: 'decision',
+                priority: 'required',
+                value: payload.intentPreflight,
+            });
+        }
+        if (selectionIdentity.novelId || selectionIdentity.volumeId || selectionIdentity.chapterId) {
+            sections.push({
+                id: 'current-selection',
+                kind: 'metadata',
+                priority: 'required',
+                value: selectionIdentity,
+                sourceRef: 'renderer-current-selection',
+            });
+        }
+        if (currentEditorContent) {
+            sections.push({
+                id: 'current-editor-content',
+                kind: 'retrieval',
+                priority: 'high',
+                value: currentEditorContent,
+                sourceRef: selectionIdentity.chapterId
+                    ? `chapter:${selectionIdentity.chapterId}:editor-buffer`
+                    : 'renderer-editor-buffer',
+                maxTokens: 12000,
+            });
+        }
+        if (toolObservations.length) {
+            sections.push({
+                id: 'tool-observations',
+                kind: 'tool',
+                priority: 'high',
+                value: toolObservations,
+                sourceRef: 'current-exploration-turn',
+            });
+        }
+        const contextArtifacts = collectAgentContextArtifacts(payload.conversationContext);
+        if (payload.conversationContext && Object.keys(payload.conversationContext).length) {
+            sections.push({
+                id: 'conversation-state',
+                kind: 'plan',
+                priority: 'high',
+                value: compactConversationArtifacts(payload.conversationContext),
+                sourceRef: 'persisted-agent-conversation',
+            });
+        }
+        const contextAssembly = this.assembleAgentContext({
+            operation: 'agent.generate_chat',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                message,
+                role: payload.role || 'team',
+                workMode: payload.approvalMode || 'review_required',
+                selection: selectionIdentity,
+            },
+            history,
+            sections,
+            persistentSummary: payload.persistentSummary,
+            artifacts: contextArtifacts,
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt: contextAssembly.prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.5),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        const content = trimText(parsed?.content, 12000) || trimText(response.text, 12000);
+        if (!content) throw new AiActionError('UNKNOWN', 'Agent chat returned empty content');
+        const toolCalls = Array.isArray(parsed?.toolCalls)
+            ? parsed.toolCalls.slice(0, 3).flatMap((item: unknown) => {
+                if (!item || typeof item !== 'object') return [];
+                const call = item as { name?: unknown; args?: unknown };
+                const name = trimText(call.name, 80);
+                if (!name || !availableReadTools.includes(name)) return [];
+                return [{
+                    name,
+                    args: call.args && typeof call.args === 'object' && !Array.isArray(call.args)
+                        ? call.args as Record<string, unknown>
+                        : {},
+                }];
+            })
+            : [];
+        const requestedOperations = Array.isArray(parsed?.requestedOperations)
+            ? parsed.requestedOperations.slice(0, 8).flatMap((item: unknown) => {
+                const operationId = trimText(item, 120);
+                return operationId && availableOperationIds.has(operationId) ? [operationId] : [];
+            })
+            : [];
+        const deliverable = ['none', 'report', 'expert_report', 'chapter_draft', 'chapter_draft_batch', 'creative_assets_draft'].includes(trimText(parsed?.deliverable, 40))
+            ? trimText(parsed?.deliverable, 40)
+            : undefined;
+        const suggestedRole = ['team', 'writer', 'editor', 'reader', 'worldbuilding', 'research_rag'].includes(trimText(parsed?.suggestedRole, 40))
+            ? trimText(parsed?.suggestedRole, 40)
+            : undefined;
+        const rawConfidence = typeof parsed?.confidence === 'number' ? parsed.confidence : 0.5;
+        const diagnostics = contextAssembly.diagnostics;
+        return {
+            content,
+            shouldPlan: parsed?.shouldPlan === true,
+            needsClarification: parsed?.needsClarification === true,
+            requestedOperations,
+            deliverable,
+            suggestedRole,
+            confidence: Math.max(0, Math.min(1, rawConfidence)),
+            toolCalls,
+            contextDiagnostics: diagnostics,
+            ...(contextAssembly.summaryUpdate ? { conversationSummary: contextAssembly.summaryUpdate } : {}),
+            ...(diagnostics.compressionApplied ? {
+                contextCompression: {
+                    applied: true as const,
+                    model: diagnostics.model,
+                    contextWindowTokens: diagnostics.contextWindowTokens,
+                    inputBudgetTokens: diagnostics.inputBudgetTokens,
+                    estimatedInputTokens: diagnostics.estimatedInputTokens,
+                    historyMessagesTotal: diagnostics.historyMessagesTotal,
+                    historyMessagesKept: diagnostics.historyMessagesKept,
+                    historyMessagesSummarized: diagnostics.historyMessagesSummarized,
+                    historyMessagesOmitted: diagnostics.historyMessagesOmitted,
+                    historyMessagesCompacted: diagnostics.historyMessagesCompacted,
+                    persistentSummaryRevision: diagnostics.persistentSummaryRevision,
+                    persistentSummaryMessageCount: diagnostics.persistentSummaryMessageCount,
+                    recalledMessageCount: diagnostics.recalledMessageIds.length,
+                    recalledArtifactCount: diagnostics.recalledArtifactIds.length,
+                    compressedSectionIds: diagnostics.compressedSectionIds,
+                    omittedSectionIds: diagnostics.omittedSectionIds,
+                },
+            } : {}),
+        };
+    }
+
+    async generateChapterBeats(payload: ChapterBeatGenerationPayload, signal?: AbortSignal): Promise<ChapterBeatGenerationResult> {
+        const novelId = trimText(payload.novelId, 160);
+        const chapterId = trimText(payload.chapterId, 160);
+        const goal = trimText(payload.goal, 4000);
+        const chapterCount = Math.max(1, Math.min(5, Math.trunc(Number(payload.chapterCount) || 0)));
+        if (!novelId || !chapterId || !goal || !Number.isFinite(Number(payload.chapterCount))) {
+            throw new AiActionError('INVALID_INPUT', 'novelId, chapterId, goal and chapterCount are required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const isRewrite = payload.taskMode === 'batch_rewrite';
+        const systemPrompt = isRewrite
+            ? (isZh
+                ? [
+                    '你是小说多章节改写节拍设计师。根据每个目标章节原文、共享范围上下文和用户目标，为明确选择的已有章节设计逐章修订节拍。',
+                    `必须返回严格 JSON，beats 必须恰好 ${chapterCount} 项，并与 TargetChapterIds 顺序一一对应。`,
+                    '每项字段为 title、chapterGoal、coreConflict、keyEvents、reveals、endingHook、targetWordCount。',
+                    '节拍必须说明该章要保留和强化的叙事功能，不得把改写任务变成新增后续章节，不得改变目标章节数量。',
+                    '只输出 JSON，不要输出 Markdown。',
+                ].join(' ')
+                : [
+                    'Design one rewrite beat for each explicitly selected existing chapter, in TargetChapterIds order.',
+                    `Return strict JSON with exactly ${chapterCount} beats. Do not turn rewrites into new continuation chapters.`,
+                    'Output JSON only.',
+                ].join(' '))
+            : isZh
+            ? [
+                '你是小说多章节节拍设计师。根据已有上下文和用户目标，为连续新增章节设计可执行节拍。',
+                `必须返回严格 JSON，beats 必须恰好 ${chapterCount} 项。`,
+                '每项字段为 title、chapterGoal、coreConflict、keyEvents、reveals、endingHook、targetWordCount。',
+                'keyEvents 和 reveals 必须是字符串数组；targetWordCount 为 100 到 50000 的整数。',
+                '各章节需要前后依赖、逐步推进，不得重复同一事件，不得虚构与上下文明显冲突的既有事实。',
+                '只输出 JSON，不要输出 Markdown。',
+            ].join(' ')
+            : [
+                'Design an ordered batch of executable chapter beats from the supplied novel context.',
+                `Return strict JSON with exactly ${chapterCount} beats.`,
+                'Each beat requires title, chapterGoal, coreConflict, keyEvents, reveals, endingHook, and targetWordCount.',
+                'Output JSON only.',
+            ].join(' ');
+        const contextText = JSON.stringify(payload.context ?? {}).slice(0, 60000);
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt: `Goal=${goal}\n\nAnchorChapterId=${chapterId}\n\nTargetChapterIds=${JSON.stringify(payload.targetChapterIds || [])}\n\nContext=${contextText}`,
+            maxTokens: Math.min(this.settingsCache.http.maxTokens, 3200),
+            temperature: Math.min(this.settingsCache.http.temperature, 0.55),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        const rawBeats = Array.isArray(parsed?.beats) ? parsed.beats : [];
+        if (rawBeats.length !== chapterCount) {
+            throw new AiActionError('UNKNOWN', `Chapter beat generation returned ${rawBeats.length}/${chapterCount} beats`);
+        }
+        const beats = rawBeats.map((raw: any, index: number) => {
+            const title = trimText(raw?.title, 120);
+            const chapterGoal = trimText(raw?.chapterGoal, 800);
+            const coreConflict = trimText(raw?.coreConflict, 800);
+            const endingHook = trimText(raw?.endingHook, 800);
+            if (!title || !chapterGoal || !coreConflict || !endingHook) {
+                throw new AiActionError('UNKNOWN', `Chapter beat ${index + 1} is incomplete`);
+            }
+            const targetWordCount = Math.max(100, Math.min(50000, Math.trunc(Number(raw?.targetWordCount) || 2000)));
+            return {
+                title,
+                chapterGoal,
+                coreConflict,
+                keyEvents: Array.isArray(raw?.keyEvents)
+                    ? raw.keyEvents.map((item: unknown) => trimText(item, 500)).filter(Boolean).slice(0, 12)
+                    : [],
+                reveals: Array.isArray(raw?.reveals)
+                    ? raw.reveals.map((item: unknown) => trimText(item, 500)).filter(Boolean).slice(0, 12)
+                    : [],
+                endingHook,
+                targetWordCount,
+            };
+        });
+        return { beats };
+    }
+
+    async extractNarrativeState(
+        payload: NarrativeStateExtractionPayload,
+        signal?: AbortSignal,
+    ): Promise<NarrativeStateExtractionResult> {
+        const generatedText = trimText(payload.generatedText, 80000);
+        if (!generatedText) throw new AiActionError('INVALID_INPUT', 'generatedText is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const characters = Array.isArray(payload.characters) ? payload.characters.slice(0, 100) : [];
+        const items = Array.isArray(payload.items) ? payload.items.slice(0, 100) : [];
+        const systemPrompt = isZh
+            ? [
+                '你是小说章节状态增量提取器。只提取本章正文明确发生或明确揭示的变化，不做文学评价。',
+                '所有 evidenceExcerpt 必须是本章正文中的连续原文短句；没有直接原文证据的变化必须省略。',
+                'characterKey 和 itemKey 优先使用提供的实体 key；正文中新出现且没有登记 key 的实体使用正文中的明确名称。',
+                'knowledgeChanges 只记录角色在本章实际得知或明确遗忘的信息，不得把读者知道的信息自动算作角色知道。',
+                '关系变化必须是本章发生的信任、敌意、结盟、决裂等实际变化，普通对话不算变化。',
+                'resolvedConflicts/openedConflicts 也必须有正文证据，不得仅根据节拍推断已经完成。',
+                '只返回严格 JSON，不要 Markdown。',
+                '格式：{"characterLocations":[{"characterKey":"角色key或名称","location":"章末位置","evidenceExcerpt":"正文原句"}],"relationshipChanges":[{"sourceCharacterKey":"角色","targetCharacterKey":"角色","change":"变化","evidenceExcerpt":"正文原句"}],"knowledgeChanges":[{"characterKey":"角色","learned":["得知事实"],"forgotten":[],"evidenceExcerpt":"正文原句"}],"itemStates":[{"itemKey":"物品","state":"章末状态","holderKey":"可选持有者","location":"可选位置","evidenceExcerpt":"正文原句"}],"resolvedConflicts":[{"conflict":"已解决冲突","evidenceExcerpt":"正文原句"}],"openedConflicts":[{"conflict":"新增冲突","evidenceExcerpt":"正文原句"}],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Extract only explicit end-of-chapter narrative state changes from the supplied generated chapter.',
+                'Every evidenceExcerpt must be an exact contiguous quote from the chapter. Omit unsupported inferences.',
+                'Distinguish character knowledge from reader knowledge and report only actual relationship changes.',
+                'Return strict JSON with characterLocations, relationshipChanges, knowledgeChanges, itemStates, resolvedConflicts, openedConflicts, and warnings.',
+            ].join(' ');
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt: [
+                `KnownCharacters=${JSON.stringify(characters)}`,
+                `KnownItems=${JSON.stringify(items)}`,
+                `CurrentBeat=${JSON.stringify(payload.currentBeat || {}).slice(0, 8000)}`,
+                `PriorStateLedger=${JSON.stringify(payload.priorStateLedger || {}).slice(0, 16000)}`,
+                `GeneratedChapter=${generatedText}`,
+            ].join('\n\n'),
+            maxTokens: Math.min(this.settingsCache.http.maxTokens, 3200),
+            temperature: Math.min(this.settingsCache.http.temperature, 0.1),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed) throw new AiActionError('UNKNOWN', 'Narrative state extraction returned invalid JSON');
+        const normalized = normalizeNarrativeStateDelta(parsed);
+        const evidenced = filterNarrativeStateDeltaEvidence(normalized, generatedText);
+        const allowedCharacterKeys = new Set(characters.flatMap((item) => [item.key, item.name]).filter(Boolean));
+        const allowedItemKeys = new Set(items.flatMap((item) => [item.key, item.name]).filter(Boolean));
+        const characterIsGrounded = (key: string): boolean => allowedCharacterKeys.has(key) || generatedText.includes(key);
+        const itemIsGrounded = (key: string): boolean => allowedItemKeys.has(key) || generatedText.includes(key);
+        const delta = {
+            ...evidenced,
+            characterLocations: evidenced.characterLocations.filter((item) => characterIsGrounded(item.characterKey)),
+            relationshipChanges: evidenced.relationshipChanges.filter((item) => (
+                characterIsGrounded(item.sourceCharacterKey) && characterIsGrounded(item.targetCharacterKey)
+            )),
+            knowledgeChanges: evidenced.knowledgeChanges.filter((item) => characterIsGrounded(item.characterKey)),
+            itemStates: evidenced.itemStates.filter((item) => (
+                itemIsGrounded(item.itemKey) && (!item.holderKey || characterIsGrounded(item.holderKey))
+            )),
+        };
+        return { delta };
+    }
+
+    async generateAgentPlan(payload: {
+        goal: string;
+        role?: string;
+        locale?: string;
+        availableTools: string[];
+        availableToolchains?: Array<Record<string, unknown>>;
+        intentDecision?: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<{ title: string; deliverable?: string; steps: Array<{ agent: string; title: string; tools: string[]; toolchain?: Record<string, unknown> }> }> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const availableTools = dedupeStrings(payload.availableTools || [], 50);
+        const availableToolchains = Array.isArray(payload.availableToolchains) ? payload.availableToolchains.slice(0, 20) : [];
+        if (!availableTools.length) throw new AiActionError('INVALID_INPUT', 'availableTools is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说创作 Agent 的计划器，只负责拆解计划，不执行工具。',
+                '返回 1 到 8 个可审核步骤，每步指定一个 agent 和零到多个工具。',
+                'agent 只能是 supervisor、writer、editor、reader、worldbuilding、research_rag。',
+                'PreferredRole 不是 team 时，它是主视角和最终产出负责人；只在任务确有需要时加入辅助 agent，除非用户要求，否则不要加入 reader 评估。',
+                '必须声明 deliverable：普通分析为 report；带逐条 finding、证据与审批的作者/编辑/读者/世界观/考据/团队审核为 expert_report；单章正文续写或改写为 chapter_draft；连续生成多章为 chapter_draft_batch；大纲、剧情线、角色、世界观或创作素材的新增与修改为 creative_assets_draft。',
+                '草稿产物必须有且仅有一个生产者：优先选择能产生目标草稿的 AvailableToolchain；没有匹配链时，chapter_draft 才使用 chapter.generate_draft，creative_assets_draft 才使用 creative_assets.generate_draft。',
+                'tools 只能从 AvailableTools 中选择；不要添加写回正文步骤，草稿必须停在审核阶段。',
+                'AvailableToolchains 是经过校验的稳定流程。上下文装配、一致性审校、章节续写和创作素材生成等匹配任务应优先选择对应 Toolchain，不要重新拼装同一批原子 tools。',
+                'IntentDecision 是 Runtime 校验后的高优先级任务提示。严格保持 operations 顺序、deliverable 和建议 Toolchain；能力不可用时才回退到 AvailableTools。',
+                '使用 Toolchain 的步骤必须令 tools=[]，并填写 toolchain={"id":"稳定ID","version":"版本","input":{}}；不得猜测未列出的 ID 或版本。',
+                '只返回严格 JSON：{"title":"计划标题","deliverable":"report|expert_report|chapter_draft|chapter_draft_batch|creative_assets_draft","steps":[{"agent":"editor","title":"步骤","tools":[],"toolchain":{"id":"chapter.consistency_review","version":"1.0.0","input":{}}}]}。',
+            ].join(' ')
+            : [
+                'You plan tasks for a novel-writing agent. Plan only; do not execute tools.',
+                'Return 1-8 reviewable steps as strict JSON with title and steps.',
+                'Agents: supervisor, writer, editor, reader, worldbuilding, research_rag.',
+                'When PreferredRole is not team, keep it as the primary perspective and deliverable owner. Do not add reader evaluation unless the user requests it.',
+                'Declare deliverable as report, expert_report, chapter_draft, chapter_draft_batch, or creative_assets_draft. Use expert_report for structured expert findings and review. Use chapter_draft_batch for multi-chapter continuation. A draft deliverable must have exactly one producer.',
+                'Use only AvailableTools. Generated changes must stop at draft review and never write directly.',
+                'Prefer a matching AvailableToolchain for context assembly, consistency review, chapter continuation, or creative-asset drafting. A Toolchain step must have tools=[] and a listed id/version.',
+                'IntentDecision is a validated high-priority planning hint. Preserve operation order and deliverable, using suggested Toolchains when available.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 2400);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_plan',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                preferredRole: payload.role || 'team',
+                intentDecision: payload.intentDecision || null,
+            },
+            sections: [{
+                id: 'available-tools',
+                kind: 'metadata',
+                priority: 'high',
+                value: availableTools,
+            }, {
+                id: 'available-toolchains',
+                kind: 'metadata',
+                priority: 'high',
+                value: availableToolchains,
+            }, {
+                id: 'intent-decision',
+                kind: 'decision',
+                priority: payload.intentDecision ? 'required' : 'low',
+                value: payload.intentDecision || null,
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.35),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.steps)) {
+            throw new AiActionError('UNKNOWN', 'Agent planner did not return valid JSON steps');
+        }
+        return {
+            title: trimText(parsed.title, 120) || (isZh ? '创作任务计划' : 'Writing task plan'),
+            deliverable: trimText(parsed.deliverable, 40),
+            steps: parsed.steps,
+        };
+    }
+
+    async reviseAgentPlan(payload: {
+        goal: string;
+        revision: string;
+        role?: string;
+        locale?: string;
+        availableTools: string[];
+        availableToolchains?: Array<Record<string, unknown>>;
+        currentPlan: {
+            title: string;
+            deliverable?: string;
+            preferredRole?: string;
+            steps: Array<{ stepId: string; agent: string; title: string; tools: string[]; toolchain?: Record<string, unknown> }>;
+        };
+    }, signal?: AbortSignal): Promise<{ title: string; deliverable?: string; steps: Array<{ stepId?: string; agent: string; title: string; tools: string[]; toolchain?: Record<string, unknown> }> }> {
+        const goal = trimText(payload.goal, 12000);
+        const revision = trimText(payload.revision, 8000);
+        if (!goal || !revision) throw new AiActionError('INVALID_INPUT', 'goal and revision are required');
+        const availableTools = dedupeStrings(payload.availableTools || [], 50);
+        const availableToolchains = Array.isArray(payload.availableToolchains) ? payload.availableToolchains.slice(0, 20) : [];
+        if (!availableTools.length) throw new AiActionError('INVALID_INPUT', 'availableTools is required');
+        const currentSteps = Array.isArray(payload.currentPlan?.steps) ? payload.currentPlan.steps.slice(0, 8) : [];
+        if (!currentSteps.length) throw new AiActionError('INVALID_INPUT', 'currentPlan.steps is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说创作 Agent 的计划修订器，只修改结构化计划，不执行工具。',
+                '根据 Revision 精确增删、重排或修改步骤，不要忽略用户意见。',
+                '未改变的步骤保留原 stepId；新增步骤不要填写 stepId。',
+                'agent 只能是 supervisor、writer、editor、reader、worldbuilding、research_rag。',
+                'tools 只能从 AvailableTools 中选择；任何生成内容必须停在草稿审核，禁止直接写回。',
+                '保留仍适用的 Toolchain 调用；新选 Toolchain 只能来自 AvailableToolchains，且该步骤 tools 必须为空。',
+                '保留或按用户意见更新 currentPlan.deliverable；草稿产物必须保留对应的 generate_draft 工具。',
+                '只返回严格 JSON：{"title":"计划标题","deliverable":"report|expert_report|chapter_draft|chapter_draft_batch|creative_assets_draft","steps":[{"stepId":"可选原ID","agent":"editor","title":"步骤","tools":[]}]}。',
+            ].join(' ')
+            : [
+                'Revise a structured novel-agent plan without executing it.',
+                'Apply the revision precisely. Preserve stepId for unchanged steps and omit it for new steps.',
+                'Use only the allowed agents and AvailableTools. Generated changes must stop at draft review.',
+                'Return strict JSON with title and steps only.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 2400);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.revise_plan',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                revision,
+                preferredRole: payload.role || 'team',
+            },
+            sections: [
+                {
+                    id: 'current-plan',
+                    kind: 'plan',
+                    priority: 'required',
+                    value: { title: payload.currentPlan.title, deliverable: payload.currentPlan.deliverable, steps: currentSteps },
+                },
+                {
+                    id: 'available-tools',
+                    kind: 'metadata',
+                    priority: 'high',
+                    value: availableTools,
+                },
+                {
+                    id: 'available-toolchains',
+                    kind: 'metadata',
+                    priority: 'high',
+                    value: availableToolchains,
+                },
+            ],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.25),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.steps)) {
+            throw new AiActionError('UNKNOWN', 'Agent plan revision did not return valid JSON steps');
+        }
+        return {
+            title: trimText(parsed.title, 120) || payload.currentPlan.title,
+            deliverable: trimText(parsed.deliverable, 40),
+            steps: parsed.steps,
+        };
+    }
+
+    async generateAgentConsistencyReview(payload: {
+        goal: string;
+        locale?: string;
+        dimensions?: string[];
+        contextBundle: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.contextBundle || typeof payload.contextBundle !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'contextBundle is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说章节一致性审核器，只能依据 ContextBundle 中的章节与项目证据作判断。',
+                '分别检查人物行为与状态、情节线与时间顺序、世界规则、地点、物品和技能。',
+                '没有项目证据时不得把推测写成事实：evidence 必须为空，并在 uncertainty 中明确需要人工确认。',
+                '同一问题只输出一次。每条 evidence 只能引用 ContextBundle 中实际存在的来源，不得伪造 ID、标题或原文。',
+                '无法检查的维度放入 uncheckableDimensions，不要为了凑分数编造结论。',
+                '只返回一个严格 JSON 对象，不要 Markdown 或代码围栏。',
+                '格式：{"overallScore":0,"summary":"摘要","dimensions":[{"id":"character","label":"人物","score":0,"reason":"依据","checkable":true}],"issues":[{"issueId":"issue-1","type":"character_state","severity":"critical|high|medium|low|info","title":"问题","location":"章节位置","excerpt":"章节短引文","evidence":[{"sourceType":"character","sourceId":"可选","title":"来源","excerpt":"证据","confidence":0.8,"metadata":{}}],"recommendation":"建议","uncertainty":"不确定性"}],"uncheckableDimensions":[{"dimension":"维度","reason":"原因"}],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Review chapter consistency using only the supplied ContextBundle.',
+                'Check character state, plot and timeline, world rules, locations, items, and skills.',
+                'Never state an unsupported inference as fact. Leave evidence empty and explain uncertainty when project evidence is missing.',
+                'Deduplicate issues and list uncheckable dimensions explicitly.',
+                'Return one strict JSON object only, with overallScore, summary, dimensions, issues, uncheckableDimensions, and warnings.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4200);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_consistency_review',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                dimensions: Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [],
+            },
+            sections: [{
+                id: 'context-bundle',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.contextBundle,
+                sourceRef: 'chapter.context@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.2),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.issues)) {
+            throw new AiActionError('UNKNOWN', 'Consistency reviewer did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentWriterRangeRevisionPlan(payload: {
+        goal: string;
+        locale?: string;
+        dimensions?: string[];
+        scopeBundle: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.scopeBundle || typeof payload.scopeBundle !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'scopeBundle is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说作者的多章节修订规划器，只能依据 ChapterScopeBundle 中已批准范围、正文/摘要、项目资料和检索证据作判断。',
+                '评估文风漂移、场景强弱、章节作用、改写优先级和继续创作前的准备度；这是修订计划，不直接改写正文。',
+                'finding.chapterIds 和 rewriteOrder 只能使用 scope.chapterIds 中的真实 ID。evidence.sourceId 和 evidenceRefs 只能引用 bundle 中真实存在的来源。',
+                '不得伪造章节、引文、证据 ID 或已经发生的修改。证据不足时 evidence 与 evidenceRefs 置空，并在 uncertainty 中说明。',
+                'rewriteOrder 只列确有必要改写的章节，按优先级排序；continuationReadiness 说明继续写之前需要先处理什么。',
+                'recommendedRole 只能是 writer、editor、worldbuilding、research_rag。只返回严格 JSON 对象，不要 Markdown 或代码围栏。',
+                '格式：{"overallScore":0,"summary":"摘要","dimensions":[{"id":"style_drift","label":"文风稳定性","score":0,"reason":"依据","checkable":true}],"findings":[{"findingId":"finding-1","title":"修订项","summary":"判断","category":"style_drift|scene_strength|rewrite_priority|continuation_readiness|other","severity":"critical|high|medium|low|info","chapterIds":["真实章节ID"],"evidenceRefs":["真实来源ID"],"evidence":[{"sourceType":"chapter|character|plotline|rag","sourceId":"真实ID","title":"来源","excerpt":"短证据","confidence":0.8,"metadata":{}}],"recommendation":"可执行修订建议","recommendedRole":"writer|editor|worldbuilding|research_rag","uncertainty":"不确定性"}],"rewriteOrder":["真实章节ID"],"continuationReadiness":"续写准备判断","recommendations":["总体建议"],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Plan revisions for an approved multi-chapter range as a fiction writer using only the supplied ChapterScopeBundle.',
+                'Assess style drift, scene strength, chapter function, rewrite priority, and readiness for continued writing. Do not rewrite prose.',
+                'Use only real target chapter IDs and real evidence source IDs from the bundle. Never fabricate text, IDs, evidence, or completed changes.',
+                'Order only chapters that genuinely need rewriting and explain continuation readiness. Return one strict JSON object only.',
+            ].join(' ');
+        const scopedChapterCount = Array.isArray((payload.scopeBundle as any)?.scope?.chapterIds)
+            ? (payload.scopeBundle as any).scope.chapterIds.length
+            : 1;
+        const outputTokens = Math.min(
+            this.settingsCache.http.maxTokens,
+            Math.min(6000, Math.max(2800, 2200 + scopedChapterCount * 240)),
+        );
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_writer_range_revision_plan',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                dimensions: Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [],
+            },
+            sections: [{
+                id: 'chapter-scope-bundle',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.scopeBundle,
+                sourceRef: 'writer.range_revision_plan@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.2),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.findings)) {
+            throw new AiActionError('UNKNOWN', 'Writer revision planner did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentEditorRangeReview(payload: {
+        goal: string;
+        locale?: string;
+        dimensions?: string[];
+        scopeBundle: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.scopeBundle || typeof payload.scopeBundle !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'scopeBundle is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说编辑的多章节范围审核器，只能依据 ChapterScopeBundle 中已批准范围、正文/摘要、项目资料和检索证据作判断。',
+                '从结构、节奏、人物动机、文字质量和跨章连续性审核；只做编辑分析，不做读者体验、世界观专审或事实考据报告。',
+                'finding.chapterIds 只能使用 scope.chapterIds 中的真实 ID。evidence.sourceId 和 evidenceRefs 只能引用 chapters、entityContext、plotContext、narrativeSummaries 或 evidence 中真实存在的 ID。',
+                '不得伪造章节、引文、证据 ID 或已经发生的修改。证据不足时 evidence 与 evidenceRefs 置空，并在 uncertainty 中说明。',
+                '问题要去重并可执行。recommendedRole 只能是 writer、editor、worldbuilding、research_rag。',
+                '只返回严格 JSON 对象，不要 Markdown 或代码围栏。',
+                '格式：{"overallScore":0,"summary":"摘要","dimensions":[{"id":"structure","label":"结构","score":0,"reason":"依据","checkable":true}],"findings":[{"findingId":"finding-1","title":"问题","summary":"判断","category":"structure|pacing|motivation|prose|continuity|other","severity":"critical|high|medium|low|info","chapterIds":["真实章节ID"],"evidenceRefs":["真实来源ID"],"evidence":[{"sourceType":"chapter|character|plotline|rag","sourceId":"真实ID","title":"来源","excerpt":"短证据","confidence":0.8,"metadata":{}}],"recommendation":"修订建议","recommendedRole":"writer|editor|worldbuilding|research_rag","uncertainty":"不确定性"}],"recommendations":["总体建议"],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Review an approved multi-chapter range as a novel editor using only the supplied ChapterScopeBundle.',
+                'Assess structure, pacing, character motivation, prose quality, and cross-chapter continuity. Do not produce reader, worldbuilding, or fact-check reports.',
+                'Use only real target chapter IDs and real evidence source IDs from the bundle. Never fabricate text, IDs, evidence, or project changes.',
+                'Leave evidence empty and explain uncertainty when support is insufficient. Deduplicate findings and make recommendations actionable.',
+                'Return one strict JSON object with overallScore, summary, dimensions, findings, recommendations, and warnings.',
+            ].join(' ');
+        const scopedChapterCount = Array.isArray((payload.scopeBundle as any)?.scope?.chapterIds)
+            ? (payload.scopeBundle as any).scope.chapterIds.length
+            : 1;
+        const outputTokens = Math.min(
+            this.settingsCache.http.maxTokens,
+            Math.min(6000, Math.max(2800, 2200 + scopedChapterCount * 240)),
+        );
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_editor_range_review',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                dimensions: Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [],
+            },
+            sections: [{
+                id: 'chapter-scope-bundle',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.scopeBundle,
+                sourceRef: 'editor.range_review@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.2),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.findings)) {
+            throw new AiActionError('UNKNOWN', 'Editor range reviewer did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentReaderChapterEvaluation(payload: {
+        locale?: string;
+        chapter: {
+            chapterId?: string;
+            title?: string;
+            contentMode?: string;
+            content?: string;
+        };
+        priorReaderState?: string;
+        position?: { index?: number; count?: number };
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const chapterId = trimText(payload.chapter?.chapterId, 200);
+        const content = trimText(payload.chapter?.content, 80000);
+        if (!chapterId || !content) {
+            throw new AiActionError('INVALID_INPUT', 'chapter.chapterId and chapter.content are required');
+        }
+        const priorReaderState = trimText(payload.priorReaderState, 2000);
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是首次阅读小说的普通读者评估器，必须严格按章节顺序盲读。',
+                '你只能知道本次输入的当前章节，以及 priorReaderState 中前序章节留下的读者记忆。不得使用未来章节、世界观后台资料、人物卡、情节线、检索资料或其他专家结论。',
+                '不要把猜测当作事实；只评估当前章造成的困惑、情绪、悬念、沉浸感、弃读风险与追更动力。',
+                'findings 中 chapterIds、evidenceRefs 和 evidence.sourceId 只能使用当前 chapterId，evidence.sourceType 只能是 chapter。',
+                'readerStateSummary 必须是供下一章读者继承的简洁已知状态，只记录读者已看到的事实、未解疑问、情绪和期待，不得补入后台答案。',
+                '只返回严格 JSON 对象，不要 Markdown 或代码围栏。',
+                '格式：{"chapterId":"当前ID","chapterTitle":"标题","clarityScore":0,"emotionalIntensity":0,"suspenseScore":0,"retentionScore":0,"dominantEmotion":"情绪","confusionPoints":[],"immersionBreaks":[],"effectiveHooks":[],"expectations":[],"dropRisk":"low|medium|high","summary":"本章读者反馈","readerStateSummary":"传递给下一章的读者已知状态","findings":[{"findingId":"finding-1","title":"问题","summary":"判断","category":"confusion|emotion|suspense|immersion|drop_risk|retention|other","severity":"critical|high|medium|low|info","chapterIds":["当前ID"],"evidenceRefs":["当前ID"],"evidence":[{"sourceType":"chapter","sourceId":"当前ID","title":"当前章","excerpt":"短证据"}],"recommendation":"建议","recommendedRole":"writer|editor","uncertainty":"不确定性"}],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Act as a first-time fiction reader and evaluate chapters in strict reading order.',
+                'You may use only the current chapter and priorReaderState from earlier chapters. Never use future chapters, backstage worldbuilding, character sheets, plotlines, retrieval evidence, or other expert conclusions.',
+                'Evaluate confusion, emotion, suspense, immersion, drop risk, and retention without presenting guesses as facts.',
+                'All finding and evidence references must use only the current chapter ID.',
+                'readerStateSummary must contain only what the reader now knows, wonders, feels, and expects for the next chapter.',
+                'Return one strict JSON object with scores, feedback lists, dropRisk, summary, readerStateSummary, findings, and warnings.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4200);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_reader_chapter_evaluation',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                priorReaderState,
+                position: payload.position || {},
+            },
+            sections: [{
+                id: 'current-reader-chapter',
+                kind: 'retrieval',
+                priority: 'required',
+                value: {
+                    chapterId,
+                    title: trimText(payload.chapter.title, 300),
+                    contentMode: trimText(payload.chapter.contentMode, 40) || 'full',
+                    content,
+                },
+                sourceRef: 'reader.journey_review@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.35),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (
+            !parsed
+            || typeof parsed.summary !== 'string'
+            || typeof parsed.readerStateSummary !== 'string'
+            || !Array.isArray(parsed.findings)
+        ) {
+            throw new AiActionError('UNKNOWN', 'Reader journey evaluator did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentWorldbuildingRangeConsistency(payload: {
+        goal: string;
+        locale?: string;
+        dimensions?: string[];
+        scopeBundle: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.scopeBundle || typeof payload.scopeBundle !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'scopeBundle is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说世界观编辑的多章节一致性审核器，只能依据已批准的 ChapterScopeBundle、已登记项目实体和实际检索证据作判断。',
+                '检查规则、术语、角色能力、地点空间、物品属性和跨章状态漂移；不要输出读者体验、文风评价或外部现实考据。',
+                '必须区分“明确冲突”“正文尚未解释”和“覆盖不足无法判断”。未提及某条设定不等于违反设定，不得把缺少说明直接判定为冲突。',
+                'finding.chapterIds 只能使用 scope.chapterIds 中的目标章节 ID；subjectIds 只能使用 entityContext 中真实存在的角色、物品、世界设定或地图 ID。',
+                'evidence.sourceId 与 evidenceRefs 只能引用 chapters、entityContext、plotContext、narrativeSummaries 或 evidence 中真实存在的 ID。不得伪造规则、引文、实体、章节或已完成的修改。',
+                '证据不足时 evidence 和 evidenceRefs 置空，并在 uncertainty 中说明。重复冲突只输出一次。recommendedRole 只能是 writer、editor、worldbuilding。',
+                '只返回严格 JSON 对象，不要 Markdown 或代码围栏。',
+                '格式：{"consistencyScore":0,"summary":"摘要","dimensions":[{"id":"rules","label":"规则","score":0,"reason":"依据","checkable":true}],"findings":[{"findingId":"finding-1","title":"冲突","summary":"判断","category":"rule_conflict|terminology|ability|location|item|state_drift|chronology|other","severity":"critical|high|medium|low|info","chapterIds":["真实章节ID"],"subjectIds":["真实实体ID"],"evidenceRefs":["真实来源ID"],"evidence":[{"sourceType":"chapter|character|worldsetting|item|map|plotline|rag","sourceId":"真实ID","title":"来源","excerpt":"短证据","confidence":0.8,"metadata":{}}],"recommendation":"修订建议","recommendedRole":"writer|editor|worldbuilding","uncertainty":"不确定性"}],"entityAssessments":[{"entityType":"worldsetting|character|item|map|term|other","entityId":"可选真实实体ID","name":"名称","status":"consistent|conflict|insufficient","chapterIds":["真实章节ID"],"summary":"状态判断","evidence":[],"uncertainty":"不确定性"}],"recommendations":["总体建议"],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Review worldbuilding consistency across an approved ChapterScopeBundle using only registered project entities and supplied retrieval evidence.',
+                'Check rules, terminology, character abilities, locations, items, and cross-chapter state drift. Do not perform reader, prose, or real-world fact review.',
+                'Distinguish an explicit contradiction from an unexplained detail or insufficient coverage. An omitted rule is not automatically a conflict.',
+                'Use only real target chapter IDs, entity IDs, and evidence source IDs from the bundle. Never fabricate lore, quotes, IDs, or project changes.',
+                'Leave evidence empty and explain uncertainty when support is insufficient. Deduplicate findings.',
+                'Return one strict JSON object with consistencyScore, summary, dimensions, findings, entityAssessments, recommendations, and warnings.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 6000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_worldbuilding_range_consistency',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                dimensions: Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [],
+            },
+            sections: [{
+                id: 'chapter-scope-bundle',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.scopeBundle,
+                sourceRef: 'worldbuilding.range_consistency@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.2),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (
+            !parsed
+            || typeof parsed.summary !== 'string'
+            || !Array.isArray(parsed.dimensions)
+            || !Array.isArray(parsed.findings)
+            || !Array.isArray(parsed.entityAssessments)
+        ) {
+            throw new AiActionError('UNKNOWN', 'Worldbuilding consistency reviewer did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async extractAgentResearchClaims(payload: {
+        goal: string;
+        locale?: string;
+        maxClaims?: number;
+        scopeBundle: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.scopeBundle || typeof payload.scopeBundle !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'scopeBundle is required');
+        }
+        const maxClaims = Math.max(1, Math.min(12, Number(payload.maxClaims || 8)));
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说考据流程的声明抽取器，只从 ChapterScopeBundle 的目标章节中提取可被证据核验的现实事实、历史、科学、医学、法律、技术、地理、文化或经济陈述。',
+                '不要提取纯虚构世界规则、人物情绪、审美评价、剧情预测或无法形成明确陈述的句子。',
+                'chapterId 必须是 scope.chapterIds 中真实存在的目标章节 ID；excerpt 必须是当前输入中的短摘录，不得改写成不存在的原文。',
+                'searchKeyword 用于当前小说项目全文检索，应简短且有辨识度。requiresExternalEvidence 表示仅靠项目内容和已导入资料通常无法可靠核验。',
+                `最多返回 ${maxClaims} 条，按对作品可信度的影响排序并去重。只返回严格 JSON，不要 Markdown。`,
+                '格式：{"claims":[{"claimId":"claim-1","statement":"可核验陈述","chapterId":"真实章节ID","excerpt":"短摘录","category":"historical|scientific|medical|legal|technical|geographic|cultural|economic|other","importance":"high|medium|low","searchKeyword":"项目检索词","needsProjectSearch":true,"requiresExternalEvidence":false}],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Extract evidence-checkable real-world claims only from target chapters in the supplied ChapterScopeBundle.',
+                'Exclude fictional lore, emotions, aesthetic opinions, plot predictions, and vague statements.',
+                'Use only real target chapter IDs and excerpts present in the input. Produce short project-search keywords and flag claims that require external evidence.',
+                `Return at most ${maxClaims} deduplicated claims in strict JSON with claims and warnings.`,
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 3200);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.extract_research_claims',
+            systemPrompt,
+            outputTokens,
+            currentRequest: { goal, maxClaims },
+            sections: [{
+                id: 'chapter-scope-bundle',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.scopeBundle,
+                sourceRef: 'research.range_fact_check@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.1),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.claims)) {
+            throw new AiActionError('UNKNOWN', 'Research claim extractor did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentResearchFactCheck(payload: {
+        goal: string;
+        locale?: string;
+        scopeBundle: Record<string, unknown>;
+        claims?: unknown[];
+        projectSearchEvidence?: Record<string, unknown[]>;
+        externalSearchAvailable?: boolean;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.scopeBundle || typeof payload.scopeBundle !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'scopeBundle is required');
+        }
+        if (!Array.isArray(payload.claims)) {
+            throw new AiActionError('INVALID_INPUT', 'claims is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说考据与事实核查器，只能核验输入 claims 中已经抽取的声明，不得新增声明。',
+                '证据仅来自 ChapterScopeBundle、已导入 RAG evidence 和 projectSearchEvidence。search.query 是小说项目全文搜索，不是互联网搜索；externalSearchAvailable=false。',
+                '不得生成网址、书名、作者、机构、引文、来源 ID 或查询结果中不存在的证据。需要外部资料但当前证据不足时，verdict 必须是 unverified，并说明应补充何种可靠来源。',
+                'supported 表示现有可追溯证据支持；contradicted 表示证据明确相反；mixed 表示来源或条件冲突；not_applicable 表示抽取项并非可核验事实。',
+                'claimId 只能来自输入 claims；chapterIds 固定为该声明章节。evidence.sourceId 与 evidenceRefs 只能使用输入中真实存在的章节、项目实体、RAG 或项目搜索来源 ID。',
+                'confidence 范围 0 到 1；没有证据时不得高于 0.3。只返回严格 JSON，不要 Markdown 或代码围栏。',
+                '格式：{"overallReliabilityScore":0,"summary":"摘要","claims":[],"findings":[{"findingId":"finding-1","claimId":"真实claimId","statement":"原声明","summary":"核验判断","verdict":"supported|contradicted|mixed|unverified|not_applicable","confidence":0.8,"category":"historical|scientific|medical|legal|technical|geographic|cultural|economic|other","severity":"critical|high|medium|low|info","chapterIds":["真实章节ID"],"evidenceRefs":["真实来源ID"],"evidence":[{"sourceType":"chapter|rag|project_search","sourceId":"真实ID","title":"来源","excerpt":"短证据","confidence":0.8,"metadata":{}}],"recommendation":"修订或补证建议","recommendedRole":"writer|editor|research_rag","uncertainty":"不确定性"}],"recommendations":[],"warnings":[],"searchStats":{}}。',
+            ].join(' ')
+            : [
+                'Fact-check only the supplied claims using the ChapterScopeBundle, imported RAG evidence, and actual projectSearchEvidence.',
+                'Project search is internal novel search, not internet search, and externalSearchAvailable is false. Never fabricate URLs, publications, authors, institutions, quotes, IDs, or sources.',
+                'Claims requiring unavailable external evidence must remain unverified. Use only real claim, chapter, and evidence IDs from the input.',
+                'Return strict JSON with overallReliabilityScore, summary, findings, recommendations, warnings, and searchStats.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 6000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_research_fact_check',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                claims: payload.claims,
+                projectSearchEvidence: payload.projectSearchEvidence || {},
+                externalSearchAvailable: false,
+            },
+            sections: [{
+                id: 'chapter-scope-bundle',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.scopeBundle,
+                sourceRef: 'research.range_fact_check@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.1),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || typeof parsed.summary !== 'string' || !Array.isArray(parsed.findings)) {
+            throw new AiActionError('UNKNOWN', 'Research fact-check reviewer did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentScopeAudit(payload: {
+        goal: string;
+        locale?: string;
+        childReports?: Array<Record<string, unknown>>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const childReports = Array.isArray(payload.childReports) ? payload.childReports : [];
+        if (!childReports.length) {
+            throw new AiActionError('INVALID_INPUT', 'childReports is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说团队审计 Supervisor，只能汇总输入中实际执行的专家子报告。不得读取正文、补做专家分析或伪造未执行专家意见。',
+                '综合 finding 必须通过 sourceFindingIds 引用子报告中真实 findingId；sourceExperts 只能来自对应子报告 expert。',
+                '相同问题要去重：多个专家支持同一判断标为 consensus；只有一个来源标为 single；专家判断实质冲突时标为 conflict，并在 conflicts 中保留双方来源。',
+                '不得改变来源证据含义，不得生成新的 evidence sourceId、章节 ID、事实或已经发生的修改。',
+                '建议按严重度、影响范围和专家共识排序。只返回严格 JSON，不要 Markdown 或代码围栏。',
+                '格式：{"summary":"综合摘要","experts":[],"findings":[{"findingId":"audit-1","title":"问题","summary":"综合判断","category":"分类","severity":"critical|high|medium|low|info","chapterIds":["来源中的真实章节ID"],"sourceFindingIds":["真实findingId"],"sourceExperts":["editor|reader|worldbuilding|research_rag"],"relationship":"consensus|single|conflict","evidenceRefs":["来源中的真实证据ID"],"evidence":[],"recommendation":"建议","recommendedRole":"writer|editor|worldbuilding|research_rag","uncertainty":"不确定性"}],"conflicts":[{"conflictId":"conflict-1","topic":"分歧主题","sourceFindingIds":["至少两个真实findingId"],"experts":["至少两个专家"],"summary":"分歧","resolution":"处理建议"}],"recommendations":[],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Act as a fiction audit supervisor and aggregate only the expert child reports actually provided.',
+                'Never invent an unexecuted expert opinion, new finding, chapter, evidence source, fact, or project change.',
+                'Every aggregate finding must cite real sourceFindingIds. Mark multi-expert agreement as consensus, one source as single, and substantive disagreement as conflict.',
+                'Return strict JSON with summary, findings, conflicts, recommendations, and warnings.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 6000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_scope_audit',
+            systemPrompt,
+            outputTokens,
+            currentRequest: { goal },
+            sections: [{
+                id: 'executed-expert-reports',
+                kind: 'artifact',
+                priority: 'required',
+                value: childReports,
+                sourceRef: 'novel.scope_audit@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.15),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (
+            !parsed
+            || typeof parsed.summary !== 'string'
+            || !Array.isArray(parsed.findings)
+            || !Array.isArray(parsed.conflicts)
+        ) {
+            throw new AiActionError('UNKNOWN', 'Scope audit supervisor did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentPlotlineAnalysis(payload: {
+        novelId?: string;
+        goal: string;
+        locale?: string;
+        scope?: 'chapter' | 'volume' | 'novel';
+        context: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        if (!payload.context || typeof payload.context !== 'object') {
+            throw new AiActionError('INVALID_INPUT', 'context is required');
+        }
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说情节线结构分析器，只能依据 PlotlineAnalysisContext 中已登记的情节线、章节摘录和检索证据作判断。',
+                '分析主线与支线的推进程度、伏笔是否得到回收、长时间未推进的线索、节奏和连续性风险。',
+                '不要续写正文，不要生成草稿，也不要声称已经修改作品。',
+                '每条 evidence 只能引用输入中真实存在的 plotlineId 或 chapterId；不得伪造 ID、标题、章节内容或证据。',
+                '范围未覆盖到的章节不能推断为没有发生；证据不足时 evidence 置空，并在 uncertainty 中说明。',
+                '同一问题只输出一次。recommendation 必须是可执行的编辑建议，不得把猜测包装成事实。',
+                '只返回一个严格 JSON 对象，不要 Markdown 或代码围栏。',
+                '格式：{"overallScore":0,"summary":"摘要","threads":[{"plotlineId":"可选真实ID","name":"情节线","role":"main|subplot|unknown","status":"状态","progressionScore":0,"lastProgressLocation":"位置","coveredChapterIds":["真实chapterId"],"findings":["发现"],"evidence":[{"sourceType":"chapter|plotline|rag","sourceId":"真实ID或空","title":"来源","excerpt":"短证据","confidence":0.8,"metadata":{}}],"recommendations":["建议"],"uncertainty":"不确定性"}],"issues":[{"issueId":"issue-1","type":"stalled|unresolved_foreshadowing|pacing|continuity|coverage|other","severity":"critical|high|medium|low|info","title":"问题","plotlineIds":["真实ID"],"chapterIds":["真实ID"],"evidence":[],"recommendation":"建议","uncertainty":"不确定性"}],"recommendations":["总体建议"],"warnings":[]}。',
+            ].join(' ')
+            : [
+                'Analyze plotline structure using only the supplied PlotlineAnalysisContext.',
+                'Assess main and subplots, foreshadowing resolution, stalled threads, pacing, and continuity.',
+                'Do not draft prose or claim any project change. Never fabricate IDs, chapter text, or evidence.',
+                'Treat uncovered chapters as unknown. When evidence is missing, leave evidence empty and explain uncertainty.',
+                'Return one strict JSON object with overallScore, summary, threads, issues, recommendations, and warnings.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 5200);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_plotline_analysis',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                novelId: trimText(payload.novelId, 200),
+                goal,
+                scope: payload.scope || 'novel',
+            },
+            sections: [{
+                id: 'plotline-analysis-context',
+                kind: 'retrieval',
+                priority: 'required',
+                value: payload.context,
+                sourceRef: 'plotline.analysis@1.0.0',
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.2),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || !Array.isArray(parsed.threads) || !Array.isArray(parsed.issues)) {
+            throw new AiActionError('UNKNOWN', 'Plotline analyzer did not return valid structured JSON');
+        }
+        return parsed;
+    }
+
+    async generateAgentReport(payload: {
+        goal: string;
+        planTitle?: string;
+        role?: string;
+        locale?: string;
+        steps?: Array<{ agent?: string; title?: string; status?: string }>;
+        findings?: Array<{ toolName?: string; stepTitle?: string; data?: unknown }>;
+        approvalResponses?: Array<Record<string, unknown>>;
+        draftSessionId?: string;
+        deliverable?: string;
+    }, signal?: AbortSignal): Promise<{ content: string; conversationSummary: string }> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说创作 Agent 的最终报告撰写器。',
+                '根据已执行计划、工具结果和用户确认，直接回答原始任务。',
+                '必须给出具体发现、判断依据和可执行建议；读者任务要明确困惑点、期待点、弃读风险和追更动力。',
+                '只能使用输入中提供的事实，不得声称执行了未列出的工具，不得编造正文细节。',
+                'PreferredRole 是报告主视角。不得添加 Steps 中未执行 agent 的专属评估章节；例如没有 reader 步骤时，不得输出“读者视角评估”。',
+                '如果证据不足，要明确指出缺口。若已生成草稿，说明草稿已进入审核，不要声称已经写回正文。',
+                '一次生成两个版本：content 是供“产物”面板保存的完整 Markdown 报告；conversationSummary 是显示在会话中的精炼交付说明。',
+                'conversationSummary 要像任务完成回执：先直接说明完成结果，再概括最重要的结论、变更或建议；控制在 2 至 5 个短段落或不超过 5 个要点，不要复制完整报告。',
+                '若有完整报告，conversationSummary 可提示用户在“产物”中查看详情，但不要虚构产物名称或数量。',
+                '只返回严格 JSON：{"content":"完整 Markdown 报告","conversationSummary":"精炼 Markdown 交付说明"}，不要复述内部事件名称。',
+            ].join(' ')
+            : [
+                'Write the final report for a novel-writing agent run.',
+                'Answer the original goal using only the supplied plan, findings, and user decisions.',
+                'Give concrete findings, rationale, and actionable recommendations. State evidence gaps clearly.',
+                'Use PreferredRole as the primary perspective. Do not add role-specific sections for agents absent from Steps.',
+                'If a draft exists, say it is ready for review; never claim it was committed.',
+                'Produce two versions: content is the complete Markdown report saved as an artifact; conversationSummary is a concise completion handoff shown in chat.',
+                'The conversationSummary must lead with the outcome, capture only the most important conclusions, changes, or next actions in 2-5 short paragraphs or at most 5 bullets, and must not duplicate the full report.',
+                'It may direct the user to the artifact for details, but must not invent artifact names or counts.',
+                'Return strict JSON only: {"content":"complete Markdown report","conversationSummary":"concise Markdown completion handoff"}. Do not mention internal event names.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_report',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                preferredRole: payload.role || 'team',
+                deliverable: trimText(payload.deliverable, 40),
+            },
+            sections: [
+                {
+                    id: 'executed-plan',
+                    kind: 'plan',
+                    priority: 'high',
+                    value: {
+                        title: trimText(payload.planTitle, 200),
+                        steps: payload.steps || [],
+                    },
+                },
+                {
+                    id: 'tool-findings',
+                    kind: 'retrieval',
+                    priority: 'required',
+                    value: payload.findings || [],
+                    sourceRef: 'executed-agent-tools',
+                },
+                {
+                    id: 'approval-responses',
+                    kind: 'decision',
+                    priority: 'high',
+                    value: payload.approvalResponses || [],
+                    sourceRef: 'user-approvals',
+                },
+                {
+                    id: 'draft-artifact',
+                    kind: 'artifact',
+                    priority: 'high',
+                    value: { draftSessionId: trimText(payload.draftSessionId, 200) },
+                },
+            ],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.45),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        const content = trimText(parsed?.content, 20000);
+        const conversationSummary = trimText(parsed?.conversationSummary, 4000);
+        if (!content) throw new AiActionError('UNKNOWN', 'Agent final report returned empty content');
+        if (!conversationSummary) throw new AiActionError('UNKNOWN', 'Agent final report returned empty conversation summary');
+        return { content, conversationSummary };
+    }
+
+    async detectAgentCreativeDirection(payload: {
+        goal: string;
+        planTitle?: string;
+        stepTitle?: string;
+        analysisSummary?: string;
+        locale?: string;
+    }, signal?: AbortSignal): Promise<{
+        requiresDecision: boolean;
+        title?: string;
+        question?: string;
+        reason?: string;
+        options?: Array<{ id?: string; label: string; description?: string }>;
+    }> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是小说创作 Agent 的执行前决策分析器，不生成正文，也不调用工具。',
+                '判断任务在生成草稿前是否存在两个或以上互斥且会显著改变成稿的创作方向。',
+                '普通细节差异、可以同时满足的要求、证据不足都不属于创作方向分歧。',
+                '只有必须由用户选择时 requiresDecision=true，并给出 2 到 4 个具体、互斥、可执行的选项。',
+                '只返回严格 JSON：{"requiresDecision":false}，或 {"requiresDecision":true,"title":"方向确认","question":"...","reason":"...","options":[{"id":"可选","label":"...","description":"..."}]}。',
+            ].join(' ')
+            : [
+                'You detect mutually exclusive creative directions before a novel draft is generated.',
+                'Do not write prose or call tools. Minor details, compatible requirements, and evidence quality are not direction conflicts.',
+                'Return strict JSON. Set requiresDecision=true only when the user must choose among 2-4 concrete, exclusive directions.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 1200);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.detect_creative_direction',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                planTitle: trimText(payload.planTitle, 200),
+                stepTitle: trimText(payload.stepTitle, 200),
+            },
+            sections: [{
+                id: 'analysis-summary',
+                kind: 'retrieval',
+                priority: 'high',
+                value: trimText(payload.analysisSummary, 2000),
+            }],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: 0.1,
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
+            signal,
+        });
+        const parsed = parseJsonObject(response.text);
+        if (!parsed || typeof parsed.requiresDecision !== 'boolean') {
+            throw new AiActionError('UNKNOWN', 'Creative direction detector returned invalid JSON');
+        }
+        if (!parsed.requiresDecision) return { requiresDecision: false };
+        return {
+            requiresDecision: true,
+            title: trimText(parsed.title, 120),
+            question: trimText(parsed.question, 500),
+            reason: trimText(parsed.reason, 1000),
+            options: Array.isArray(parsed.options) ? parsed.options : [],
+        };
+    }
+
     async generateTitle(payload: TitleGenerationPayload): Promise<{ candidates: TitleCandidate[] }> {
         devLog('INFO', 'AiService.generateTitle.start', 'Generate title start', {
             chapterId: payload.chapterId,
@@ -731,19 +2255,27 @@ export class AiService {
             contextChapterCount: payload.contextChapterCount,
         });
         const bundle = await this.buildContinuePromptBundle(payload);
+        const prompt = this.assembleDraftGenerationPrompt({
+            operation: 'chapter.preview_generation_context',
+            systemPrompt: bundle.systemPrompt,
+            outputTokens: this.settingsCache.http.maxTokens,
+            structured: bundle.structured,
+            effectiveUserPrompt: bundle.effectiveUserPrompt,
+            usedContext: bundle.usedContext,
+        });
         devLog('INFO', 'AiService.previewContinuePrompt.success', 'Preview continue prompt success', {
             chapterId: payload.chapterId,
         });
         return {
             structured: bundle.structured,
-            rawPrompt: buildRawPromptPreview(bundle.systemPrompt, bundle.effectiveUserPrompt),
+            rawPrompt: buildRawPromptPreview(bundle.systemPrompt, prompt),
             editableUserPrompt: bundle.defaultUserPrompt,
             usedContext: bundle.usedContext,
             warnings: bundle.warnings,
         };
     }
 
-    async continueWriting(payload: ContinueWritingPayload): Promise<ContinueWritingResult> {
+    async continueWriting(payload: ContinueWritingPayload, signal?: AbortSignal): Promise<ContinueWritingResult> {
         devLog('INFO', 'AiService.continueWriting.start', 'Continue writing start', {
             chapterId: payload.chapterId,
             novelId: payload.novelId,
@@ -756,13 +2288,23 @@ export class AiService {
         const generationTemperature = Number.isFinite(payload.temperature)
             ? Math.max(0, Math.min(2, Number(payload.temperature)))
             : this.settingsCache.http.temperature;
+        const prompt = this.assembleDraftGenerationPrompt({
+            operation: 'chapter.generate_draft',
+            systemPrompt: bundle.systemPrompt,
+            outputTokens: this.settingsCache.http.maxTokens,
+            structured: bundle.structured,
+            effectiveUserPrompt: bundle.effectiveUserPrompt,
+            usedContext: bundle.usedContext,
+        });
 
         const response = await provider.generate({
             systemPrompt: bundle.systemPrompt,
-            prompt: bundle.effectiveUserPrompt,
+            prompt,
             maxTokens: this.settingsCache.http.maxTokens,
             temperature: generationTemperature,
+            signal,
         });
+        signal?.throwIfAborted();
 
         const consistency = await this.checkConsistency({
             novelId: payload.novelId,
@@ -773,6 +2315,8 @@ export class AiService {
             text: response.text,
             usedContext: bundle.usedContext,
             warnings: bundle.warnings,
+            contextPolicy: bundle.contextPolicy,
+            contextSnapshot: bundle.contextSnapshot,
             consistency,
         };
         devLog('INFO', 'AiService.continueWriting.success', 'Continue writing success', {
@@ -812,7 +2356,7 @@ export class AiService {
         return result;
     }
 
-    async askNovel(payload: RagAskPayload): Promise<RagAskResult> {
+    async askNovel(payload: RagAskPayload, signal?: AbortSignal): Promise<RagAskResult> {
         devLog('INFO', 'AiService.askNovel.start', 'Novel RAG ask start', {
             novelId: payload.novelId,
             questionLength: payload.question?.length ?? 0,
@@ -823,6 +2367,7 @@ export class AiService {
             maxTokens: Math.min(2048, this.settingsCache.http.maxTokens || 2048),
             temperature: 0.2,
             embeddingSettings: this.settingsCache.embedding,
+            signal,
         });
         devLog('INFO', 'AiService.askNovel.success', 'Novel RAG ask success', {
             novelId: payload.novelId,
@@ -899,6 +2444,17 @@ export class AiService {
         return deleteRagVectorSource({ novelId, sourceType, sourceId });
     }
 
+    deleteGeneratedMapAsset(relativePath: string): boolean {
+        const normalized = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!normalized.startsWith('maps/')) return false;
+        const mapsRoot = path.resolve(this.userDataPath, 'maps');
+        const absolutePath = path.resolve(this.userDataPath, normalized);
+        if (absolutePath !== mapsRoot && !absolutePath.startsWith(`${mapsRoot}${path.sep}`)) return false;
+        if (!fs.existsSync(absolutePath)) return false;
+        fs.unlinkSync(absolutePath);
+        return true;
+    }
+
     private refreshRagSourceIndexInBackground(sourceType: RagEvidenceSourceType, sourceId: string, reason: string): void {
         void this.upsertRagSourceIndex(sourceType, sourceId, { skipIfNovelNotIndexed: true }).catch((error) => {
             console.warn('[RAG] Failed to refresh source index:', { sourceType, sourceId, reason, error });
@@ -954,12 +2510,20 @@ export class AiService {
             targetSections: payload.targetSections,
         });
         const bundle = await this.buildCreativeAssetsPromptBundle(payload);
+        const prompt = this.assembleDraftGenerationPrompt({
+            operation: 'creative_assets.preview_generation_context',
+            systemPrompt: bundle.systemPrompt,
+            outputTokens: this.settingsCache.http.maxTokens,
+            structured: bundle.structured,
+            effectiveUserPrompt: bundle.effectiveUserPrompt,
+            usedContext: bundle.usedContext,
+        });
         devLog('INFO', 'AiService.previewCreativeAssetsPrompt.success', 'Preview creative assets prompt success', {
             novelId: payload.novelId,
         });
         return {
             structured: bundle.structured,
-            rawPrompt: buildRawPromptPreview(bundle.systemPrompt, bundle.effectiveUserPrompt),
+            rawPrompt: buildRawPromptPreview(bundle.systemPrompt, prompt),
             editableUserPrompt: bundle.defaultUserPrompt,
             usedContext: bundle.usedContext,
         };
@@ -995,7 +2559,7 @@ export class AiService {
         return output;
     }
 
-    async generateCreativeAssets(payload: CreativeAssetsGeneratePayload): Promise<{ draft: CreativeAssetsDraft }> {
+    async generateCreativeAssets(payload: CreativeAssetsGeneratePayload, signal?: AbortSignal): Promise<{ draft: CreativeAssetsDraft }> {
         devLog('INFO', 'AiService.generateCreativeAssets.start', 'Generate creative assets start', {
             novelId: payload.novelId,
             briefLength: payload.brief?.length ?? 0,
@@ -1005,13 +2569,22 @@ export class AiService {
         const provider = this.getProvider();
         const bundle = await this.buildCreativeAssetsPromptBundle(payload);
         const targetSections = this.resolveCreativeTargetSections(payload);
+        const prompt = this.assembleDraftGenerationPrompt({
+            operation: 'creative_assets.generate_draft',
+            systemPrompt: bundle.systemPrompt,
+            outputTokens: this.settingsCache.http.maxTokens,
+            structured: bundle.structured,
+            effectiveUserPrompt: bundle.effectiveUserPrompt,
+            usedContext: bundle.usedContext,
+        });
         const response = await provider.generate({
             systemPrompt: bundle.systemPrompt,
-            prompt: bundle.effectiveUserPrompt,
+            prompt,
             maxTokens: this.settingsCache.http.maxTokens,
             temperature: this.settingsCache.http.temperature,
             // 创作工坊需要生成多个板块的结构化 JSON，内容量大，使用更宽裕的超时
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
+            signal,
         });
 
         try {
@@ -1356,6 +2929,7 @@ export class AiService {
         const draft = validation.normalizedDraft;
         const provider = this.getProvider();
         const createdFiles: string[] = [];
+        const createdEntities: CreativeAssetWritebackEntitySnapshot[] = [];
         let committedCreated = { ...zeroCreated };
 
         try {
@@ -1373,11 +2947,12 @@ export class AiService {
                             sortOrder: Date.now() + localCreated.plotLines,
                         },
                     });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('plotLine', createdLine));
                     plotLineIdByName.set(plotLine.name.toLowerCase(), createdLine.id);
                     localCreated.plotLines += 1;
 
                     for (const point of plotLine.points ?? []) {
-                        await (tx as any).plotPoint.create({
+                        const createdPoint = await (tx as any).plotPoint.create({
                             data: {
                                 novelId: payload.novelId,
                                 plotLineId: createdLine.id,
@@ -1388,6 +2963,7 @@ export class AiService {
                                 order: Date.now() + localCreated.plotPoints,
                             },
                         });
+                        createdEntities.push(createCreativeAssetEntitySnapshot('plotPoint', createdPoint));
                         localCreated.plotPoints += 1;
                     }
                 }
@@ -1410,6 +2986,7 @@ export class AiService {
                             sortOrder: Date.now() + localCreated.plotLines,
                         },
                     });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('plotLine', autoLine));
                     plotLineIdByName.set(defaultName.toLowerCase(), autoLine.id);
                     localCreated.plotLines += 1;
                     return autoLine.id;
@@ -1417,7 +2994,7 @@ export class AiService {
 
                 for (const point of draft.plotPoints ?? []) {
                     const lineId = await resolvePlotLineIdForLoosePoint(point.plotLineName);
-                    await (tx as any).plotPoint.create({
+                    const createdPoint = await (tx as any).plotPoint.create({
                         data: {
                             novelId: payload.novelId,
                             plotLineId: lineId,
@@ -1428,11 +3005,12 @@ export class AiService {
                             order: Date.now() + localCreated.plotPoints,
                         },
                     });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('plotPoint', createdPoint));
                     localCreated.plotPoints += 1;
                 }
 
                 for (const character of draft.characters ?? []) {
-                    await (tx as any).character.create({
+                    const createdCharacter = await (tx as any).character.create({
                         data: {
                             novelId: payload.novelId,
                             name: character.name,
@@ -1442,11 +3020,12 @@ export class AiService {
                             sortOrder: Date.now() + localCreated.characters,
                         },
                     });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('character', createdCharacter));
                     localCreated.characters += 1;
                 }
 
                 for (const item of draft.items ?? []) {
-                    await (tx as any).item.create({
+                    const createdItem = await (tx as any).item.create({
                         data: {
                             novelId: payload.novelId,
                             name: item.name,
@@ -1456,11 +3035,12 @@ export class AiService {
                             sortOrder: Date.now() + localCreated.items,
                         },
                     });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('item', createdItem));
                     localCreated.items += 1;
                 }
 
                 for (const skill of draft.skills ?? []) {
-                    await (tx as any).item.create({
+                    const createdSkill = await (tx as any).item.create({
                         data: {
                             novelId: payload.novelId,
                             name: skill.name,
@@ -1470,6 +3050,7 @@ export class AiService {
                             sortOrder: Date.now() + localCreated.items + localCreated.skills,
                         },
                     });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('item', createdSkill));
                     localCreated.skills += 1;
                 }
 
@@ -1483,6 +3064,7 @@ export class AiService {
                             sortOrder: Date.now() + localCreated.maps,
                         },
                     });
+                    let persistedMap = map;
                     localCreated.maps += 1;
 
                     let imageInput: { imageBase64?: string; imageUrl?: string; mimeType?: string } | null = null;
@@ -1510,12 +3092,13 @@ export class AiService {
                     if (imageInput) {
                         const saved = await this.saveImageAsset(payload.novelId, map.id, imageInput);
                         createdFiles.push(saved.absolutePath);
-                        await (tx as any).mapCanvas.update({
+                        persistedMap = await (tx as any).mapCanvas.update({
                             where: { id: map.id },
                             data: { background: saved.relativePath },
                         });
                         localCreated.mapImages += 1;
                     }
+                    createdEntities.push(createCreativeAssetEntitySnapshot('mapCanvas', persistedMap));
                 }
 
                 committedCreated = localCreated;
@@ -1524,6 +3107,7 @@ export class AiService {
             const result = {
                 success: true,
                 created: committedCreated,
+                createdEntities,
                 warnings: validation.warnings,
                 transactionMode: 'atomic' as const,
             };
@@ -1792,9 +3376,10 @@ export class AiService {
         const currentLocation = trimText(input.currentLocation, 120);
 
         return {
-            recentChapters: recentChapters.slice(0, 8).map((chapter: any) => ({
+            recentChapters: recentChapters.slice(0, 20).map((chapter: any) => ({
                 title: trimText(chapter?.title, 120),
-                excerpt: trimText(chapter?.excerpt, 1200),
+                contentMode: trimText(chapter?.contentMode, 24),
+                excerpt: trimText(chapter?.excerpt, chapter?.contentMode === 'summary' || chapter?.contentMode === 'excerpt' ? 2400 : 12000),
             })).filter((chapter: any) => chapter.title || chapter.excerpt),
             selectedIdeas: selectedIdeas.slice(0, 20).map((idea: any) => ({
                 content: trimText(idea?.content, 800),
@@ -1805,7 +3390,7 @@ export class AiService {
                 name: trimText(entity?.name, 80),
                 kind: trimText(entity?.kind, 24),
             })).filter((entity: any) => entity.name && entity.kind),
-            currentChapterBeforeCursor: trimText(input.currentChapterBeforeCursor, 2600),
+            currentChapterBeforeCursor: trimText(input.currentChapterBeforeCursor, 12000),
             ...(currentLocation ? { currentLocation } : {}),
             narrativeSummaries: narrativeSummaries.slice(0, 4).map((item: any) => ({
                 level: item?.level === 'volume' ? 'volume' : 'novel',
@@ -1825,36 +3410,67 @@ export class AiService {
         structured: PromptPreviewResult['structured'];
         usedContext: string[];
         warnings: string[];
+        contextPolicy: import('../../shared/agentChapterScope').ContinuationContextPolicy;
+        contextSnapshot: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
     }> {
         const isZh = /^zh/i.test(String(payload.locale || '').trim());
-        const writeMode: 'new_chapter' | 'continue_chapter' =
-            payload.mode === 'new_chapter' ? 'new_chapter' : 'continue_chapter';
-        const context = await this.contextBuilder.buildForContinueWriting({
-            ...payload,
-            mode: writeMode,
-            recentRawChapterCount: payload.recentRawChapterCount ?? this.settingsCache.summary.recentChapterRawCount,
-        });
+        const writeMode: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter' =
+            payload.mode === 'new_chapter'
+                ? 'new_chapter'
+                : payload.mode === 'rewrite_chapter'
+                    ? 'rewrite_chapter'
+                    : 'continue_chapter';
+        const preparedContext = payload.preparedContext;
+        const canReusePreparedContext = preparedContext?.policy?.version === 'continuation-context-v1'
+            && preparedContext.snapshot?.novelId === payload.novelId
+            && preparedContext.snapshot?.anchorChapterId === payload.chapterId;
+        const context = canReusePreparedContext
+            ? preparedContext
+            : await this.contextBuilder.buildForContinueWriting({
+                ...payload,
+                mode: writeMode === 'new_chapter' ? 'new_chapter' : 'continue_chapter',
+                recentRawChapterCount: payload.recentRawChapterCount ?? this.settingsCache.summary.recentChapterRawCount,
+            });
         const compactHardContext = this.compactContinueHardContext(context.hardContext as Record<string, unknown>);
-        const compactDynamicContext = this.compactContinueDynamicContext(context.dynamicContext as Record<string, unknown>);
+        const dynamicContextForPrompt = writeMode === 'rewrite_chapter'
+            ? {
+                ...context.dynamicContext,
+                currentChapterBeforeCursor: extractPlainTextFromLexical(payload.currentContent || context.currentContentSource),
+            }
+            : context.dynamicContext;
+        const compactDynamicContext = this.compactContinueDynamicContext(dynamicContextForPrompt as Record<string, unknown>);
         const normalizedUserIntent = trimText(payload.userIntent, 800);
         const normalizedCurrentLocation = trimText(payload.currentLocation, 120);
+        const batchContext = payload.batchContext && typeof payload.batchContext === 'object'
+            ? payload.batchContext
+            : undefined;
         const writeParamsForPrompt = {
             ...context.params,
             targetLength: isZh
                 ? `约${Math.max(100, Math.min(4000, Number(context.params.targetLength || 500)))}汉字`
                 : `about ${Math.max(100, Math.min(4000, Number(context.params.targetLength || 500)))} Chinese characters`,
         };
-        const systemPrompt = isZh
-            ? '你是中文小说续写助手。严格遵守世界观和大纲，不得破坏既有设定与人物行为逻辑。'
-            : 'Continue writing with strict consistency to world settings and plot outline. Do not break established lore.';
+        const systemPrompt = writeMode === 'rewrite_chapter'
+            ? (isZh
+                ? '你是中文小说章节改写助手。输出完整替换正文，严格遵守世界观、大纲与跨章连续性。'
+                : 'Rewrite the complete fiction chapter with strict consistency to world settings, outline, and cross-chapter continuity.')
+            : (isZh
+                ? '你是中文小说续写助手。严格遵守世界观和大纲，不得破坏既有设定与人物行为逻辑。'
+                : 'Continue writing with strict consistency to world settings and plot outline. Do not break established lore.');
         const promptSections = [
             `WriteMode=${writeMode}`,
             `HardContext=\n${JSON.stringify(compactHardContext, null, 2).slice(0, 18000)}`,
-            `DynamicContext=\n${JSON.stringify(compactDynamicContext, null, 2).slice(0, 12000)}`,
+            `DynamicContext=\n${JSON.stringify(compactDynamicContext, null, 2).slice(0, 60000)}`,
+            `ContinuationContextPolicy=\n${JSON.stringify(context.policy, null, 2)}`,
+            ...(batchContext ? [`ChapterBatchContext=\n${JSON.stringify(batchContext, null, 2).slice(0, 42000)}`] : []),
             `WriteParams=\n${JSON.stringify(writeParamsForPrompt, null, 2)}`,
             ...(normalizedUserIntent ? [`UserIntent=${normalizedUserIntent}`] : []),
             ...(normalizedCurrentLocation ? [`CurrentLocation=${normalizedCurrentLocation}`] : []),
-            writeMode === 'new_chapter'
+            writeMode === 'rewrite_chapter'
+                ? (isZh
+                    ? 'Constraint=输出目标章节的完整替换正文；保留应保留的事实与功能，但不得在原文后追加续写，不要解释修改过程。'
+                    : 'Constraint=Output a complete replacement chapter. Preserve required facts and function; do not append to the original or explain edits.')
+                : writeMode === 'new_chapter'
                 ? (isZh
                     ? 'Constraint=基于大纲与世界观写出新章节开场，不得复述已有段落。'
                     : 'Constraint=Start a fresh chapter opening based on outline and world context. Do not echo prior chapter paragraphs.')
@@ -1872,23 +3488,46 @@ export class AiService {
             isZh
                 ? 'Constraint=请严格遵守 HardContext 中的世界观、角色性格和物品设定；情节推进需与已有情节点保持一致。'
                 : 'Constraint=Strictly follow HardContext lore, character traits, and item settings; keep progression aligned with existing plot points.',
-            isZh
-                ? 'Constraint=你的任务是续写光标后的新内容，不要重复 currentChapterBeforeCursor 里的任何句子。'
-                : 'Constraint=Write only the continuation after cursor; do not repeat any sentence from currentChapterBeforeCursor.',
+            writeMode === 'rewrite_chapter'
+                ? (isZh
+                    ? 'Constraint=currentChapterBeforeCursor 是待改写原文，只用于保留事实、人物状态和章节功能；输出必须是完整新版本。'
+                    : 'Constraint=currentChapterBeforeCursor is the source chapter. Preserve required facts, state, and function while outputting a complete new version.')
+                : (isZh
+                    ? 'Constraint=你的任务是续写光标后的新内容，不要重复 currentChapterBeforeCursor 里的任何句子。'
+                    : 'Constraint=Write only the continuation after cursor; do not repeat any sentence from currentChapterBeforeCursor.'),
         ];
         const defaultUserPrompt = promptSections.join('\n\n');
         const effectiveUserPrompt = payload.overrideUserPrompt?.trim() ? payload.overrideUserPrompt.trim() : defaultUserPrompt;
         const structuredParams = {
             ...context.params,
+            contextPolicy: context.policy,
+            contextSnapshot: {
+                scopeId: context.snapshot.scopeId,
+                anchorChapterId: context.snapshot.anchorChapterId,
+                chapterSources: context.snapshot.chapterSources.map((source) => ({
+                    chapterId: source.chapterId,
+                    title: source.title,
+                    contentMode: source.contentMode,
+                    version: source.version,
+                    contentHash: source.contentHash,
+                    source: source.source,
+                    summaryFresh: source.summaryFresh,
+                })),
+                narrativeSummaryIds: context.snapshot.narrativeSummaryIds,
+                estimatedTokens: context.snapshot.estimatedTokens,
+            },
             ...(normalizedUserIntent ? { userIntent: normalizedUserIntent } : {}),
             ...(normalizedCurrentLocation ? { currentLocation: normalizedCurrentLocation } : {}),
+            ...(batchContext ? { batchContext } : {}),
         };
         return {
             systemPrompt,
             defaultUserPrompt,
             effectiveUserPrompt,
             structured: {
-                goal: writeMode === 'new_chapter'
+                goal: writeMode === 'rewrite_chapter'
+                    ? (isZh ? '生成目标章节的完整替换正文。' : 'Generate a complete replacement for the target chapter.')
+                    : writeMode === 'new_chapter'
                     ? (isZh ? '生成新章节开场内容。' : 'Generate opening content for a new chapter.')
                     : (isZh ? '仅生成续写新增内容。' : 'Generate continuation content only.'),
                 contextRefs: context.usedContext,
@@ -1902,13 +3541,19 @@ export class AiService {
                             ? '在不冲突时优先满足用户意图。'
                             : 'Respect user intent when it does not conflict with hard context.']
                         : []),
-                    ...(isZh
-                        ? ['不得重复已有段落。', '只输出生成的续写正文。']
-                        : ['Do not repeat existing paragraphs.', 'Output only generated chapter text.']),
+                    ...(writeMode === 'rewrite_chapter'
+                        ? (isZh
+                            ? ['输出完整替换正文。', '不得追加在原文之后或解释修改过程。']
+                            : ['Output a complete replacement chapter.', 'Do not append to the original or explain edits.'])
+                        : (isZh
+                            ? ['不得重复已有段落。', '只输出生成的续写正文。']
+                            : ['Do not repeat existing paragraphs.', 'Output only generated chapter text.'])),
                 ],
             },
             usedContext: context.usedContext,
             warnings: context.warnings,
+            contextPolicy: context.policy,
+            contextSnapshot: context.snapshot,
         };
     }
 

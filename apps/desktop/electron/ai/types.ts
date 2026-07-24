@@ -1,5 +1,6 @@
 export type AiProviderType = 'http' | 'mcp-cli';
 export type AiProxyMode = 'system' | 'off' | 'custom';
+export type AiHttpApiMode = 'chat-completions' | 'responses';
 
 export interface AiProxySettings {
     mode: AiProxyMode;
@@ -10,6 +11,7 @@ export interface AiProxySettings {
 }
 
 export interface AiHttpSettings {
+    apiMode: AiHttpApiMode;
     baseUrl: string;
     apiKey: string;
     model: string;
@@ -19,6 +21,7 @@ export interface AiHttpSettings {
     imageWatermark: boolean;
     timeoutMs: number;
     maxTokens: number;
+    contextWindowTokens: number;
     temperature: number;
 }
 
@@ -28,6 +31,7 @@ export interface AiMcpCliSettings {
     workingDir: string;
     envJson: string;
     startupTimeoutMs: number;
+    contextWindowTokens: number;
 }
 
 export interface AiSummarySettings {
@@ -72,6 +76,7 @@ export interface AiGenerateRequest {
     maxTokens?: number;
     temperature?: number;
     timeoutMs?: number;
+    signal?: AbortSignal;
 }
 
 export interface AiGenerateResponse {
@@ -115,7 +120,7 @@ export interface TitleCandidate {
 
 export interface ContinueWritingPayload {
     locale?: string;
-    mode?: 'new_chapter' | 'continue_chapter';
+    mode?: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter';
     novelId: string;
     chapterId: string;
     currentContent: string;
@@ -130,12 +135,53 @@ export interface ContinueWritingPayload {
     userIntent?: string;
     currentLocation?: string;
     overrideUserPrompt?: string;
+    preparedContext?: import('./context/ContextBuilder').ContinueWritingContext;
+    batchContext?: Record<string, unknown>;
+    presentation?: 'silent' | 'toast' | 'modal';
+}
+
+export interface ChapterBeatGenerationPayload {
+    novelId: string;
+    chapterId: string;
+    goal: string;
+    chapterCount: number;
+    locale?: string;
+    context?: Record<string, unknown>;
+    taskMode?: 'sequence_continuation' | 'batch_rewrite';
+    targetChapterIds?: string[];
+}
+
+export interface ChapterBeatGenerationResult {
+    beats: Array<{
+        title: string;
+        chapterGoal: string;
+        coreConflict: string;
+        keyEvents: string[];
+        reveals: string[];
+        endingHook: string;
+        targetWordCount: number;
+    }>;
+}
+
+export interface NarrativeStateExtractionPayload {
+    locale?: string;
+    generatedText: string;
+    currentBeat?: Record<string, unknown>;
+    priorStateLedger?: Record<string, unknown>;
+    characters?: Array<{ key: string; name: string }>;
+    items?: Array<{ key: string; name: string }>;
+}
+
+export interface NarrativeStateExtractionResult {
+    delta: import('../../shared/draftBatch').NarrativeStateDelta;
 }
 
 export interface ContinueWritingResult {
     text: string;
     usedContext: string[];
     warnings?: string[];
+    contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
+    contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
     consistency: {
         ok: boolean;
         issues: string[];
@@ -206,6 +252,7 @@ export interface CreativeAssetsDraftValidationResult {
 export interface ConfirmCreativeAssetsResult {
     success: boolean;
     created: Record<string, number>;
+    createdEntities?: import('../../shared/draftWriteback').CreativeAssetWritebackEntitySnapshot[];
     warnings: string[];
     errors?: CreativeAssetsDraftIssue[];
     transactionMode: 'atomic';
