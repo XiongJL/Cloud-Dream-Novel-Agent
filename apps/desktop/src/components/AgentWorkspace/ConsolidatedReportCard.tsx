@@ -19,6 +19,7 @@ import {
   projectConsolidatedFindings,
   selectConsolidatedReportArtifact,
 } from '../../../shared/agentExpertReportProjection';
+import type { ReportReviewAvailability } from './reportReviewAvailability';
 
 const SEVERITY_LABELS = {
   critical: '严重',
@@ -31,25 +32,58 @@ const SEVERITY_LABELS = {
 export function ConsolidatedReportCard({
   artifacts,
   isDark,
-  interactive,
+  reviewAvailability,
   onOpenDetails,
   onModifySelected,
   onReviewSubmitted,
 }: {
   artifacts: AgentArtifact[];
   isDark: boolean;
-  interactive: boolean;
+  reviewAvailability: ReportReviewAvailability;
   onOpenDetails?: () => void;
   onModifySelected: (artifact: AgentArtifact, findingIds: string[]) => Promise<void>;
   onReviewSubmitted: (artifactId: string, result: ArtifactReviewSubmitResult) => void;
 }) {
   const artifact = useMemo(() => selectConsolidatedReportArtifact(artifacts), [artifacts]);
-  const report = getExpertReport(artifact);
+  // Normalizing legacy finding IDs can return a new report object. Keep that
+  // projection stable while the artifact is unchanged so a local checkbox
+  // update does not immediately retrigger the hydration effect below.
+  const report = useMemo(() => getExpertReport(artifact), [artifact]);
   const findings = useMemo(() => report ? projectConsolidatedFindings(report) : [], [report]);
   const [expanded, setExpanded] = useState(true);
   const [menuFindingId, setMenuFindingId] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<Record<string, FindingDecision>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const artifactIsReady = Boolean(artifact && ['ready', 'committed'].includes(artifact.status));
+  const artifactIsStale = artifact?.reviewStatus === 'stale';
+  const artifactIsIncomplete = artifact?.status === 'failed' || artifact?.status === 'discarded';
+  const isGenerating = reviewAvailability === 'generating' && !artifactIsStale && !artifactIsIncomplete;
+  const interactive = reviewAvailability === 'ready'
+    && artifactIsReady
+    && !artifactIsStale;
+  const availabilityLabel = artifactIsStale
+    ? '报告已过期'
+    : artifactIsIncomplete || reviewAvailability === 'incomplete'
+      ? '审核未完成'
+      : reviewAvailability === 'generating'
+        ? '审核生成中'
+        : reviewAvailability === 'waiting'
+          ? '审核待继续'
+          : reviewAvailability === 'blocked'
+            ? '暂不可审核'
+            : '';
+  const availabilityMessage = artifactIsStale
+    ? '源章节已经变化，当前报告仅供查看，请重新生成后再处理。'
+    : artifactIsIncomplete || reviewAvailability === 'incomplete'
+      ? '任务未完整结束，当前仅展示已经生成的内容。'
+      : reviewAvailability === 'generating'
+        ? '结果仍可能增加或调整，完成后即可处理。'
+        : reviewAvailability === 'waiting'
+          ? '任务正在等待继续，完成后即可处理审核结果。'
+          : reviewAvailability === 'blocked'
+            ? '当前工作区暂不可提交审核，请稍后再试。'
+            : '';
 
   useEffect(() => {
     if (!artifact || !report) return;
@@ -62,6 +96,10 @@ export function ConsolidatedReportCard({
     }
     setDecisions(stored);
   }, [artifact?.artifactId, artifact?.reviewRevision, findings, report]);
+
+  useEffect(() => {
+    if (!interactive) setMenuFindingId(null);
+  }, [interactive]);
 
   if (!artifact || !report || findings.length === 0) return null;
 
@@ -137,8 +175,21 @@ export function ConsolidatedReportCard({
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-sm font-semibold">综合审核</h3>
             <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
-              {report.findings.length} 项建议
+              {isGenerating ? `已发现 ${report.findings.length} 项建议` : `${report.findings.length} 项建议`}
             </span>
+            {availabilityLabel && (
+              <span className={clsx(
+                'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px]',
+                isGenerating
+                  ? isDark ? 'bg-blue-400/10 text-blue-300' : 'bg-[#eaf3ff] text-[#1d63b7]'
+                  : artifactIsStale || artifactIsIncomplete || reviewAvailability === 'incomplete'
+                    ? 'bg-amber-50 text-amber-700'
+                    : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]',
+              )}>
+                {isGenerating && <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />}
+                {availabilityLabel}
+              </span>
+            )}
           </div>
           {report.summary && (
             <p className={clsx('mt-1 line-clamp-2 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{report.summary}</p>
@@ -207,49 +258,54 @@ export function ConsolidatedReportCard({
                       {decision === 'rejected' && <span>已忽略</span>}
                     </div>
                   </div>
-                  {interactive && (
-                    <div className="relative shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setMenuFindingId((current) => current === finding.findingId ? null : finding.findingId)}
-                        className={clsx('grid h-8 w-8 place-items-center rounded-md', isDark ? 'text-neutral-500 hover:bg-white/5' : 'text-[var(--ui-text-disabled)] hover:bg-[var(--ui-surface-muted)]')}
-                        aria-label={`处理建议：${finding.title}`}
-                        title="更多操作"
-                      >
-                        <Ellipsis className="h-4 w-4" />
-                      </button>
-                      {menuFindingId === finding.findingId && (
-                        <div className={clsx('absolute right-0 top-9 z-20 w-28 rounded-md border p-1 shadow-lg', isDark ? 'border-white/10 bg-[#1b1b21]' : 'border-[var(--ui-border)] bg-white')}>
-                          <button type="button" onClick={() => decideFinding(finding.findingId, 'deferred')} className={clsx('h-8 w-full rounded px-2 text-left text-xs', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}>稍后处理</button>
-                          <button type="button" onClick={() => decideFinding(finding.findingId, 'rejected')} className={clsx('h-8 w-full rounded px-2 text-left text-xs', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}>忽略建议</button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                  <div className="relative shrink-0">
+                    <button
+                      type="button"
+                      disabled={!interactive || isSubmitting}
+                      onClick={() => setMenuFindingId((current) => current === finding.findingId ? null : finding.findingId)}
+                      className={clsx('grid h-8 w-8 place-items-center rounded-md disabled:cursor-default disabled:opacity-40', isDark ? 'text-neutral-500 enabled:hover:bg-white/5' : 'text-[var(--ui-text-disabled)] enabled:hover:bg-[var(--ui-surface-muted)]')}
+                      aria-label={`处理建议：${finding.title}`}
+                      title={interactive ? '更多操作' : availabilityLabel}
+                    >
+                      <Ellipsis className="h-4 w-4" />
+                    </button>
+                    {menuFindingId === finding.findingId && (
+                      <div className={clsx('absolute right-0 top-9 z-20 w-28 rounded-md border p-1 shadow-lg', isDark ? 'border-white/10 bg-[#1b1b21]' : 'border-[var(--ui-border)] bg-white')}>
+                        <button type="button" onClick={() => decideFinding(finding.findingId, 'deferred')} className={clsx('h-8 w-full rounded px-2 text-left text-xs', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}>稍后处理</button>
+                        <button type="button" onClick={() => decideFinding(finding.findingId, 'rejected')} className={clsx('h-8 w-full rounded px-2 text-left text-xs', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}>忽略建议</button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
           </div>
 
+          {!interactive && availabilityMessage && (
+            <div className={clsx('flex items-center gap-2 border-b px-4 py-2.5 text-xs', isDark ? 'border-white/10 bg-white/[0.02] text-neutral-400' : 'border-[var(--ui-border)] bg-[#f7faff] text-[var(--ui-text-muted)]')} aria-live="polite">
+              {isGenerating
+                ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#2f80ed] motion-reduce:animate-none" />
+                : <ShieldCheck className="h-3.5 w-3.5 shrink-0" />}
+              {availabilityMessage}
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
             <button type="button" disabled={!onOpenDetails} onClick={onOpenDetails} className={clsx('inline-flex h-8 items-center gap-1.5 rounded px-2 text-xs disabled:cursor-default disabled:opacity-60', isDark ? 'text-neutral-400 enabled:hover:bg-white/5' : 'text-[var(--ui-text-muted)] enabled:hover:bg-[var(--ui-surface-muted)]')}>
               <Eye className="h-3.5 w-3.5" />
               查看依据与全部 {report.findings.length} 项
             </button>
-            {interactive && (
-              <div className="flex flex-wrap items-center gap-2">
-                <button type="button" disabled={isSubmitting} onClick={deferVisible} className={clsx('h-9 rounded-md px-3 text-sm disabled:opacity-50', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]')}>稍后再说</button>
-                <button
-                  type="button"
-                  disabled={isSubmitting || selectedCount === 0}
-                  onClick={() => void modifySelected()}
-                  className={clsx('inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm text-white disabled:opacity-40', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
-                >
-                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
-                  帮我修改 {selectedCount} 项
-                </button>
-              </div>
-            )}
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="button" disabled={!interactive || isSubmitting} onClick={deferVisible} className={clsx('h-9 rounded-md px-3 text-sm disabled:cursor-not-allowed disabled:opacity-40', isDark ? 'text-neutral-400 enabled:hover:bg-white/5' : 'text-[var(--ui-text-muted)] enabled:hover:bg-[var(--ui-surface-muted)]')}>稍后再说</button>
+              <button
+                type="button"
+                disabled={!interactive || isSubmitting || selectedCount === 0}
+                onClick={() => void modifySelected()}
+                className={clsx('inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm text-white disabled:cursor-not-allowed disabled:opacity-40', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
+              >
+                {isSubmitting || isGenerating ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <ShieldCheck className="h-4 w-4" />}
+                {interactive ? `帮我修改 ${selectedCount} 项` : availabilityLabel || '暂不可审核'}
+              </button>
+            </div>
           </div>
           <div className={clsx('flex items-center gap-2 border-t px-4 py-2 text-[11px]', isDark ? 'border-white/10 text-neutral-600' : 'border-[var(--ui-border)] text-[var(--ui-text-disabled)]')}>
             <ShieldCheck className="h-3.5 w-3.5 shrink-0" />

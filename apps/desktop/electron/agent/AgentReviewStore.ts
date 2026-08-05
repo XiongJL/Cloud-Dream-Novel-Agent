@@ -15,6 +15,7 @@ import type {
     RevisionTaskSyncRunResult,
     RevisionTaskUpdateStatusInput,
 } from '../../shared/expertReport';
+import { normalizeExpertReportFindingIds } from '../../shared/expertReport';
 import type { AgentChapterSnapshot } from '../../shared/agentChapterScope';
 
 type ArtifactReviewRow = {
@@ -119,8 +120,9 @@ function extractExpertReport(row: ArtifactReviewRow): ExpertReportPayload {
     if (!Array.isArray(report.findings) || !Array.isArray(report.sourceSnapshot)) {
         throw reviewError('INVALID_REPORT', 'Expert report findings and sourceSnapshot are required');
     }
+    const normalizedReport = normalizeExpertReportFindingIds(report as ExpertReportPayload);
     const findingIds = new Set<string>();
-    for (const finding of report.findings) {
+    for (const finding of normalizedReport.findings) {
         const id = typeof finding?.findingId === 'string' ? finding.findingId.trim() : '';
         if (!id || findingIds.has(id)) {
             throw reviewError('INVALID_REPORT', 'Expert report findingId values must be non-empty and unique');
@@ -128,7 +130,7 @@ function extractExpertReport(row: ArtifactReviewRow): ExpertReportPayload {
         findingIds.add(id);
     }
     return {
-        ...report,
+        ...normalizedReport,
         artifactId: report.artifactId || row.artifactId,
         novelId: report.novelId || row.novelId,
     } as ExpertReportPayload;

@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { db } from '@novel-editor/core';
+import { jsonrepair } from 'jsonrepair';
 import { createCapabilityDefinitions, type CapabilityDefinition, type CapabilityHandler } from './capabilities';
 import { AiActionError, formatAiErrorForDisplay, normalizeAiError } from './errors';
 import { HttpProvider } from './providers/HttpProvider';
@@ -20,9 +22,9 @@ import {
     AiMapImagePayload,
     AiMapImageResult,
     AiMapImageStats,
-    OpenClawSmokePayload,
     OpenClawSmokeResult,
     AiProvider,
+    AiProviderType,
     AiSettings,
     CreativeAssetsGeneratePayload,
     ContinueWritingPayload,
@@ -33,7 +35,7 @@ import {
     TitleCandidate,
     TitleGenerationPayload,
 } from './types';
-import { parseFirstJsonObject as parseJsonObject } from '../../shared/agentJson';
+import { parseRepairableJsonObject } from '../../shared/agentJson';
 import { createCreativeAssetEntitySnapshot } from '../automation/CreativeAssetsWriteback';
 import type { CreativeAssetWritebackEntitySnapshot } from '../../shared/draftWriteback';
 import { ContextBuilder } from './context/ContextBuilder';
@@ -46,20 +48,69 @@ import {
     type AgentContextSection,
     type AgentConversationSummary,
 } from './context/AgentContextAssembler';
+import {
+    AgentContextCompressionCoordinator,
+    type AgentContextCompressionCoordinatorDiagnostics,
+    type AgentContextCompressionStore,
+} from './context/AgentContextCompressionCoordinator';
+import { buildAgentContextStateRefs } from './context/AgentContextStateRefs';
+import { AgentContextTokenCounter } from './context/AgentContextTokenCounter';
+import {
+    canonicalJson,
+    sha256,
+    type AgentConversationSummaryV2,
+} from './context/AgentConversationSummaryV2';
 import { NovelRagService } from './rag/NovelRagService';
 import type { RagAskPayload, RagAskResult } from './rag/types';
 import { buildVectorDocumentForSource, deleteRagVectorSource, getRagVectorChunkCount, rebuildRagVectorIndex, upsertRagChapterIndex, upsertRagSourceIndex } from './rag/vectorIndex';
 import type { RagEvidenceSourceType } from './rag/types';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
 import { filterNarrativeStateDeltaEvidence, normalizeNarrativeStateDelta } from '../../shared/narrativeState';
+import type { AgentConversationCompressionSnapshot } from '../agent/AgentConversationStore';
+import {
+    getAgentStructuredOutputContract,
+    type AgentStructuredOutputContract,
+    validateAgentStructuredOutput,
+} from '../automation/AgentStructuredOutputContracts';
+
+type AgentStructuredCheckpoint = {
+    modelResultRef: string;
+    revision: number;
+    resultHash: string;
+};
+
+type AgentStructuredInvocationContext = {
+    requestId: string;
+    method: string;
+    checkpoint: (
+        rawText: string,
+        contract: AgentStructuredOutputContract,
+    ) => Promise<AgentStructuredCheckpoint>;
+    latestCheckpoint?: AgentStructuredCheckpoint;
+    contract?: AgentStructuredOutputContract;
+    autoRepair?: (input: {
+        checkpoint: AgentStructuredCheckpoint;
+        contract: AgentStructuredOutputContract;
+        validationIssues: Array<{ path: string; message: string }>;
+    }) => Promise<Record<string, unknown>>;
+    autoRepairAttempted?: boolean;
+};
 
 const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 const DRAFT_MAX_FIELD_LENGTH = 2000;
 const VALID_PLOT_POINT_TYPES = new Set(['foreshadowing', 'mystery', 'promise', 'event']);
 const VALID_PLOT_POINT_STATUS = new Set(['active', 'resolved']);
 const VALID_ITEM_TYPES = new Set(['item', 'skill', 'location']);
+const VALID_WORLD_SETTING_TYPES = new Set(['history', 'geography', 'magic_system', 'faction', 'technology', 'other']);
 const VALID_MAP_TYPES = new Set(['world', 'region', 'scene']);
-const CREATIVE_ASSET_SECTIONS = ['plotLines', 'plotPoints', 'characters', 'items', 'skills', 'maps'] as const;
+const DRAFT_GENERATION_TIMEOUT_MS = 300_000;
+const DRAFT_FIRST_BYTE_TIMEOUT_MS = 120_000;
+const DRAFT_STREAM_IDLE_TIMEOUT_MS = 60_000;
+const AGENT_CHAT_REQUESTED_OUTPUT_TOKENS = 2_600;
+const AGENT_CHAT_MINIMUM_OUTPUT_TOKENS = 256;
+const AGENT_CHAT_MINIMUM_DYNAMIC_CONTEXT_TOKENS = 1_280;
+const AGENT_CHAT_DYNAMIC_CONTEXT_HEADROOM_TOKENS = 128;
+const CREATIVE_ASSET_SECTIONS = ['plotLines', 'plotPoints', 'characters', 'items', 'skills', 'worldSettings', 'maps'] as const;
 type CreativeAssetSection = (typeof CREATIVE_ASSET_SECTIONS)[number];
 const CREATIVE_SECTION_KEYWORDS: Record<CreativeAssetSection, string[]> = {
     plotLines: ['主线', '支线', '故事线', '剧情线', 'plot line', 'story line'],
@@ -67,6 +118,7 @@ const CREATIVE_SECTION_KEYWORDS: Record<CreativeAssetSection, string[]> = {
     characters: ['角色', '龙套', '配角', '人物', '反派', '主角', 'npc', 'character'],
     items: ['物品', '道具', '装备', '宝物', '武器', '法宝', 'artifact', 'item'],
     skills: ['技能', '招式', '能力', '法术', '功法', '绝招', 'spell', 'skill'],
+    worldSettings: ['世界观', '世界设定', '设定', '规则', '阵营', '地理', '历史', '魔法体系', '科技体系', 'world setting', 'lore', 'faction'],
     maps: ['地图', '场景', '地点', '区域', '城市', '宗门地图', 'world map', 'map', 'location'],
 };
 const OPENCLAW_REQUIRED_ACTIONS = [
@@ -269,71 +321,119 @@ function dedupeStrings(values: string[], maxCount: number): string[] {
     return output;
 }
 
-function collectAgentContextArtifacts(value: unknown): AgentContextArtifact[] {
-    if (!value || typeof value !== 'object') return [];
-    const context = value as Record<string, unknown>;
-    const runs = [
-        ...(context.activeRun && typeof context.activeRun === 'object' ? [context.activeRun] : []),
-        ...(Array.isArray(context.priorRuns) ? context.priorRuns : []),
-    ];
-    const byId = new Map<string, AgentContextArtifact>();
-    for (const runValue of runs) {
-        if (!runValue || typeof runValue !== 'object') continue;
-        const run = runValue as Record<string, unknown>;
-        for (const artifactValue of Array.isArray(run.artifacts) ? run.artifacts : []) {
-            if (!artifactValue || typeof artifactValue !== 'object') continue;
-            const artifact = artifactValue as Record<string, unknown>;
-            const artifactId = trimText(artifact.artifactId, 160);
-            if (!artifactId) continue;
-            byId.set(artifactId, {
-                artifactId,
-                ...(artifact.runId || run.runId ? { runId: trimText(artifact.runId || run.runId, 160) } : {}),
-                ...(artifact.type ? { type: trimText(artifact.type, 80) } : {}),
-                ...(artifact.title ? { title: trimText(artifact.title, 240) } : {}),
-                ...(artifact.status ? { status: trimText(artifact.status, 80) } : {}),
-                ...(artifact.summary ? { summary: trimText(artifact.summary, 4000) } : {}),
-                ...(artifact.content ? { content: trimText(artifact.content, 40_000) } : {}),
-                ...(artifact.reference && typeof artifact.reference === 'object'
-                    ? { reference: artifact.reference as Record<string, unknown> }
-                    : {}),
-                ...(artifact.metadata && typeof artifact.metadata === 'object'
-                    ? { metadata: artifact.metadata as Record<string, unknown> }
-                    : {}),
-                ...(artifact.createdAt ? { createdAt: trimText(artifact.createdAt, 80) } : {}),
-            });
-        }
-    }
-    return [...byId.values()];
+function objectRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
 }
 
-function compactConversationArtifacts(value: unknown): Record<string, unknown> {
-    if (!value || typeof value !== 'object') return {};
-    const context = value as Record<string, unknown>;
-    const compactRun = (runValue: unknown): unknown => {
-        if (!runValue || typeof runValue !== 'object') return runValue;
-        const run = runValue as Record<string, unknown>;
-        return {
-            ...run,
-            artifacts: (Array.isArray(run.artifacts) ? run.artifacts : []).flatMap((artifactValue) => {
-                if (!artifactValue || typeof artifactValue !== 'object') return [];
-                const artifact = artifactValue as Record<string, unknown>;
-                return [{
-                    artifactId: artifact.artifactId,
-                    runId: artifact.runId || run.runId,
-                    type: artifact.type,
-                    title: artifact.title,
-                    status: artifact.status,
-                    summary: trimText(artifact.summary, 800),
-                    reference: artifact.reference,
-                    createdAt: artifact.createdAt,
-                }];
-            }),
-        };
+const CONTEXT_RELATION_KEYS = ['requestId', 'inputSessionId', 'runId', 'planId', 'checkpointId'] as const;
+
+function relationValues(value: unknown, depth = 0): Map<string, Set<string>> {
+    const result = new Map<string, Set<string>>();
+    const add = (key: string, candidate: unknown) => {
+        const normalized = typeof candidate === 'string' ? candidate.trim() : '';
+        if (!normalized) return;
+        const values = result.get(key) || new Set<string>();
+        values.add(normalized);
+        result.set(key, values);
     };
+    const visit = (candidate: unknown, currentDepth: number) => {
+        const record = objectRecord(candidate);
+        if (!record || currentDepth > depth) return;
+        for (const key of CONTEXT_RELATION_KEYS) add(key, record[key]);
+        if (currentDepth === depth) return;
+        for (const key of ['request', 'pendingUserInput', 'pendingApproval', 'plan', 'run']) {
+            visit(record[key], currentDepth + 1);
+        }
+    };
+    visit(value, 0);
+    return result;
+}
+
+function mergeRelationValues(target: Map<string, Set<string>>, source: Map<string, Set<string>>): void {
+    for (const [key, values] of source) {
+        const current = target.get(key) || new Set<string>();
+        for (const value of values) current.add(value);
+        target.set(key, current);
+    }
+}
+
+function selectRelatedUserInputResolutions(
+    snapshot: AgentConversationCompressionSnapshot,
+): Array<Record<string, unknown>> {
+    const active = new Map<string, Set<string>>();
+    mergeRelationValues(active, relationValues(snapshot.authoritativeContext.currentPlan, 1));
+    mergeRelationValues(active, relationValues(snapshot.authoritativeContext.activeRun, 2));
+    mergeRelationValues(active, relationValues(snapshot.authoritativeContext.pendingUserInput, 1));
+    if (![...active.values()].some((values) => values.size > 0)) return [];
+    const activeRun = objectRecord(snapshot.authoritativeContext.activeRun);
+    const candidates = [
+        ...snapshot.authoritativeContext.userInputResolutions,
+        ...(Array.isArray(activeRun?.userInputResponses)
+            ? activeRun.userInputResponses.filter((item): item is Record<string, unknown> => Boolean(objectRecord(item)))
+            : []),
+    ];
+    const selected = candidates.filter((candidate) => {
+        const relations = relationValues(candidate, 2);
+        return [...relations].some(([key, values]) => {
+            const activeValues = active.get(key);
+            return Boolean(activeValues && [...values].some((value) => activeValues.has(value)));
+        });
+    });
+    const byIdentity = new Map<string, Record<string, unknown>>();
+    for (const resolution of selected) {
+        const identity = [resolution.requestId, resolution.inputSessionId, resolution.resolvedAt]
+            .map((value) => String(value || '')).join(':') || canonicalJson(resolution);
+        byIdentity.set(identity, resolution);
+    }
+    return [...byIdentity.values()];
+}
+
+function authoritativeArtifacts(snapshot: AgentConversationCompressionSnapshot): AgentContextArtifact[] {
+    return snapshot.artifacts.map((artifact) => ({
+        artifactId: artifact.artifactId,
+        runId: artifact.runId,
+        type: artifact.type,
+        title: artifact.title,
+        status: artifact.status,
+        summary: artifact.summary,
+        content: artifact.content,
+        reference: artifact.reference,
+        metadata: artifact.metadata,
+        createdAt: artifact.createdAt,
+    }));
+}
+
+function protectedActiveRun(snapshot: AgentConversationCompressionSnapshot): Record<string, unknown> | null {
+    const run = snapshot.authoritativeContext.activeRun;
+    if (!run) return null;
     return {
-        ...context,
-        activeRun: compactRun(context.activeRun),
-        priorRuns: Array.isArray(context.priorRuns) ? context.priorRuns.map(compactRun) : [],
+        runId: run.runId,
+        planId: run.planId,
+        status: run.status,
+        currentStepId: run.currentStepId,
+        draftSessionId: run.draftSessionId,
+        draftBatchId: run.draftBatchId,
+        draftOperationId: run.draftOperationId,
+        pendingUserInput: run.pendingUserInput || null,
+        pendingApproval: run.pendingApproval || null,
+        artifactRefs: snapshot.artifacts.filter((artifact) => artifact.runId === run.runId).map((artifact) => ({
+            artifactId: artifact.artifactId,
+            runId: artifact.runId,
+            type: artifact.type,
+            title: artifact.title,
+            status: artifact.status,
+            sourceVersion: String(artifact.reviewRevision || 0),
+            contentHash: sha256(canonicalJson({
+                status: artifact.status,
+                summary: artifact.summary || '',
+                content: artifact.content || '',
+                reference: artifact.reference,
+                metadata: artifact.metadata,
+                reviewRevision: artifact.reviewRevision || 0,
+            })),
+        })),
     };
 }
 
@@ -347,9 +447,16 @@ export class AiService {
     private readonly capabilityRegistry: Map<string, CapabilityHandler>;
     private readonly contextBuilder: ContextBuilder;
     private readonly agentContextAssembler: AgentContextAssembler;
+    private readonly contextCompressionStore: AgentContextCompressionStore | null;
+    private readonly agentContextCompressionCoordinator: AgentContextCompressionCoordinator | null;
+    private readonly agentContextPrecompressionTimers = new Map<string, ReturnType<typeof setTimeout>>();
     private readonly novelRagService: NovelRagService;
+    private readonly agentStructuredInvocation = new AsyncLocalStorage<AgentStructuredInvocationContext>();
 
-    constructor(userDataPathGetter: () => string) {
+    constructor(
+        userDataPathGetter: () => string,
+        contextCompressionStore?: AgentContextCompressionStore,
+    ) {
         this.userDataPath = userDataPathGetter();
         this.settingsFilePath = path.join(this.userDataPath, 'ai-settings.json');
         this.mapImageStatsPath = path.join(this.userDataPath, 'ai-map-image-stats.json');
@@ -357,6 +464,10 @@ export class AiService {
         this.mapImageStatsCache = this.loadMapImageStats();
         this.contextBuilder = new ContextBuilder();
         this.agentContextAssembler = new AgentContextAssembler();
+        this.contextCompressionStore = contextCompressionStore || null;
+        this.agentContextCompressionCoordinator = contextCompressionStore
+            ? new AgentContextCompressionCoordinator(contextCompressionStore, () => this.getProvider())
+            : null;
         this.novelRagService = new NovelRagService();
         this.capabilityDefinitions = createCapabilityDefinitions({
             buildChapterScopeContext: (payload) => this.contextBuilder.buildForChapterScope(payload),
@@ -368,6 +479,181 @@ export class AiService {
         this.capabilityRegistry = new Map(
             this.capabilityDefinitions.map((definition) => [definition.actionId, definition.handler]),
         );
+    }
+
+    withAgentStructuredInvocation<T>(
+        context: AgentStructuredInvocationContext,
+        task: () => Promise<T>,
+    ): Promise<T> {
+        return this.agentStructuredInvocation.run(context, task);
+    }
+
+    private async checkpointAndParseStructuredResponse(rawText: string): Promise<Record<string, unknown> | null> {
+        const invocation = this.agentStructuredInvocation.getStore();
+        if (invocation) {
+            const contract = getAgentStructuredOutputContract(invocation.method);
+            if (contract) {
+                invocation.contract = contract;
+                invocation.latestCheckpoint = await invocation.checkpoint(rawText, contract);
+            }
+        }
+        const parseResult = parseRepairableJsonObject(rawText, jsonrepair);
+        const parsed = parseResult?.value ?? null;
+        if (parseResult?.repaired) {
+            devLog('INFO', 'AiService.structuredOutput.localRepair', 'Structured JSON repaired locally', {
+                method: invocation?.method,
+                contractId: invocation?.contract?.contractId,
+                modelResultRef: invocation?.latestCheckpoint?.modelResultRef,
+                rawLength: rawText.length,
+            });
+        }
+        if (invocation?.contract) {
+            const issues = parsed
+                ? validateAgentStructuredOutput(parsed, invocation.contract)
+                : [{ path: '$', message: 'Expected one JSON object' }];
+            if (issues.length > 0) {
+                if (
+                    invocation.autoRepair
+                    && !invocation.autoRepairAttempted
+                    && invocation.latestCheckpoint
+                ) {
+                    invocation.autoRepairAttempted = true;
+                    return invocation.autoRepair({
+                        checkpoint: invocation.latestCheckpoint,
+                        contract: invocation.contract,
+                        validationIssues: issues,
+                    });
+                }
+                this.invalidAgentStructuredOutput(
+                    parsed
+                        ? 'Model response did not match the structured output contract'
+                        : 'Model response did not contain a JSON object',
+                    issues,
+                );
+            }
+        }
+        return parsed;
+    }
+
+    private invalidAgentStructuredOutput(message: string, issues: Array<{ path: string; message: string }> = []): never {
+        const invocation = this.agentStructuredInvocation.getStore();
+        throw new AiActionError('MODEL_OUTPUT_INVALID', message, undefined, {
+            ...(invocation?.latestCheckpoint ? {
+                modelResultRef: invocation.latestCheckpoint.modelResultRef,
+                modelResultRevision: invocation.latestCheckpoint.revision,
+                resultHash: invocation.latestCheckpoint.resultHash,
+            } : {}),
+            ...(invocation?.contract ? {
+                contractId: invocation.contract.contractId,
+                contractVersion: invocation.contract.version,
+            } : {}),
+            validationIssues: issues.slice(0, 20),
+        });
+    }
+
+    async repairAgentStructuredOutput(input: {
+        rawText: string;
+        contract: AgentStructuredOutputContract;
+        validationIssues: Array<{ path: string; message: string }>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const response = await this.getProvider().generate({
+            systemPrompt: [
+                'You repair a structured JSON payload so it conforms to the supplied JSON Schema.',
+                'Preserve the original meaning and values whenever they can be represented by the schema.',
+                'Do not continue the story, add analysis, invent missing evidence, or perform the original task again.',
+                'Return exactly one JSON object. Do not include Markdown, comments, or explanatory text.',
+            ].join(' '),
+            prompt: [
+                `Contract=${input.contract.contractId}@${input.contract.version}`,
+                `JSONSchema=${JSON.stringify(input.contract.schema)}`,
+                `ValidationIssues=${JSON.stringify(input.validationIssues.slice(0, 20))}`,
+                `InvalidPayload=${input.rawText}`,
+            ].join('\n\n'),
+            maxTokens: Math.min(this.settingsCache.http.maxTokens, 8000),
+            temperature: 0,
+            timeoutMs: Math.min(Math.max(this.settingsCache.http.timeoutMs, 120000), 140000),
+            signal,
+        });
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        if (!parsed) {
+            this.invalidAgentStructuredOutput('Structured output repair did not return a JSON object');
+        }
+        return parsed;
+    }
+
+    async rebuildAgentContextSummary(storageConversationId: string): Promise<{
+        ok: boolean;
+        status: 'completed' | 'in_progress' | 'failed';
+        revision: number;
+        generation: number;
+        diagnostics: AgentContextCompressionCoordinatorDiagnostics;
+    }> {
+        const conversationId = trimText(storageConversationId, 200);
+        if (!conversationId) throw new AiActionError('INVALID_INPUT', 'storageConversationId is required');
+        if (!this.agentContextCompressionCoordinator) {
+            throw new AiActionError('UNKNOWN', 'Authoritative Agent conversation context is unavailable.');
+        }
+        const providerType = this.settingsCache.providerType;
+        const model = providerType === 'http' ? this.settingsCache.http.model : 'mcp-cli';
+        const configuredContextWindowTokens = providerType === 'http'
+            ? this.settingsCache.http.contextWindowTokens
+            : this.settingsCache.mcpCli.contextWindowTokens;
+        const result = await this.agentContextCompressionCoordinator.prepare({
+            storageConversationId: conversationId,
+            providerType,
+            model,
+            configuredContextWindowTokens,
+            outputReserveTokens: Math.min(this.settingsCache.http.maxTokens, 2_600),
+            systemPrompt: 'Rebuild the persisted Agent conversation semantic projection from authoritative history.',
+            currentRequest: { maintenanceAction: 'manual_quality_rebuild' },
+            protectedContext: { storageConversationId: conversationId },
+            sections: [],
+            force: true,
+            explicitRetry: true,
+            rebuildReason: 'manual_quality_rebuild',
+        });
+        const status = result.diagnostics.rebuildStatus === 'running'
+            ? 'in_progress' as const
+            : result.diagnostics.mode === 'semantic'
+                ? 'completed' as const
+                : 'failed' as const;
+        return {
+            ok: status !== 'failed',
+            status,
+            revision: result.summary?.revision || result.diagnostics.summaryRevision,
+            generation: result.summary?.generation || result.diagnostics.summaryGeneration,
+            diagnostics: result.diagnostics,
+        };
+    }
+
+    private scheduleAgentContextPrecompression(input: {
+        storageConversationId: string;
+        providerType: AiProviderType;
+        model: string;
+        configuredContextWindowTokens?: number;
+    }): void {
+        if (!this.agentContextCompressionCoordinator) return;
+        const existing = this.agentContextPrecompressionTimers.get(input.storageConversationId);
+        if (existing) clearTimeout(existing);
+        const timer = setTimeout(() => {
+            this.agentContextPrecompressionTimers.delete(input.storageConversationId);
+            void this.agentContextCompressionCoordinator!.prepare({
+                ...input,
+                outputReserveTokens: Math.min(this.settingsCache.http.maxTokens, 2_600),
+                systemPrompt: 'Precompress authoritative Agent conversation history for the next request.',
+                currentRequest: { maintenanceAction: 'background_precompression' },
+                protectedContext: { storageConversationId: input.storageConversationId },
+                sections: [],
+                force: true,
+                background: true,
+            }).catch((error) => {
+                devLog('WARN', 'AiService.agentContext.precompressionFailed', 'Background Agent context precompression failed', {
+                    storageConversationId: input.storageConversationId,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }, 1_500);
+        this.agentContextPrecompressionTimers.set(input.storageConversationId, timer);
     }
 
     listActions(): Array<{
@@ -453,28 +739,6 @@ export class AiService {
         };
     }
 
-    getOpenClawSkillManifest(): {
-        schemaVersion: string;
-        skills: Array<{
-            name: string;
-            title: string;
-            description: string;
-            inputSchema: Record<string, unknown>;
-        }>;
-    } {
-        const skills = this.capabilityDefinitions.map((definition) => ({
-            name: definition.actionId,
-            title: definition.title,
-            description: definition.description,
-            inputSchema: definition.inputSchema,
-        }));
-
-        return {
-            schemaVersion: 'openclaw.skill.v1',
-            skills,
-        };
-    }
-
     getSettings(): AiSettings {
         return this.settingsCache;
     }
@@ -508,26 +772,19 @@ export class AiService {
     }
 
     async testOpenClawMcp(): Promise<AiHealthCheckResult> {
-        const result = await this.testOpenClawSmoke({ kind: 'mcp' });
+        const result = await this.testOpenClawSmoke();
         return { ok: result.ok, detail: result.detail };
     }
 
-    async testOpenClawSkill(): Promise<AiHealthCheckResult> {
-        const result = await this.testOpenClawSmoke({ kind: 'skill' });
-        return { ok: result.ok, detail: result.detail };
-    }
-
-    async testOpenClawSmoke(payload: OpenClawSmokePayload): Promise<OpenClawSmokeResult> {
-        const kind = payload.kind === 'skill' ? 'skill' : 'mcp';
-        const actionNames = kind === 'mcp'
-            ? this.getOpenClawManifest().tools.map((tool) => tool.name)
-            : this.getOpenClawSkillManifest().skills.map((skill) => skill.name);
+    async testOpenClawSmoke(): Promise<OpenClawSmokeResult> {
+        const kind = 'mcp' as const;
+        const actionNames = this.getOpenClawManifest().tools.map((tool) => tool.name);
 
         if (!actionNames.length) {
             return {
                 ok: false,
                 kind,
-                detail: kind === 'mcp' ? 'No OpenClaw MCP tools available' : 'No OpenClaw skills available',
+                detail: 'No OpenClaw MCP tools available',
                 missingActions: [...OPENCLAW_REQUIRED_ACTIONS],
                 checks: [],
             };
@@ -546,9 +803,7 @@ export class AiService {
         }
 
         const invoke = (actionId: string, input?: unknown) => (
-            kind === 'mcp'
-                ? this.invokeOpenClawTool({ name: actionId, arguments: input })
-                : this.invokeOpenClawSkill({ name: actionId, input })
+            this.invokeOpenClawTool({ name: actionId, arguments: input })
         );
 
         const novelResult = await invoke('novel.list');
@@ -669,10 +924,12 @@ export class AiService {
         systemPrompt: string;
         outputTokens: number;
         currentRequest: unknown;
+        protectedContext?: unknown;
         history?: AgentContextMessage[];
         sections?: AgentContextSection[];
-        persistentSummary?: AgentConversationSummary | Record<string, unknown> | null;
+        persistentSummary?: AgentConversationSummary | AgentConversationSummaryV2 | Record<string, unknown> | null;
         artifacts?: AgentContextArtifact[];
+        compressionDiagnostics?: AgentContextCompressionCoordinatorDiagnostics;
     }): AgentContextAssembly {
         const providerType = this.settingsCache.providerType;
         const model = providerType === 'http' ? this.settingsCache.http.model : 'mcp-cli';
@@ -686,10 +943,12 @@ export class AiService {
             outputTokens: input.outputTokens,
             systemPrompt: input.systemPrompt,
             currentRequest: input.currentRequest,
+            protectedContext: input.protectedContext,
             history: input.history,
             sections: input.sections,
             persistentSummary: input.persistentSummary,
             artifacts: input.artifacts,
+            compressionDiagnostics: input.compressionDiagnostics,
         });
         devLog('INFO', 'AiService.agentContext.assembled', 'Agent model context assembled', {
             operation: input.operation,
@@ -741,6 +1000,8 @@ export class AiService {
     }
 
     async generateAgentChat(payload: {
+        storageConversationId: string;
+        messageId?: string;
         message: string;
         role: string;
         locale?: string;
@@ -753,7 +1014,7 @@ export class AiService {
         selectionContext?: Record<string, unknown>;
         toolObservations?: Array<{ toolName?: string; args?: unknown; result?: unknown; error?: string; ok?: boolean }>;
         conversationContext?: Record<string, unknown>;
-        persistentSummary?: AgentConversationSummary | Record<string, unknown> | null;
+        protectedContext?: Record<string, unknown>;
         explorationNotes?: string[];
         forceFinalization?: boolean;
     }, signal?: AbortSignal): Promise<{
@@ -765,10 +1026,22 @@ export class AiService {
         suggestedRole?: string;
         confidence: number;
         toolCalls: Array<{ name: string; args: Record<string, unknown> }>;
+        inputRequest?: {
+            title: string;
+            reason: string;
+            questions: Array<{
+                questionId: string;
+                header: string;
+                prompt: string;
+                options: Array<{ optionId: string; label: string; description: string }>;
+                recommendedOptionId: string;
+                recommendationReason: string;
+            }>;
+        };
         contextDiagnostics: AgentContextDiagnostics;
-        conversationSummary?: AgentConversationSummary;
         contextCompression?: {
             applied: true;
+            mode: 'none' | 'projection' | 'micro' | 'semantic' | 'degraded';
             model: string;
             contextWindowTokens: number;
             inputBudgetTokens: number;
@@ -784,10 +1057,53 @@ export class AiService {
             recalledArtifactCount: number;
             compressedSectionIds: string[];
             omittedSectionIds: string[];
+            operationKind?: 'none' | 'coverage_increment' | 'dependency_refresh' | 'generation_rebuild' | 'background_precompression';
+            triggerReason?: 'none' | 'high_water' | 'forced' | 'source_changed' | 'dependency_changed' | 'manual_rebuild';
+            currentRequestIdentityStatus?: 'not_applicable' | 'valid' | 'mismatch';
+            currentRequestPayloadOccurrences?: number;
+            summaryGeneration?: number;
+            rebuildReason?: 'source_changed' | 'manual_quality_rebuild';
+            rebuildTaskId?: string | null;
+            rebuildStatus?: 'idle' | 'running' | 'completed' | 'discarded' | 'limit_exceeded';
+            rebuildCompletedChunks?: number;
+            rebuildMaxChunks?: number;
+            rebuildElapsedMs?: number;
+            rebuildMaxDurationMs?: number;
+            preCompressionContextTokens?: number;
+            postCompressionContextTokens?: number;
+            preCompressionProviderInputTokens?: number;
+            postCompressionProviderInputTokens?: number;
+            hardTokenCountMethod?: 'provider_exact' | 'tokenizer_exact' | 'conservative_upper_bound';
+            hardTokenCountProfileId?: string;
+            statusCodes?: Array<'CONTEXT_REBUILD_IN_PROGRESS' | 'CONTEXT_PRECOMPRESSION_IN_PROGRESS'>;
+            errorCode?: string;
+            /** @deprecated Legacy aliases retained for persisted UI messages. */
+            rebuildChunksCompleted?: number;
+            rebuildChunkCount?: number;
+            sourceHashStatus?: 'none' | 'valid' | 'stale';
+            dependencyHashStatus?: 'none' | 'valid' | 'stale';
+            failureCode?: string;
+            consecutiveFailures?: number;
+            circuitOpen?: boolean;
+            casConflict?: boolean;
         };
     }> {
-        const message = trimText(payload.message, 8000);
-        if (!message) throw new AiActionError('INVALID_INPUT', 'message is required');
+        const message = String(payload.message ?? '');
+        if (!message.trim()) throw new AiActionError('INVALID_INPUT', 'message is required');
+        const storageConversationId = trimText(payload.storageConversationId, 200);
+        if (!storageConversationId) {
+            throw new AiActionError('INVALID_INPUT', 'storageConversationId is required');
+        }
+        if (!this.contextCompressionStore || !this.agentContextCompressionCoordinator) {
+            throw new AiActionError('UNKNOWN', 'Authoritative Agent conversation context is unavailable.');
+        }
+        const requestMessageId = trimText(payload.messageId, 200);
+        if (!requestMessageId) {
+            throw new AiActionError(
+                'CONTEXT_CURRENT_REQUEST_IDENTITY_MISMATCH',
+                'messageId is required for persisted Agent chat requests.',
+            );
+        }
         const isZh = (payload.locale || 'zh-CN').startsWith('zh');
         const roleLabels: Record<string, string> = {
             team: isZh ? '创作团队统筹' : 'creative team supervisor',
@@ -798,12 +1114,6 @@ export class AiService {
             research_rag: isZh ? '考据与证据整理员' : 'research assistant',
         };
         const role = roleLabels[payload.role] || roleLabels.team;
-        const history = (payload.history || []).map((item) => ({
-            role: item.role,
-            content: String(item.content || '').trim(),
-            ...(item.createdAt ? { createdAt: String(item.createdAt) } : {}),
-            ...(item.messageId ? { messageId: String(item.messageId) } : {}),
-        })).filter((item) => item.content);
         const availableReadTools = dedupeStrings(payload.availableReadTools || [], 20);
         const availableReadToolDefinitions = (payload.availableReadToolDefinitions || [])
             .filter((item) => item && availableReadTools.includes(String(item.name || '')))
@@ -865,7 +1175,8 @@ export class AiService {
                 '自然、具体地回答创作问题。只有 ToolObservations 或 CurrentEditorContent 中存在结果时，才能声称已经读取对应的项目内容。',
                 'PersistentSummary 是带来源 ID 的会话压缩投影，RecalledMessages/RecalledArtifacts 是按引用召回的原来源摘录；优先采用召回原文与工具证据，不得把旧助手结论当成项目事实。',
                 '判断用户是在普通讨论，还是提出了需要读取项目上下文、检索、生成草稿或修改数据的明确任务。',
-                'SelectionContext 是当前编辑器显式选中的项目范围。存在 chapterId 时，“这篇文章”“本章”“当前章”等指代必须直接绑定该章节，不得再次询问用户选择章节，也不得为定位它调用 novel.list、volume.list 或 chapter.list。需要持久化章节资料时直接使用该 chapterId 调用 chapter.get；CurrentEditorContent 是用户当前可见正文，优先于数据库中的旧正文。',
+                'ProtectedContext.selectionContext 是当前编辑器显式选中的项目范围。存在 chapterId 时，“这篇文章”“本章”“当前章”等指代必须直接绑定该章节，不得再次询问用户选择章节，也不得为定位它调用 novel.list、volume.list 或 chapter.list。需要持久化章节资料时直接使用该 chapterId 调用 chapter.get；CurrentEditorContent 是用户当前可见正文，优先于数据库中的旧正文。',
+                '首轮 SelectionContext 通常只有范围元数据。只要请求已经足以进入计划，就直接返回 requestedOperations、shouldPlan=true 和空 toolCalls；不得为了说明计划、选择 Toolchain 或生成工作说明而预读正文。',
                 '你可以从 AvailableReadTools 主动选择只读工具。回答依赖项目事实且 ToolObservations 不足时，先返回 toolCalls；每轮最多 3 个，不得调用名单外工具。',
                 'AvailableReadToolDefinitions 是工具的真实参数结构，必须严格按其中的 inputSchema 调用；读取附件标题、页码、块或字符范围时优先使用 attachment.read。',
                 '附件范围较长且返回 nextSelector 时，在 content 中保留截至当前块、不超过约 800 tokens 的累计发现，再继续读取；ExplorationNotes 会在下一轮带回这些发现。',
@@ -874,36 +1185,47 @@ export class AiService {
                 ...(payload.forceFinalization ? ['当前是强制总结轮，不得调用任何工具；必须基于已读证据作答，并明确覆盖范围和可能遗漏。'] : []),
                 '从 AvailableOperations 中选择有序的 requestedOperations；复合任务必须保留用户要求的先后顺序，不得创造 Operation ID。',
                 'requestedOperations 只包含用户当前明确要求执行的动作。问题、缺口、建议和可能的后续步骤不是执行授权：“检查需要补充说明之处”只请求审核，不请求生成素材；“给出润色建议”不请求改写；“评估续写准备度”不请求续写。只有用户明确要求起草、生成、续写或改写时，才选择 draft_write Operation。',
+                '“续写某章”只确定故事继续和参考锚点，不自动确定写入方式。chapter.continuation 表示补写该已有章节，chapter.create 表示以该章为锚点新建下一章。结合用户措辞和已读项目状态自行选择；若两种方式都合理且会实质改变交付结果，返回一个 inputRequest 让用户确认，禁止由 Runtime 依据“续写”一词强制决定。',
+                'OperationTarget 的 structuralLast 是全书结构上最后的章节，lastWritten 是最后一个有正文的章节，trailingEmptyChapters 是两者之间及之后的空章候选。存在尾部空章时，chapter.continuation 表示填写已有的结构最后章；chapter.create 表示以 lastWritten 为锚点新建下一章。根据章名、卷序和用户表达决定；若多个尾部空章使目标仍不唯一，返回一个 inputRequest 询问用户。',
                 'Role 只决定分析视角、能力范围和默认负责人，不得改变用户请求的 Operation、deliverable 或副作用等级。世界观角色下的只读检查仍然只能建议 report，不得因为角色擅长设定而追加 creative_asset.draft。',
                 '尊重否定和交互约束。用户说“不要生成”“先别改”“只讨论”时，不得选择对应草稿 Operation；如果用户明确说“先检查，再起草”，则保留两个有序 Operation。',
                 '同时建议 deliverable（none、report、expert_report、chapter_draft、chapter_draft_batch、creative_assets_draft）和 suggestedRole；结构化专家审核使用 expert_report，多章连续续写使用 chapter_draft_batch。这些只是语义建议，Runtime 会重新校验。',
-                '只返回严格 JSON：{"content":"回复或当前意图","shouldPlan":true或false,"needsClarification":true或false,"requestedOperations":["chapter.consistency_review"],"deliverable":"report","suggestedRole":"editor","confidence":0.9,"toolCalls":[{"name":"plotline.list","args":{}}]}。',
+                '只返回严格 JSON：{"content":"回复或当前意图","shouldPlan":true或false,"requestedOperations":["chapter.consistency_review"],"deliverable":"report","suggestedRole":"editor","confidence":0.9,"toolCalls":[{"name":"plotline.list","args":{}}],"inputRequest":null或{"title":"确认关键方向","reason":"为何必须由用户决定","questions":[{"questionId":"snake_case_id","header":"短标题","prompt":"问题","options":[{"optionId":"option_a","label":"短标签","description":"结果、倾向或代价"}],"recommendedOptionId":"option_a","recommendationReason":"结合已读材料说明推荐原因"}]}}。',
                 '项目中已有的大纲、章节、角色、设定和当前进度属于执行阶段可通过工具读取的信息；不要要求用户重复提供，也不要为读取这些信息而澄清，直接设置 shouldPlan=true。',
-                '只有缺少无法通过项目工具获得、且会实质改变目标的用户偏好或创作决策时，才提出一个聚焦的澄清问题，设置 needsClarification=true 且 shouldPlan=false。',
-                '在用户回答澄清问题之前不得生成计划；信息足以形成计划时，设置 needsClarification=false。',
+                '只有缺少无法通过项目工具获得、且会实质改变目标的用户偏好或创作决策时，才返回 inputRequest 并设置 shouldPlan=false。一个疑问只返回一个问题；确有多个相互独立的阻塞疑问时才返回 2–3 个，禁止凑数。',
+                '每题必须提供 2–3 个互斥方向，推荐项放在第一位；每个选项说明不同的结果、倾向或代价。不得输出“其他”，客户端会统一添加自定义答案。',
+                '依赖正文、附件或设定的问题只有在 ToolObservations 或 CurrentEditorContent 已包含相应材料后才能生成；需要继续读取时只返回 toolCalls，不能同时返回 inputRequest。',
+                '在用户提交结构化答案之前不得生成计划；信息足以形成计划时 inputRequest 返回 null。',
                 '明确且信息充分的任务 shouldPlan=true；寒暄、能力咨询和无需项目数据的轻量讨论 shouldPlan=false。',
             ].join(' ')
             : [
                 `You are the ${role} inside CloudDream Novel Agent.`,
                 'Answer naturally and specifically. Claim to have read project data only when ToolObservations or CurrentEditorContent contain the corresponding material.',
                 'PersistentSummary is a traceable conversation projection. Prefer RecalledMessages, RecalledArtifacts, and tool evidence over summarized assistant outcomes, which are not project facts.',
-                'SelectionContext is the explicit editor selection. When it includes chapterId, references such as "this article", "this chapter", or "current chapter" bind to it. Do not ask the user to select the chapter again and do not call novel.list, volume.list, or chapter.list merely to locate it. Use chapter.get with that exact ID when persisted data is needed. CurrentEditorContent is the visible editor text and takes precedence over an older saved body.',
+                'ProtectedContext.selectionContext is the explicit editor selection. When it includes chapterId, references such as "this article", "this chapter", or "current chapter" bind to it. Do not ask the user to select the chapter again and do not call novel.list, volume.list, or chapter.list merely to locate it. Use chapter.get with that exact ID when persisted data is needed. CurrentEditorContent is the visible editor text and takes precedence over an older saved body.',
+                'The first SelectionContext normally contains scope metadata only. If the request is sufficiently specified for planning, return requestedOperations with shouldPlan=true and empty toolCalls. Do not pre-read prose merely to describe the work, select a Toolchain, or prepare a plan.',
                 'When an answer depends on project facts and observations are insufficient, choose up to three tools from AvailableReadTools. After observations arrive, continue reading or answer with an empty toolCalls array.',
                 'AvailableReadToolDefinitions contains the authoritative input schemas. Follow them exactly and prefer attachment.read for title, page, block, or offset ranges. Preserve no more than about 800 tokens of cumulative findings in content before requesting the next long-document chunk; ExplorationNotes will carry them forward.',
                 'Use `volume.list` to discover IDs only when SelectionContext has no usable target or the user explicitly requests a multi-chapter, volume, or novel scope. `chapter.list` requires a real volumeId and `chapter.get` requires one real chapterId. Never invent placeholder IDs such as ALL or ALL_IF_SUPPORTED.',
                 'Select ordered requestedOperations only from AvailableOperations. Preserve the requested order for compound tasks and never invent operation IDs.',
                 'Include only actions the user explicitly asks to perform now. Findings, gaps, advice, and plausible next steps are not authorization. A request to identify missing explanations is review-only; polishing advice is not a rewrite; continuation readiness is not continuation. Select a draft_write operation only when the user explicitly requests drafting, generation, continuation, or rewriting.',
+                'A request to continue from a chapter fixes the story anchor, but not necessarily the write mode. chapter.continuation appends to that existing chapter; chapter.create creates the next chapter from that anchor. Decide from the wording and project evidence, or return one inputRequest when both are materially plausible. Runtime must not force the choice from the word "continue" alone.',
+                'For OperationTarget, structuralLast is the final chapter by novel structure, lastWritten is the latest chapter containing prose, and trailingEmptyChapters lists blank tail candidates. When blank tail chapters exist, chapter.continuation fills the existing structural last chapter, while chapter.create creates after lastWritten. Decide from titles, ordering, and the request; if multiple blank tail chapters still make the target ambiguous, return one inputRequest.',
                 'Role affects perspective, capability scope, and default ownership only. It must not change the requested operations, deliverable, or effect level. A read-only review remains read-only in the worldbuilding role.',
                 'Respect negation and interaction constraints such as "do not generate", "do not rewrite", and "just discuss". Preserve both operations only when the user explicitly requests an ordered compound task such as review first, then draft.',
                 'Suggest deliverable, suggestedRole, and confidence. They are untrusted semantic hints that the Runtime validates.',
-                'Return strict JSON only: {"content":"reply or current intent","shouldPlan":boolean,"needsClarification":boolean,"requestedOperations":["chapter.consistency_review"],"deliverable":"report","suggestedRole":"editor","confidence":0.9,"toolCalls":[{"name":"plotline.list","args":{}}]}.',
+                'Return strict JSON only with content, shouldPlan, requestedOperations, deliverable, suggestedRole, confidence, toolCalls, and inputRequest. inputRequest is null or contains title, reason, and 1–3 questions. Each question contains questionId, header, prompt, 2–3 mutually exclusive options, recommendedOptionId pointing to the first option, and recommendationReason.',
                 'Existing outlines, chapters, characters, lore, and project progress are available to approved execution tools. Do not ask the user to repeat them; set shouldPlan=true so the plan can read them.',
-                'Ask one focused clarification question only when a user preference or creative decision unavailable from project tools would materially change the goal.',
-                'Do not propose a plan until the user answers. Set needsClarification=false once enough information is available.',
+                'Return one question for one blocking doubt. Return two or three only when the model genuinely has multiple independent blocking doubts; never pad the list. Put the recommended option first and explain distinct outcomes or tradeoffs. Do not add an Other option because the client adds custom input.',
+                'When a question depends on chapters, attachments, or project data, read the relevant material first. Return toolCalls without inputRequest while evidence is incomplete. Do not propose a plan until the structured answers are submitted.',
                 'Set shouldPlan=true only for sufficiently specified tasks that require project context, retrieval, draft generation, or data changes.',
                 ...(payload.forceFinalization ? ['This is a forced finalization turn. Call no tools; answer from the evidence already read and state coverage and possible omissions.'] : []),
             ].join(' ');
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 1600);
+        const providerType = this.settingsCache.providerType;
+        const model = providerType === 'http' ? this.settingsCache.http.model : 'mcp-cli';
+        const configuredContextWindowTokens = providerType === 'http'
+            ? this.settingsCache.http.contextWindowTokens
+            : this.settingsCache.mcpCli.contextWindowTokens;
         const sections: AgentContextSection[] = [
             {
                 id: 'available-read-tools',
@@ -931,11 +1253,16 @@ export class AiService {
                 id: 'current-selection',
                 kind: 'metadata',
                 priority: 'required',
-                value: selectionIdentity,
+                value: {
+                    contextPath: 'protectedContext.selectionContext',
+                    novelId: selectionIdentity.novelId,
+                    volumeId: selectionIdentity.volumeId,
+                    chapterId: selectionIdentity.chapterId,
+                },
                 sourceRef: 'renderer-current-selection',
             });
         }
-        if (currentEditorContent) {
+        if (currentEditorContent && toolObservations.length === 0) {
             sections.push({
                 id: 'current-editor-content',
                 kind: 'retrieval',
@@ -966,30 +1293,158 @@ export class AiService {
                 maxTokens: 6000,
             });
         }
-        const contextArtifacts = collectAgentContextArtifacts(payload.conversationContext);
-        if (payload.conversationContext && Object.keys(payload.conversationContext).length) {
-            sections.push({
-                id: 'conversation-state',
-                kind: 'plan',
-                priority: 'high',
-                value: compactConversationArtifacts(payload.conversationContext),
-                sourceRef: 'persisted-agent-conversation',
+        const currentRequest = {
+            messageId: requestMessageId,
+            content: message,
+            role: payload.role || 'team',
+            workMode: payload.approvalMode || 'review_required',
+            selectionRef: 'protectedContext.selectionContext',
+        };
+        const initialSnapshot = await this.contextCompressionStore.readCompressionSnapshot(storageConversationId);
+        if (!initialSnapshot) {
+            throw new AiActionError('NOT_FOUND', 'The persisted Agent conversation is unavailable.');
+        }
+        const buildProtectedContext = (snapshot: AgentConversationCompressionSnapshot) => ({
+            storageConversationId,
+            selectionContext: {
+                ...selectionIdentity,
+                ...(currentEditorContent ? {
+                    unsavedEditorSnapshotRef: {
+                        sourceId: selectionIdentity.chapterId
+                            ? `chapter:${selectionIdentity.chapterId}:editor-buffer`
+                            : `conversation:${storageConversationId}:editor-buffer`,
+                        ...(selectionIdentity.chapterId ? { chapterId: selectionIdentity.chapterId } : {}),
+                        contentHash: sha256(currentEditorContent),
+                        characterCount: currentEditorContent.length,
+                    },
+                } : {}),
+            },
+            currentPlan: snapshot.authoritativeContext.currentPlan,
+            activeRun: protectedActiveRun(snapshot),
+            conversationPendingUserInput: snapshot.authoritativeContext.pendingUserInput,
+            relatedUserInputResolutions: selectRelatedUserInputResolutions(snapshot),
+            relatedApprovalResponses: snapshot.authoritativeContext.activeRun?.approvalResponses || [],
+        });
+        const initialProtectedContext = buildProtectedContext(initialSnapshot);
+        const tokenCounter = new AgentContextTokenCounter();
+        const minimumDynamicCount = tokenCounter.count({
+            providerType,
+            model,
+            configuredContextWindowTokens,
+            prompt: canonicalJson({
+                contextVersion: 'agent-context-v2',
+                currentRequest,
+                protectedContext: initialProtectedContext,
+                persistentConstraints: [],
+                persistentSummary: initialSnapshot.contextSummary?.semanticProjection || null,
+                recalledMessages: [],
+                recalledArtifacts: [],
+                rollingSummary: [],
+                recentHistory: [],
+                sections: sections.filter((section) => section.priority === 'required'),
+            }),
+        });
+        if (!minimumDynamicCount) {
+            throw new AiActionError(
+                'CONTEXT_TOKEN_COUNTER_UNAVAILABLE',
+                'No hard-safe token counter is available for this model.',
+            );
+        }
+        const minimumDynamicContextTokens = Math.max(
+            AGENT_CHAT_MINIMUM_DYNAMIC_CONTEXT_TOKENS,
+            minimumDynamicCount.contextTokens + AGENT_CHAT_DYNAMIC_CONTEXT_HEADROOM_TOKENS,
+        );
+        const requestedOutputTokens = Math.min(
+            this.settingsCache.http.maxTokens,
+            AGENT_CHAT_REQUESTED_OUTPUT_TOKENS,
+        );
+        const adaptiveOutputBudget = tokenCounter.adaptOutputReserve({
+            providerType,
+            model,
+            configuredContextWindowTokens,
+            requestedOutputTokens,
+            systemPrompt,
+            minimumOutputTokens: AGENT_CHAT_MINIMUM_OUTPUT_TOKENS,
+            minimumDynamicContextTokens,
+        });
+        if (!adaptiveOutputBudget) {
+            throw new AiActionError(
+                'CONTEXT_TOKEN_COUNTER_UNAVAILABLE',
+                'No hard-safe token counter is available for this model.',
+            );
+        }
+        if (!adaptiveOutputBudget.feasible) {
+            throw new AiActionError(
+                'CONTEXT_BUDGET_UNSATISFIABLE',
+                'The configured context window cannot fit the Agent system prompt and a minimal response.',
+                undefined,
+                {
+                    contextWindowTokens: adaptiveOutputBudget.budget.contextWindowTokens,
+                    fixedProviderInputTokens: adaptiveOutputBudget.budget.fixedProviderInputTokens,
+                    safetyReserveTokens: adaptiveOutputBudget.budget.safetyReserveTokens,
+                    providerReserveTokens: adaptiveOutputBudget.budget.providerReserveTokens,
+                    minimumOutputTokens: adaptiveOutputBudget.minimumOutputTokens,
+                    minimumDynamicContextTokens: adaptiveOutputBudget.minimumDynamicContextTokens,
+                },
+            );
+        }
+        const outputTokens = adaptiveOutputBudget.outputReserveTokens;
+        if (adaptiveOutputBudget.reduced) {
+            devLog('INFO', 'AiService.agentContext.outputBudgetAdapted', 'Agent output budget reduced to fit the configured context window', {
+                providerType,
+                model,
+                contextWindowTokens: adaptiveOutputBudget.budget.contextWindowTokens,
+                requestedOutputTokens: adaptiveOutputBudget.requestedOutputTokens,
+                outputTokens,
+                minimumDynamicContextTokens: adaptiveOutputBudget.minimumDynamicContextTokens,
             });
         }
+        const coordinatorResult = await this.agentContextCompressionCoordinator.prepare({
+            storageConversationId,
+            providerType,
+            model,
+            configuredContextWindowTokens,
+            outputReserveTokens: outputTokens,
+            systemPrompt,
+            currentRequest,
+            currentRequestIdentityRequired: true,
+            protectedContext: initialProtectedContext,
+            sections,
+            stateRefs: buildAgentContextStateRefs(initialSnapshot),
+            ...(selectionIdentity.chapterId && currentEditorContent ? {
+                availableProjectSources: [{
+                    sourceType: 'chapter' as const,
+                    sourceId: selectionIdentity.chapterId,
+                    sourceVersion: 'editor-buffer',
+                    contentHash: sha256(currentEditorContent),
+                    title: selectionIdentity.chapterTitle || undefined,
+                }],
+            } : {}),
+            signal,
+        });
+        const snapshot = coordinatorResult.snapshot || initialSnapshot;
+        const history = snapshot.messages.filter((item) => (
+            !requestMessageId || item.messageId !== requestMessageId
+        )).map((item) => ({
+            role: item.role,
+            content: item.content,
+            createdAt: item.createdAt,
+            messageId: item.messageId,
+            sequence: item.sequence,
+        }));
+        const contextArtifacts = authoritativeArtifacts(snapshot);
+        const authoritativeSummary = coordinatorResult.summary || snapshot.contextSummary;
         const contextAssembly = this.assembleAgentContext({
             operation: 'agent.generate_chat',
             systemPrompt,
             outputTokens,
-            currentRequest: {
-                message,
-                role: payload.role || 'team',
-                workMode: payload.approvalMode || 'review_required',
-                selection: selectionIdentity,
-            },
+            currentRequest,
+            protectedContext: buildProtectedContext(snapshot),
             history,
             sections,
-            persistentSummary: payload.persistentSummary,
+            persistentSummary: authoritativeSummary,
             artifacts: contextArtifacts,
+            compressionDiagnostics: coordinatorResult.diagnostics,
         });
         const response = await this.getProvider().generate({
             systemPrompt,
@@ -998,11 +1453,52 @@ export class AiService {
             temperature: Math.min(this.settingsCache.http.temperature, 0.5),
             timeoutMs: payload.forceFinalization
                 ? Math.min(Math.max(this.settingsCache.http.timeoutMs, 15000), 45000)
-                : Math.max(this.settingsCache.http.timeoutMs, 120000),
+                : Math.min(Math.max(this.settingsCache.http.timeoutMs, 120000), 145000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
-        const content = trimText(parsed?.content, 12000) || trimText(response.text, 12000);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        const rawInputRequest = parsed?.inputRequest && typeof parsed.inputRequest === 'object' && !Array.isArray(parsed.inputRequest)
+            ? parsed.inputRequest as Record<string, unknown>
+            : null;
+        const inputQuestions = rawInputRequest && Array.isArray(rawInputRequest.questions)
+            ? rawInputRequest.questions.slice(0, 3).flatMap((rawQuestion: unknown, questionIndex: number) => {
+                if (!rawQuestion || typeof rawQuestion !== 'object' || Array.isArray(rawQuestion)) return [];
+                const question = rawQuestion as Record<string, unknown>;
+                const options = Array.isArray(question.options)
+                    ? question.options.slice(0, 3).flatMap((rawOption: unknown, optionIndex: number) => {
+                        if (!rawOption || typeof rawOption !== 'object' || Array.isArray(rawOption)) return [];
+                        const option = rawOption as Record<string, unknown>;
+                        const optionId = trimText(option.optionId, 80) || `option_${optionIndex + 1}`;
+                        const label = trimText(option.label, 120);
+                        const description = trimText(option.description, 500);
+                        return label && description ? [{ optionId, label, description }] : [];
+                    })
+                    : [];
+                if (options.length < 2) return [];
+                const questionId = trimText(question.questionId, 80) || `question_${questionIndex + 1}`;
+                const header = trimText(question.header, 24);
+                const prompt = trimText(question.prompt, 500);
+                const recommendationReason = trimText(question.recommendationReason, 500);
+                if (!header || !prompt || !recommendationReason) return [];
+                return [{
+                    questionId,
+                    header,
+                    prompt,
+                    options,
+                    recommendedOptionId: options[0].optionId,
+                    recommendationReason,
+                }];
+            })
+            : [];
+        const inputRequest = rawInputRequest && inputQuestions.length > 0
+            ? {
+                title: trimText(rawInputRequest.title, 120) || (isZh ? '确认关键方向' : 'Confirm key decisions'),
+                reason: trimText(rawInputRequest.reason, 1000) || (isZh ? '这些选择会实质改变任务结果。' : 'These choices materially affect the result.'),
+                questions: inputQuestions,
+            }
+            : undefined;
+        const content = trimText(parsed?.content, 12000)
+            || (inputRequest ? inputRequest.title : trimText(response.text, 12000));
         if (!content) throw new AiActionError('UNKNOWN', 'Agent chat returned empty content');
         const toolCalls = Array.isArray(parsed?.toolCalls)
             ? parsed.toolCalls.slice(0, 3).flatMap((item: unknown) => {
@@ -1032,20 +1528,30 @@ export class AiService {
             : undefined;
         const rawConfidence = typeof parsed?.confidence === 'number' ? parsed.confidence : 0.5;
         const diagnostics = contextAssembly.diagnostics;
+        const finalCoordinatorDiagnostics = diagnostics.coordinator || coordinatorResult.diagnostics;
+        if (diagnostics.wouldRetriggerNextTurn) {
+            this.scheduleAgentContextPrecompression({
+                storageConversationId,
+                providerType,
+                model,
+                configuredContextWindowTokens,
+            });
+        }
         return {
             content,
             shouldPlan: parsed?.shouldPlan === true,
-            needsClarification: parsed?.needsClarification === true,
+            needsClarification: Boolean(inputRequest),
             requestedOperations,
             deliverable,
             suggestedRole,
             confidence: Math.max(0, Math.min(1, rawConfidence)),
             toolCalls,
+            ...(inputRequest && toolCalls.length === 0 ? { inputRequest } : {}),
             contextDiagnostics: diagnostics,
-            ...(contextAssembly.summaryUpdate ? { conversationSummary: contextAssembly.summaryUpdate } : {}),
             ...(diagnostics.compressionApplied ? {
                 contextCompression: {
                     applied: true as const,
+                    mode: diagnostics.compressionMode || 'none',
                     model: diagnostics.model,
                     contextWindowTokens: diagnostics.contextWindowTokens,
                     inputBudgetTokens: diagnostics.inputBudgetTokens,
@@ -1061,6 +1567,44 @@ export class AiService {
                     recalledArtifactCount: diagnostics.recalledArtifactIds.length,
                     compressedSectionIds: diagnostics.compressedSectionIds,
                     omittedSectionIds: diagnostics.omittedSectionIds,
+                    operationKind: finalCoordinatorDiagnostics.operationKind,
+                    triggerReason: finalCoordinatorDiagnostics.triggerReason,
+                    currentRequestIdentityStatus: finalCoordinatorDiagnostics.currentRequestIdentityStatus,
+                    currentRequestPayloadOccurrences: finalCoordinatorDiagnostics.currentRequestPayloadOccurrences,
+                    summaryGeneration: finalCoordinatorDiagnostics.summaryGeneration,
+                    ...(finalCoordinatorDiagnostics.rebuildReason
+                        ? { rebuildReason: finalCoordinatorDiagnostics.rebuildReason }
+                        : {}),
+                    rebuildTaskId: finalCoordinatorDiagnostics.rebuildTaskId,
+                    rebuildStatus: finalCoordinatorDiagnostics.rebuildStatus,
+                    rebuildCompletedChunks: finalCoordinatorDiagnostics.rebuildCompletedChunks,
+                    rebuildMaxChunks: finalCoordinatorDiagnostics.rebuildMaxChunks,
+                    rebuildElapsedMs: finalCoordinatorDiagnostics.rebuildElapsedMs,
+                    rebuildMaxDurationMs: finalCoordinatorDiagnostics.rebuildMaxDurationMs,
+                    preCompressionContextTokens: finalCoordinatorDiagnostics.preCompressionContextTokens,
+                    postCompressionContextTokens: finalCoordinatorDiagnostics.postCompressionContextTokens,
+                    preCompressionProviderInputTokens: finalCoordinatorDiagnostics.preCompressionProviderInputTokens,
+                    postCompressionProviderInputTokens: finalCoordinatorDiagnostics.postCompressionProviderInputTokens,
+                    hardTokenCountMethod: finalCoordinatorDiagnostics.hardTokenCountMethod,
+                    hardTokenCountProfileId: finalCoordinatorDiagnostics.hardTokenCountProfileId,
+                    statusCodes: finalCoordinatorDiagnostics.statusCodes,
+                    ...(finalCoordinatorDiagnostics.errorCode
+                        ? { errorCode: finalCoordinatorDiagnostics.errorCode }
+                        : {}),
+                    ...(finalCoordinatorDiagnostics.rebuildChunksCompleted !== undefined
+                        ? { rebuildChunksCompleted: finalCoordinatorDiagnostics.rebuildChunksCompleted }
+                        : {}),
+                    ...(finalCoordinatorDiagnostics.rebuildChunkCount !== undefined
+                        ? { rebuildChunkCount: finalCoordinatorDiagnostics.rebuildChunkCount }
+                        : {}),
+                    sourceHashStatus: finalCoordinatorDiagnostics.sourceHashStatus,
+                    dependencyHashStatus: finalCoordinatorDiagnostics.dependencyHashStatus,
+                    ...(finalCoordinatorDiagnostics.failureCode
+                        ? { failureCode: finalCoordinatorDiagnostics.failureCode }
+                        : {}),
+                    consecutiveFailures: finalCoordinatorDiagnostics.consecutiveFailures,
+                    circuitOpen: finalCoordinatorDiagnostics.circuitOpen,
+                    casConflict: finalCoordinatorDiagnostics.casConflict,
                 },
             } : {}),
         };
@@ -1076,7 +1620,9 @@ export class AiService {
         }
         const isZh = (payload.locale || 'zh-CN').startsWith('zh');
         const isRewrite = payload.taskMode === 'batch_rewrite';
-        const systemPrompt = isRewrite
+        const revisionInstruction = trimText(payload.revisionInstruction, 4000);
+        const previousBeats = Array.isArray(payload.previousBeats) ? payload.previousBeats.slice(0, chapterCount) : [];
+        const baseSystemPrompt = isRewrite
             ? (isZh
                 ? [
                     '你是小说多章节改写节拍设计师。根据每个目标章节原文、共享范围上下文和用户目标，为明确选择的已有章节设计逐章修订节拍。',
@@ -1105,19 +1651,31 @@ export class AiService {
                 'Each beat requires title, chapterGoal, coreConflict, keyEvents, reveals, endingHook, and targetWordCount.',
                 'Output JSON only.',
             ].join(' ');
+        const revisionPrompt = revisionInstruction
+            ? (isZh
+                ? [
+                    '这是对既有章节节拍的修订。用户的调整意见是权威要求，直接据此重写整批节拍，不要判断是否采纳。',
+                    '必须保持章节数量、顺序和目标章节不变；未被要求改变的叙事约束应继续保留。',
+                ].join(' ')
+                : 'Revise the existing beats using the user instruction as authoritative. Preserve chapter count, order, and target chapter IDs.')
+            : '';
+        const systemPrompt = [baseSystemPrompt, revisionPrompt].filter(Boolean).join(' ');
         const contextText = JSON.stringify(payload.context ?? {}).slice(0, 60000);
         const response = await this.getProvider().generate({
             systemPrompt,
-            prompt: `Goal=${goal}\n\nAnchorChapterId=${chapterId}\n\nTargetChapterIds=${JSON.stringify(payload.targetChapterIds || [])}\n\nContext=${contextText}`,
+            prompt: `Goal=${goal}\n\nRevisionInstruction=${revisionInstruction}\n\nPreviousBeats=${JSON.stringify(previousBeats)}\n\nAnchorChapterId=${chapterId}\n\nTargetChapterIds=${JSON.stringify(payload.targetChapterIds || [])}\n\nContext=${contextText}`,
             maxTokens: Math.min(this.settingsCache.http.maxTokens, 3200),
             temperature: Math.min(this.settingsCache.http.temperature, 0.55),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         const rawBeats = Array.isArray(parsed?.beats) ? parsed.beats : [];
         if (rawBeats.length !== chapterCount) {
-            throw new AiActionError('UNKNOWN', `Chapter beat generation returned ${rawBeats.length}/${chapterCount} beats`);
+            this.invalidAgentStructuredOutput(
+                `Chapter beat generation returned ${rawBeats.length}/${chapterCount} beats`,
+                [{ path: 'beats', message: `Expected ${chapterCount} items, received ${rawBeats.length}` }],
+            );
         }
         const beats = rawBeats.map((raw: any, index: number) => {
             const title = trimText(raw?.title, 120);
@@ -1125,7 +1683,9 @@ export class AiService {
             const coreConflict = trimText(raw?.coreConflict, 800);
             const endingHook = trimText(raw?.endingHook, 800);
             if (!title || !chapterGoal || !coreConflict || !endingHook) {
-                throw new AiActionError('UNKNOWN', `Chapter beat ${index + 1} is incomplete`);
+                this.invalidAgentStructuredOutput(`Chapter beat ${index + 1} is incomplete`, [
+                    { path: `beats.${index}`, message: 'title, chapterGoal, coreConflict, and endingHook are required' },
+                ]);
             }
             const targetWordCount = Math.max(100, Math.min(50000, Math.trunc(Number(raw?.targetWordCount) || 2000)));
             return {
@@ -1185,7 +1745,7 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed) throw new AiActionError('UNKNOWN', 'Narrative state extraction returned invalid JSON');
         const normalized = normalizeNarrativeStateDelta(parsed);
         const evidenced = filterNarrativeStateDeltaEvidence(normalized, generatedText);
@@ -1214,6 +1774,7 @@ export class AiService {
         availableTools: string[];
         availableToolchains?: Array<Record<string, unknown>>;
         intentDecision?: Record<string, unknown>;
+        userDecisions?: Record<string, unknown>;
     }, signal?: AbortSignal): Promise<{ title: string; deliverable?: string; steps: Array<{ agent: string; title: string; tools: string[]; toolchain?: Record<string, unknown> }> }> {
         const goal = trimText(payload.goal, 12000);
         if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
@@ -1232,6 +1793,7 @@ export class AiService {
                 'tools 只能从 AvailableTools 中选择；不要添加写回正文步骤，草稿必须停在审核阶段。',
                 'AvailableToolchains 是经过校验的稳定流程。上下文装配、一致性审校、章节续写和创作素材生成等匹配任务应优先选择对应 Toolchain，不要重新拼装同一批原子 tools。',
                 'IntentDecision 是 Runtime 校验后的高优先级任务提示。严格保持 operations 顺序、deliverable 和建议 Toolchain；能力不可用时才回退到 AvailableTools。',
+                'UserDecisions 是用户刚刚提交的结构化创作决定。它高于模型偏好和推荐项，计划必须逐项遵守，自定义原文不得改写成相反含义。',
                 '使用 Toolchain 的步骤必须令 tools=[]，并填写 toolchain={"id":"稳定ID","version":"版本","input":{}}；不得猜测未列出的 ID 或版本。',
                 '只返回严格 JSON：{"title":"计划标题","deliverable":"report|expert_report|chapter_draft|chapter_draft_batch|creative_assets_draft","steps":[{"agent":"editor","title":"步骤","tools":[],"toolchain":{"id":"chapter.consistency_review","version":"1.0.0","input":{}}}]}。',
             ].join(' ')
@@ -1244,6 +1806,7 @@ export class AiService {
                 'Use only AvailableTools. Generated changes must stop at draft review and never write directly.',
                 'Prefer a matching AvailableToolchain for context assembly, consistency review, chapter continuation, or creative-asset drafting. A Toolchain step must have tools=[] and a listed id/version.',
                 'IntentDecision is a validated high-priority planning hint. Preserve operation order and deliverable, using suggested Toolchains when available.',
+                'UserDecisions contains authoritative structured choices submitted by the user. Preserve every choice and custom instruction in the plan.',
             ].join(' ');
         const outputTokens = Math.min(this.settingsCache.http.maxTokens, 2400);
         const prompt = this.assembleAgentPrompt({
@@ -1254,6 +1817,7 @@ export class AiService {
                 goal,
                 preferredRole: payload.role || 'team',
                 intentDecision: payload.intentDecision || null,
+                userDecisions: payload.userDecisions || null,
             },
             sections: [{
                 id: 'available-tools',
@@ -1270,6 +1834,11 @@ export class AiService {
                 kind: 'decision',
                 priority: payload.intentDecision ? 'required' : 'low',
                 value: payload.intentDecision || null,
+            }, {
+                id: 'user-decisions',
+                kind: 'decision',
+                priority: payload.userDecisions ? 'required' : 'low',
+                value: payload.userDecisions || null,
             }],
         });
         const response = await this.getProvider().generate({
@@ -1280,15 +1849,133 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.steps)) {
-            throw new AiActionError('UNKNOWN', 'Agent planner did not return valid JSON steps');
+            this.invalidAgentStructuredOutput('Agent planner did not return valid JSON steps', [
+                { path: 'steps', message: 'Expected an array of plan steps' },
+            ]);
         }
         return {
             title: trimText(parsed.title, 120) || (isZh ? '创作任务计划' : 'Writing task plan'),
             deliverable: trimText(parsed.deliverable, 40),
             steps: parsed.steps,
         };
+    }
+
+    async summarizeAgentUserInput(payload: {
+        request?: Record<string, unknown>;
+        answers?: Array<Record<string, unknown>>;
+        effectiveAnswers?: Array<Record<string, unknown>>;
+        fallbackSummary?: string;
+    }, signal?: AbortSignal): Promise<{ summary: string }> {
+        const request = payload.request && typeof payload.request === 'object' ? payload.request : {};
+        const answers = Array.isArray(payload.answers) ? payload.answers.slice(0, 3) : [];
+        const effectiveAnswers = Array.isArray(payload.effectiveAnswers) ? payload.effectiveAnswers.slice(0, 3) : [];
+        if (!answers.length) throw new AiActionError('INVALID_INPUT', 'answers is required');
+        const fallback = trimText(payload.fallbackSummary, 2000);
+        const response = await this.getProvider().generate({
+            systemPrompt: [
+                '你只负责忠实概括用户刚刚提交的结构化决定。',
+                '不得添加新设定、补充未选择的方向、调换选择优先级或替用户作出额外决定。',
+                '自定义答案必须保持原意。用一到三句话说明后续计划或执行将如何理解这些答案。',
+                '只返回严格 JSON：{"summary":"理解摘要"}。',
+            ].join(' '),
+            prompt: `Request=${JSON.stringify(request).slice(0, 12000)}\nRawAnswers=${JSON.stringify(answers).slice(0, 8000)}\nEffectiveAnswers=${JSON.stringify(effectiveAnswers).slice(0, 8000)}\nFallback=${fallback}`,
+            maxTokens: Math.min(this.settingsCache.http.maxTokens, 600),
+            temperature: Math.min(this.settingsCache.http.temperature, 0.1),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 60000),
+            signal,
+        });
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        const summary = trimText(parsed?.summary, 2000) || fallback;
+        if (!summary) throw new AiActionError('UNKNOWN', 'User input summary was empty');
+        return { summary };
+    }
+
+    async generateAgentUserInputFollowup(payload: {
+        goal?: string;
+        role?: string;
+        locale?: string;
+        request?: Record<string, unknown>;
+        answers?: Array<Record<string, unknown>>;
+        effectiveAnswers?: Array<Record<string, unknown>>;
+        understandingSummary?: string;
+        previousQuestions?: Array<Record<string, unknown>>;
+        decisionHistory?: Array<Record<string, unknown>>;
+        evidence?: Array<Record<string, unknown>>;
+        workflow?: 'novel_bootstrap' | 'general';
+        novelId?: string;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        const request = payload.request && typeof payload.request === 'object' ? payload.request : {};
+        const answers = Array.isArray(payload.answers) ? payload.answers.slice(0, 3) : [];
+        const effectiveAnswers = Array.isArray(payload.effectiveAnswers) ? payload.effectiveAnswers.slice(0, 3) : [];
+        const previousQuestions = Array.isArray(payload.previousQuestions) ? payload.previousQuestions.slice(0, 3) : [];
+        const decisionHistory = Array.isArray(payload.decisionHistory) ? payload.decisionHistory.slice(0, 3) : [];
+        if (!goal || !answers.length) throw new AiActionError('INVALID_INPUT', 'goal and answers are required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const isNovelBootstrap = payload.workflow === 'novel_bootstrap';
+        const novel = isNovelBootstrap && payload.novelId
+            ? await db.novel.findUnique({
+                where: { id: payload.novelId },
+                select: { title: true, description: true },
+            })
+            : null;
+        const systemPrompt = isZh
+            ? [
+                '你判断计划生成前是否还存在一个必须由用户决定的关键冲突。',
+                '只有答案仍会改变计划步骤、执行范围、产物形式或核心创作方向时，needsFollowUp 才能为 true。',
+                '第一轮信息充分、只剩非阻塞细节、风格润色、措辞偏好、灵感补充，或跳过题已有推荐兜底时，必须返回 false。',
+                '若需要追问，必须基于上一轮原始答案、有效答案和理解摘要提出总结性取舍，不得重复 PreviousQuestions，不得要求新读取正文或附件。',
+                ...(isNovelBootstrap ? [
+                    '这是新建小说的第二层深度定制。第一层已经确认题材与创意、主角设定、核心冲突；不得重复或改写这些答案。',
+                    '只追问仍会显著改变项目蓝图的未知项，例如世界规则与范围、叙事视角与信息差、主题与目标读者、连载规模与单章密度。',
+                    '必须以 DecisionHistory 中所有轮次的答案为依据识别缺口；跳过题已采用推荐项，不得重新追问。根据用户答案选择最有价值的 1 至 3 项，而不是固定地问一组预设问题。',
+                    '深度定制最多再进行两轮；信息已足够时返回 false，自然进入蓝图，而不是凑问题。',
+                ] : []),
+                '默认只问一个综合问题；仅有多个互相独立的阻塞冲突时可问 2–3 题。每题给出 2–3 个互斥选项，第一项必须是推荐项。',
+                '只返回严格 JSON。无需追问：{"needsFollowUp":false}。需要追问：{"needsFollowUp":true,"inputRequest":{"title":"标题","reason":"原因","questions":[{"questionId":"id","header":"短标题","prompt":"问题","options":[{"optionId":"id","label":"方向","description":"倾向与影响"}],"recommendationReason":"推荐理由"}]}}。',
+            ].join(' ')
+            : [
+                'Decide whether one more blocking user decision is required before planning.',
+                'Follow up only when the unresolved conflict changes plan steps, scope, deliverable, or a core creative direction.',
+                'Do not follow up for wording, polish, inspiration, or skipped questions that already have a recommended fallback.',
+                'Base questions only on prior evidence and answers. Never repeat a prior question or request new reads.',
+                ...(isNovelBootstrap ? [
+                    'This is the deep-customization layer for a new novel. Genre/concept, protagonist setup, and core conflict are already decided; do not repeat or rewrite them.',
+                    'Ask only about unknowns that materially change the project blueprint, such as world scope and rules, narrative viewpoint and information gap, theme and target reader, or serial scale and chapter density.',
+                    'Use every round in DecisionHistory to identify gaps. Treat skipped questions as answered with their recommended fallback and never reopen them. Choose the most valuable 1-3 questions instead of asking a fixed preset.',
+                    'Deep customization may use at most two adaptive turns; return false when the blueprint is sufficiently determined instead of inventing questions.',
+                ] : []),
+                'Prefer one synthesis question; allow 2-3 only for independent blockers. Each question needs 2-3 mutually exclusive options, recommended first.',
+                'Return strict JSON with needsFollowUp and optional inputRequest.',
+            ].join(' ');
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt: [
+                `Goal=${goal}`,
+                `Role=${trimText(payload.role, 40) || 'team'}`,
+                `Request=${JSON.stringify(request).slice(0, 12000)}`,
+                `PreviousQuestions=${JSON.stringify(previousQuestions).slice(0, 12000)}`,
+                `RawAnswers=${JSON.stringify(answers).slice(0, 10000)}`,
+                `EffectiveAnswers=${JSON.stringify(effectiveAnswers).slice(0, 10000)}`,
+                `Understanding=${trimText(payload.understandingSummary, 2000)}`,
+                `DecisionHistory=${JSON.stringify(decisionHistory).slice(0, 24000)}`,
+                `ExistingEvidence=${JSON.stringify(Array.isArray(payload.evidence) ? payload.evidence.slice(0, 20) : []).slice(0, 12000)}`,
+                ...(isNovelBootstrap ? [`Novel=${JSON.stringify(novel ?? {}).slice(0, 2000)}`] : []),
+            ].join('\n\n'),
+            maxTokens: Math.min(this.settingsCache.http.maxTokens, 1800),
+            temperature: Math.min(this.settingsCache.http.temperature, 0.15),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 90000),
+            signal,
+        });
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        if (!parsed || typeof parsed.needsFollowUp !== 'boolean') {
+            this.invalidAgentStructuredOutput('User input follow-up returned invalid JSON', [
+                { path: 'needsFollowUp', message: 'Expected a boolean' },
+            ]);
+        }
+        return parsed;
     }
 
     async reviseAgentPlan(payload: {
@@ -1301,6 +1988,7 @@ export class AiService {
         currentPlan: {
             title: string;
             deliverable?: string;
+            requestedEffect?: string;
             preferredRole?: string;
             steps: Array<{ stepId: string; agent: string; title: string; tools: string[]; toolchain?: Record<string, unknown> }>;
         };
@@ -1322,14 +2010,16 @@ export class AiService {
                 'agent 只能是 supervisor、writer、editor、reader、worldbuilding、research_rag。',
                 'tools 只能从 AvailableTools 中选择；任何生成内容必须停在草稿审核，禁止直接写回。',
                 '保留仍适用的 Toolchain 调用；新选 Toolchain 只能来自 AvailableToolchains，且该步骤 tools 必须为空。',
-                '保留或按用户意见更新 currentPlan.deliverable；草稿产物必须保留对应的 generate_draft 工具。',
+                'Revision 可以调整目标、范围、步骤和 deliverable；若用户明确改为生成、续写或改写，可升级为对应的可审核草稿。',
+                '计划最多只能读取项目和创建可回退草稿；禁止加入正文写回、正式提交、删除或外部发布工具。',
                 '只返回严格 JSON：{"title":"计划标题","deliverable":"report|expert_report|chapter_draft|chapter_draft_batch|creative_assets_draft","steps":[{"stepId":"可选原ID","agent":"editor","title":"步骤","tools":[]}]}。',
             ].join(' ')
             : [
                 'Revise a structured novel-agent plan without executing it.',
                 'Apply the revision precisely. Preserve stepId for unchanged steps and omit it for new steps.',
-                'Use only the allowed agents and AvailableTools. Generated changes must stop at draft review.',
-                'Return strict JSON with title and steps only.',
+                'The revision may change scope, steps, and deliverable, including a reviewable draft when explicitly requested.',
+                'Plans may read project data and create reversible drafts only. Never add formal writeback, deletion, commit, or external publishing tools.',
+                'Return strict JSON with title, deliverable, and steps only.',
             ].join(' ');
         const outputTokens = Math.min(this.settingsCache.http.maxTokens, 2400);
         const prompt = this.assembleAgentPrompt({
@@ -1346,7 +2036,12 @@ export class AiService {
                     id: 'current-plan',
                     kind: 'plan',
                     priority: 'required',
-                    value: { title: payload.currentPlan.title, deliverable: payload.currentPlan.deliverable, steps: currentSteps },
+                    value: {
+                        title: payload.currentPlan.title,
+                        deliverable: payload.currentPlan.deliverable,
+                        requestedEffect: payload.currentPlan.requestedEffect,
+                        steps: currentSteps,
+                    },
                 },
                 {
                     id: 'available-tools',
@@ -1370,9 +2065,11 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.steps)) {
-            throw new AiActionError('UNKNOWN', 'Agent plan revision did not return valid JSON steps');
+            this.invalidAgentStructuredOutput('Agent plan revision did not return valid JSON steps', [
+                { path: 'steps', message: 'Expected an array of revised plan steps' },
+            ]);
         }
         return {
             title: trimText(parsed.title, 120) || payload.currentPlan.title,
@@ -1386,6 +2083,11 @@ export class AiService {
         locale?: string;
         dimensions?: string[];
         contextBundle: Record<string, unknown>;
+        agentSkill?: {
+            prompt?: string;
+            sections?: Array<{ skill?: { stableId?: string; version?: string; contentHash?: string } }>;
+            estimatedTokens?: number;
+        };
     }, signal?: AbortSignal): Promise<Record<string, unknown>> {
         const goal = trimText(payload.goal, 12000);
         if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
@@ -1411,6 +2113,31 @@ export class AiService {
                 'Return one strict JSON object only, with overallScore, summary, dimensions, issues, uncheckableDimensions, and warnings.',
             ].join(' ');
         const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4200);
+        const agentSkillPrompt = trimText(payload.agentSkill?.prompt, 48000);
+        const skillSourceRef = payload.agentSkill?.sections
+            ?.map((section) => {
+                const skill = section.skill;
+                return skill?.stableId && skill.version ? `${skill.stableId}@${skill.version}` : '';
+            })
+            .filter(Boolean)
+            .join(', ');
+        const sections: AgentContextSection[] = [];
+        if (agentSkillPrompt) {
+            sections.push({
+                id: 'agent-skill-method',
+                kind: 'metadata',
+                priority: 'high',
+                value: agentSkillPrompt,
+                sourceRef: skillSourceRef || 'agent-skill-runtime',
+            });
+        }
+        sections.push({
+            id: 'context-bundle',
+            kind: 'retrieval',
+            priority: 'required',
+            value: payload.contextBundle,
+            sourceRef: 'chapter.context@1.0.0',
+        });
         const prompt = this.assembleAgentPrompt({
             operation: 'agent.generate_consistency_review',
             systemPrompt,
@@ -1419,13 +2146,7 @@ export class AiService {
                 goal,
                 dimensions: Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [],
             },
-            sections: [{
-                id: 'context-bundle',
-                kind: 'retrieval',
-                priority: 'required',
-                value: payload.contextBundle,
-                sourceRef: 'chapter.context@1.0.0',
-            }],
+            sections,
         });
         const response = await this.getProvider().generate({
             systemPrompt,
@@ -1435,9 +2156,9 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.issues)) {
-            throw new AiActionError('UNKNOWN', 'Consistency reviewer did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Consistency reviewer did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1501,9 +2222,9 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.findings)) {
-            throw new AiActionError('UNKNOWN', 'Writer revision planner did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Writer revision planner did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1568,9 +2289,9 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.findings)) {
-            throw new AiActionError('UNKNOWN', 'Editor range reviewer did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Editor range reviewer did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1598,18 +2319,22 @@ export class AiService {
                 '你是首次阅读小说的普通读者评估器，必须严格按章节顺序盲读。',
                 '你只能知道本次输入的当前章节，以及 priorReaderState 中前序章节留下的读者记忆。不得使用未来章节、世界观后台资料、人物卡、情节线、检索资料或其他专家结论。',
                 '不要把猜测当作事实；只评估当前章造成的困惑、情绪、悬念、沉浸感、弃读风险与追更动力。',
+                '所有评分必须使用百分制整数，并固定返回 scoreScale: 100。标尺：0–19 极差，20–39 较弱，40–59 一般，60–79 良好，80–100 强；不得使用十分制。',
                 'findings 中 chapterIds、evidenceRefs 和 evidence.sourceId 只能使用当前 chapterId，evidence.sourceType 只能是 chapter。',
+                'findings 只保留 2–4 个最影响阅读体验的发现，按严重度和阅读影响从高到低排列；不要生成重复或低价值问题。',
                 'readerStateSummary 必须是供下一章读者继承的简洁已知状态，只记录读者已看到的事实、未解疑问、情绪和期待，不得补入后台答案。',
                 '只返回严格 JSON 对象，不要 Markdown 或代码围栏。',
-                '格式：{"chapterId":"当前ID","chapterTitle":"标题","clarityScore":0,"emotionalIntensity":0,"suspenseScore":0,"retentionScore":0,"dominantEmotion":"情绪","confusionPoints":[],"immersionBreaks":[],"effectiveHooks":[],"expectations":[],"dropRisk":"low|medium|high","summary":"本章读者反馈","readerStateSummary":"传递给下一章的读者已知状态","findings":[{"findingId":"finding-1","title":"问题","summary":"判断","category":"confusion|emotion|suspense|immersion|drop_risk|retention|other","severity":"critical|high|medium|low|info","chapterIds":["当前ID"],"evidenceRefs":["当前ID"],"evidence":[{"sourceType":"chapter","sourceId":"当前ID","title":"当前章","excerpt":"短证据"}],"recommendation":"建议","recommendedRole":"writer|editor","uncertainty":"不确定性"}],"warnings":[]}。',
+                '格式：{"chapterId":"当前ID","chapterTitle":"标题","scoreScale":100,"clarityScore":72,"emotionalIntensity":68,"suspenseScore":81,"retentionScore":76,"dominantEmotion":"情绪","confusionPoints":[],"immersionBreaks":[],"effectiveHooks":[],"expectations":[],"dropRisk":"low|medium|high","summary":"本章读者反馈","readerStateSummary":"传递给下一章的读者已知状态","findings":[{"findingId":"finding-1","title":"问题","summary":"判断","category":"confusion|emotion|suspense|immersion|drop_risk|retention|other","severity":"critical|high|medium|low|info","chapterIds":["当前ID"],"evidenceRefs":["当前ID"],"evidence":[{"sourceType":"chapter","sourceId":"当前ID","title":"当前章","excerpt":"短证据"}],"recommendation":"建议","recommendedRole":"writer|editor","uncertainty":"不确定性"}],"warnings":[]}。',
             ].join(' ')
             : [
                 'Act as a first-time fiction reader and evaluate chapters in strict reading order.',
                 'You may use only the current chapter and priorReaderState from earlier chapters. Never use future chapters, backstage worldbuilding, character sheets, plotlines, retrieval evidence, or other expert conclusions.',
                 'Evaluate confusion, emotion, suspense, immersion, drop risk, and retention without presenting guesses as facts.',
+                'Every score must be an integer on a 0–100 scale and scoreScale must be exactly 100. Use 0–19 catastrophic, 20–39 weak, 40–59 mixed, 60–79 good, and 80–100 strong. Never use a ten-point scale.',
                 'All finding and evidence references must use only the current chapter ID.',
+                'Return only the 2–4 findings with the highest impact on the reading experience, ordered by severity and impact. Do not pad the list with duplicates or low-value observations.',
                 'readerStateSummary must contain only what the reader now knows, wonders, feels, and expects for the next chapter.',
-                'Return one strict JSON object with scores, feedback lists, dropRisk, summary, readerStateSummary, findings, and warnings.',
+                'Return one strict JSON object with scoreScale: 100, percentage scores, feedback lists, dropRisk, summary, readerStateSummary, findings, and warnings.',
             ].join(' ');
         const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4200);
         const prompt = this.assembleAgentPrompt({
@@ -1641,14 +2366,14 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (
             !parsed
             || typeof parsed.summary !== 'string'
             || typeof parsed.readerStateSummary !== 'string'
             || !Array.isArray(parsed.findings)
         ) {
-            throw new AiActionError('UNKNOWN', 'Reader journey evaluator did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Reader journey evaluator did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1709,7 +2434,7 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (
             !parsed
             || typeof parsed.summary !== 'string'
@@ -1717,7 +2442,7 @@ export class AiService {
             || !Array.isArray(parsed.findings)
             || !Array.isArray(parsed.entityAssessments)
         ) {
-            throw new AiActionError('UNKNOWN', 'Worldbuilding consistency reviewer did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Worldbuilding consistency reviewer did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1772,9 +2497,9 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.claims)) {
-            throw new AiActionError('UNKNOWN', 'Research claim extractor did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Research claim extractor did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1839,9 +2564,9 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || typeof parsed.summary !== 'string' || !Array.isArray(parsed.findings)) {
-            throw new AiActionError('UNKNOWN', 'Research fact-check reviewer did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Research fact-check reviewer did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1895,14 +2620,14 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (
             !parsed
             || typeof parsed.summary !== 'string'
             || !Array.isArray(parsed.findings)
             || !Array.isArray(parsed.conflicts)
         ) {
-            throw new AiActionError('UNKNOWN', 'Scope audit supervisor did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Scope audit supervisor did not return valid structured JSON');
         }
         return parsed;
     }
@@ -1964,11 +2689,198 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.threads) || !Array.isArray(parsed.issues)) {
-            throw new AiActionError('UNKNOWN', 'Plotline analyzer did not return valid structured JSON');
+            this.invalidAgentStructuredOutput('Plotline analyzer did not return valid structured JSON');
         }
         return parsed;
+    }
+
+    async generateAgentNovelBootstrap(payload: {
+        goal: string;
+        locale?: string;
+        userDecisions?: Record<string, unknown>;
+        agentSkill?: { prompt?: string; sections?: Array<{ skill?: { stableId?: string; version?: string } }> };
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是新小说方案设计器。根据用户已确认的推荐式问答生成可审核方案，不再重复提问，不创建数据库记录，不生成大段正文。',
+                '明确区分用户确认内容与为补全方案作出的假设；假设必须列入 assumptions。',
+                '方案必须包含题材与读者承诺、核心前提、核心问题、叙事形态、人物欲望/代价/变化、世界规则、至少三级冲突升级、悬念与信息释放策略、至少三个开篇章节节拍；还要给出分卷路线和首 6-12 章连载章节表。章节表的每章必须写清场景目标、冲突和章末钩子。',
+                '根据项目规模推荐串行、分批并行或团队协作中的一种写作模式，并给出目标章节数、单章字数和至少三条质量校验项。',
+                '只返回严格 JSON：titleCandidates(1-5)、genrePromise、readerPromise、corePremise、centralQuestion、narrativeShape、characters[{name,role,desire,cost,change}]、worldRules、conflictEscalation、suspenseStrategy、openingBeats、volumePlan[{title,dramaticQuestion,turningPoint,chapterRange}]、chapterPlan[{chapterNumber,title,sceneGoal,conflict,hook}]、writingModeRecommendation、targetChapterCount、targetWordsPerChapter、validationChecklist、userDecisionSummary、assumptions、warnings。',
+            ].join(' ')
+            : 'Create a reviewable new-novel blueprint from the confirmed product questions. Do not ask again, write project data, or generate long prose. Include a volume route, a six-to-twelve chapter serial plan with scene goal, conflict, and hook for every chapter, plus a writing-mode recommendation, target chapter count, target words per chapter, and validation checklist. Return strict JSON with titleCandidates, genrePromise, readerPromise, corePremise, centralQuestion, narrativeShape, characters, worldRules, conflictEscalation, suspenseStrategy, openingBeats, volumePlan, chapterPlan, writingModeRecommendation, targetChapterCount, targetWordsPerChapter, validationChecklist, userDecisionSummary, assumptions, and warnings.';
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 5000);
+        const skillPrompt = trimText(payload.agentSkill?.prompt, 48000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_novel_bootstrap',
+            systemPrompt,
+            outputTokens,
+            currentRequest: { goal },
+            sections: [
+                {
+                    id: 'confirmed-decisions',
+                    kind: 'decision',
+                    priority: 'required',
+                    value: payload.userDecisions || {},
+                    sourceRef: 'agent-user-input',
+                },
+                ...(skillPrompt ? [{
+                    id: 'agent-skill-novel-bootstrap',
+                    kind: 'metadata' as const,
+                    priority: 'high' as const,
+                    value: skillPrompt,
+                    sourceRef: payload.agentSkill?.sections?.map((item) => `${item.skill?.stableId || 'skill'}@${item.skill?.version || 'unknown'}`).join(',') || 'builtin.novel-bootstrap',
+                }] : []),
+            ],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.65),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        if (!parsed || !Array.isArray(parsed.titleCandidates) || !Array.isArray(parsed.characters) || !Array.isArray(parsed.openingBeats)) {
+            this.invalidAgentStructuredOutput('Novel bootstrap returned an invalid blueprint');
+        }
+        return parsed as Record<string, unknown>;
+    }
+
+    async generateAgentStyleSkillPack(payload: {
+        goal: string;
+        locale?: string;
+        source?: Record<string, unknown>;
+        agentSkill?: { prompt?: string; sections?: Array<{ skill?: { stableId?: string; version?: string } }> };
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const systemPrompt = isZh
+            ? [
+                '你是创作 Skill 提炼器。只从输入中获准的小说样本，或明确标注的低置信度模型先验，提炼抽象、可复用的方法；不评价作者身份，不复制长句、专名、人物或情节。',
+                '必须生成两个独立 Skill 草稿：language_style 与 suspense_release。只有样本确实显示多人物并行推进时才生成 ensemble_progression，否则写入 omittedDimensions。',
+                'language_style 覆盖句长节奏、叙述距离、视角、词汇密度、对白、描写、修辞和段落；suspense_release 覆盖问题建立、线索、误导、揭示节拍、章末钩子和读者认知差；群像覆盖视角轮换、目标、交汇节点、出场节奏与辨识度。',
+                '每个 Skill 草稿包含 draftKey、stableIdCandidate、title、description、guidanceMode、confidence、triggerHints、antiTriggerHints、supportedOperations、instructions、constraints、evidenceNotes、contaminationWarnings、evaluationPrompt。',
+                'Pack 只保存 Operation/Role 到主 Skill 和最多一个辅助 Skill 的绑定，不得合并成 composite Prompt。',
+                'sourceCoverage 必须说明样本章数、覆盖类型、证据充分度与缺口。只有作品名称或模型先验时 confidence 必须为 low，并给出警告。',
+                '只返回严格 JSON：summary、sourceCoverage、skills(2-3)、pack{stableIdCandidate,title,description,bindings[{operationId,roleId,primaryDraftKey,auxiliaryDraftKey}]}、omittedDimensions、warnings。',
+            ].join(' ')
+            : 'Extract abstract reusable writing methods from the authorized samples without copying long phrases, proper nouns, characters, or plot. Produce separate language_style and suspense_release drafts, optional ensemble_progression only with evidence, and an operation/role Skill Pack binding. Return strict JSON.';
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 7500);
+        const skillPrompt = trimText(payload.agentSkill?.prompt, 48000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_style_skill_pack',
+            systemPrompt,
+            outputTokens,
+            currentRequest: { goal },
+            sections: [
+                {
+                    id: 'authorized-style-source',
+                    kind: 'retrieval',
+                    priority: 'required',
+                    value: payload.source || {},
+                    sourceRef: payload.source?.sourceType === 'model_prior'
+                        ? 'named-work-model-prior'
+                        : 'approved-chapter-scope',
+                },
+                ...(skillPrompt ? [{
+                    id: 'agent-skill-style-extractor',
+                    kind: 'metadata' as const,
+                    priority: 'high' as const,
+                    value: skillPrompt,
+                    sourceRef: payload.agentSkill?.sections?.map((item) => `${item.skill?.stableId || 'skill'}@${item.skill?.version || 'unknown'}`).join(',') || 'builtin.style-skill-extractor',
+                }] : []),
+            ],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.35),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 360000),
+            signal,
+        });
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        if (!parsed || !Array.isArray(parsed.skills) || parsed.skills.length < 2 || !parsed.pack || typeof parsed.pack !== 'object') {
+            this.invalidAgentStructuredOutput('Style Skill extractor returned an invalid Skill Pack draft');
+        }
+        return parsed as Record<string, unknown>;
+    }
+
+    async generateAgentSkillDraft(payload: {
+        goal: string;
+        scope?: 'user' | 'novel';
+        novelId?: string;
+        locale?: string;
+        targetSkillId?: string;
+        source?: Record<string, unknown>;
+    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        const goal = trimText(payload.goal, 12000);
+        if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
+        const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const allowedOperations = [
+            'project.lookup', 'novel.bootstrap', 'agent_skill.style_extract', 'chapter.context',
+            'chapter.scope_context', 'chapter.consistency_review', 'writer.range_revision_plan',
+            'editor.range_review', 'chapter.continuation', 'chapter.sequence_continuation',
+            'chapter.create', 'chapter.batch_rewrite', 'chapter.rewrite', 'creative_asset.draft',
+            'plotline.analysis', 'reader.feedback', 'reader.journey_review',
+            'worldbuilding.range_consistency', 'research.fact_check',
+            'research.range_fact_check', 'novel.scope_audit',
+        ];
+        const systemPrompt = isZh
+            ? [
+                '你是 Agent Skill Creator。把用户自然语言需求整理成一个小而专注、可测试、可审查的 Skill 草稿。只生成草稿，不安装、不启用、不提交 Revision。',
+                'Skill 描述要同时说明“做什么”和“何时使用”；instructions 写可执行方法和判断标准，不复述常识，不加入无关流程。',
+                'triggerHints 与 antiTriggerHints 都必须提供；auto 语义选择只有边界足够清楚时才能使用，否则使用 suggest。',
+                `supportedOperations 只能从以下列表选择：${allowedOperations.join(', ')}。allowedRoles 只能使用 team、writer、editor、reader、worldbuilding、research_rag。`,
+                '若来源不足，把不确定性写入 warnings；不得把模型先验伪装成来源证据，不得包含密钥、系统提示或授权信息。',
+                '只返回严格 JSON：definition{stableId,title,description,category,guidanceMode,semanticSelection,triggerHints,antiTriggerHints,allowedRoles,supportedOperations,recommendedToolchains,contextNeeds,outputType}、revision{version,instructions,constraints,examples,manifest}、rationale、warnings。stableId 使用小写 ASCII 点号或连字符，version 默认 1.0.0。',
+            ].join(' ')
+            : [
+                'You are an Agent Skill Creator. Convert the request into one focused, testable, reviewable skill draft. Do not install, enable, or commit it.',
+                'Describe both what it does and when it should be used. Supply positive and negative triggers. Prefer semanticSelection suggest unless auto boundaries are unambiguous.',
+                `supportedOperations must come from: ${allowedOperations.join(', ')}. allowedRoles must come from team, writer, editor, reader, worldbuilding, research_rag.`,
+                'Return strict JSON with definition, revision, rationale, and warnings. Use a lowercase ASCII stableId and semantic version 1.0.0.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 5000);
+        const prompt = this.assembleAgentPrompt({
+            operation: 'agent.generate_skill_draft',
+            systemPrompt,
+            outputTokens,
+            currentRequest: {
+                goal,
+                scope: payload.scope || 'user',
+                novelId: payload.novelId || null,
+                targetSkillId: payload.targetSkillId || null,
+            },
+            sections: payload.source && Object.keys(payload.source).length ? [{
+                id: 'authorized-skill-source',
+                kind: 'retrieval',
+                priority: 'high',
+                value: payload.source,
+                sourceRef: 'agent-skill-author-request',
+            }] : [],
+        });
+        const response = await this.getProvider().generate({
+            systemPrompt,
+            prompt,
+            maxTokens: outputTokens,
+            temperature: Math.min(this.settingsCache.http.temperature, 0.3),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
+            signal,
+        });
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        if (!parsed || typeof parsed.definition !== 'object' || typeof parsed.revision !== 'object') {
+            this.invalidAgentStructuredOutput('Agent Skill Creator returned an invalid draft');
+        }
+        return parsed as Record<string, unknown>;
     }
 
     async generateAgentReport(payload: {
@@ -2059,11 +2971,11 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         const content = trimText(parsed?.content, 20000);
         const conversationSummary = trimText(parsed?.conversationSummary, 4000);
-        if (!content) throw new AiActionError('UNKNOWN', 'Agent final report returned empty content');
-        if (!conversationSummary) throw new AiActionError('UNKNOWN', 'Agent final report returned empty conversation summary');
+        if (!content) this.invalidAgentStructuredOutput('Agent final report returned empty content');
+        if (!conversationSummary) this.invalidAgentStructuredOutput('Agent final report returned empty conversation summary');
         return { content, conversationSummary };
     }
 
@@ -2076,9 +2988,14 @@ export class AiService {
     }, signal?: AbortSignal): Promise<{
         requiresDecision: boolean;
         title?: string;
-        question?: string;
         reason?: string;
-        options?: Array<{ id?: string; label: string; description?: string }>;
+        questions?: Array<{
+            questionId?: string;
+            header?: string;
+            prompt?: string;
+            recommendationReason?: string;
+            options?: Array<{ optionId?: string; label: string; description?: string }>;
+        }>;
     }> {
         const goal = trimText(payload.goal, 12000);
         if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
@@ -2088,13 +3005,14 @@ export class AiService {
                 '你是小说创作 Agent 的执行前决策分析器，不生成正文，也不调用工具。',
                 '判断任务在生成草稿前是否存在两个或以上互斥且会显著改变成稿的创作方向。',
                 '普通细节差异、可以同时满足的要求、证据不足都不属于创作方向分歧。',
-                '只有必须由用户选择时 requiresDecision=true，并给出 2 到 4 个具体、互斥、可执行的选项。',
-                '只返回严格 JSON：{"requiresDecision":false}，或 {"requiresDecision":true,"title":"方向确认","question":"...","reason":"...","options":[{"id":"可选","label":"...","description":"..."}]}。',
+                '只有必须由用户选择时 requiresDecision=true。一个疑问只给一个问题；确有多个相互独立的阻塞疑问时才给 2–3 个，禁止凑数。',
+                '每题给出 2–3 个具体、互斥、可执行的选项，推荐项排第一，并说明推荐原因。',
+                '只返回严格 JSON：{"requiresDecision":false}，或 {"requiresDecision":true,"title":"方向确认","reason":"...","questions":[{"questionId":"direction","header":"短标题","prompt":"...","recommendationReason":"...","options":[{"optionId":"direction_1","label":"...","description":"..."}]}]}。',
             ].join(' ')
             : [
                 'You detect mutually exclusive creative directions before a novel draft is generated.',
                 'Do not write prose or call tools. Minor details, compatible requirements, and evidence quality are not direction conflicts.',
-                'Return strict JSON. Set requiresDecision=true only when the user must choose among 2-4 concrete, exclusive directions.',
+                'Return strict JSON. Use one question for one blocking doubt and 2-3 only for genuinely distinct blocking doubts. Each question has 2-3 exclusive options with the recommended option first.',
             ].join(' ');
         const outputTokens = Math.min(this.settingsCache.http.maxTokens, 1200);
         const prompt = this.assembleAgentPrompt({
@@ -2121,17 +3039,38 @@ export class AiService {
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
         });
-        const parsed = parseJsonObject(response.text);
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || typeof parsed.requiresDecision !== 'boolean') {
-            throw new AiActionError('UNKNOWN', 'Creative direction detector returned invalid JSON');
+            this.invalidAgentStructuredOutput('Creative direction detector returned invalid JSON');
         }
         if (!parsed.requiresDecision) return { requiresDecision: false };
+        const rawQuestions = Array.isArray(parsed.questions) ? parsed.questions : [];
+        const questionIssues: Array<{ path: string; message: string }> = [];
+        if (rawQuestions.length < 1 || rawQuestions.length > 3) {
+            questionIssues.push({ path: '$.questions', message: 'Expected 1 to 3 questions when requiresDecision is true' });
+        }
+        rawQuestions.slice(0, 3).forEach((rawQuestion, questionIndex) => {
+            if (!rawQuestion || typeof rawQuestion !== 'object' || Array.isArray(rawQuestion)) {
+                questionIssues.push({ path: `$.questions[${questionIndex}]`, message: 'Expected a question object' });
+                return;
+            }
+            const question = rawQuestion as Record<string, unknown>;
+            const options = Array.isArray(question.options) ? question.options : [];
+            if (options.length < 2 || options.length > 3) {
+                questionIssues.push({
+                    path: `$.questions[${questionIndex}].options`,
+                    message: 'Expected 2 to 3 options',
+                });
+            }
+        });
+        if (questionIssues.length > 0) {
+            this.invalidAgentStructuredOutput('Creative direction detector returned invalid questions', questionIssues);
+        }
         return {
             requiresDecision: true,
             title: trimText(parsed.title, 120),
-            question: trimText(parsed.question, 500),
             reason: trimText(parsed.reason, 1000),
-            options: Array.isArray(parsed.options) ? parsed.options : [],
+            questions: rawQuestions.slice(0, 3),
         };
     }
 
@@ -2314,7 +3253,11 @@ export class AiService {
         };
     }
 
-    async continueWriting(payload: ContinueWritingPayload, signal?: AbortSignal): Promise<ContinueWritingResult> {
+    async continueWriting(
+        payload: ContinueWritingPayload,
+        signal?: AbortSignal,
+        onActivity?: (kind: 'first_byte' | 'chunk') => void,
+    ): Promise<ContinueWritingResult> {
         devLog('INFO', 'AiService.continueWriting.start', 'Continue writing start', {
             chapterId: payload.chapterId,
             novelId: payload.novelId,
@@ -2341,6 +3284,10 @@ export class AiService {
             prompt,
             maxTokens: this.settingsCache.http.maxTokens,
             temperature: generationTemperature,
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, DRAFT_GENERATION_TIMEOUT_MS),
+            firstByteTimeoutMs: DRAFT_FIRST_BYTE_TIMEOUT_MS,
+            streamIdleTimeoutMs: DRAFT_STREAM_IDLE_TIMEOUT_MS,
+            onActivity,
             signal,
         });
         signal?.throwIfAborted();
@@ -2642,6 +3589,7 @@ export class AiService {
                         characters: filtered.characters?.length ?? 0,
                         items: filtered.items?.length ?? 0,
                         skills: filtered.skills?.length ?? 0,
+                        worldSettings: filtered.worldSettings?.length ?? 0,
                         maps: filtered.maps?.length ?? 0,
                     },
                 });
@@ -2668,6 +3616,7 @@ export class AiService {
             characters: [{ name: `角色-${suffix}`, role: 'protagonist', description: 'AI 生成角色草稿', profile: { goal: '完成使命' } }],
             items: [{ name: `物品-${suffix}`, type: 'item', description: 'AI 生成物品草稿', profile: { rarity: 'rare' } }],
             skills: [{ name: `技能-${suffix}`, description: 'AI 生成技能草稿', profile: { rank: 'A' } }],
+            worldSettings: [{ name: `世界规则-${suffix}`, type: 'other', content: 'AI 生成世界设定草稿' }],
             maps: [{ name: `世界地图-${suffix}`, type: 'world', description: 'AI 生成地图草稿', imagePrompt: 'fantasy world map' }],
         };
         const filteredFallback: CreativeAssetsDraft = this.buildEmptyCreativeDraft(targetSections);
@@ -2682,6 +3631,7 @@ export class AiService {
                 characters: filteredFallback.characters?.length ?? 0,
                 items: filteredFallback.items?.length ?? 0,
                 skills: filteredFallback.skills?.length ?? 0,
+                worldSettings: filteredFallback.worldSettings?.length ?? 0,
                 maps: filteredFallback.maps?.length ?? 0,
             },
         });
@@ -2760,6 +3710,17 @@ export class AiService {
                 description: sanitizeText(skill.description, `skills[${index}].description`),
                 profile: sanitizeProfile(skill.profile, `skills[${index}].profile`),
             })),
+            worldSettings: (payload.draft.worldSettings ?? []).map((setting, index) => {
+                const settingType = sanitizeText(setting.type, `worldSettings[${index}].type`, 32) || 'other';
+                return {
+                    name: sanitizeText(setting.name, `worldSettings[${index}].name`, 120),
+                    type: VALID_WORLD_SETTING_TYPES.has(settingType)
+                        ? settingType as 'history' | 'geography' | 'magic_system' | 'faction' | 'technology' | 'other'
+                        : 'other',
+                    content: sanitizeText(setting.content, `worldSettings[${index}].content`),
+                    icon: sanitizeText(setting.icon, `worldSettings[${index}].icon`, 120),
+                };
+            }),
             maps: (payload.draft.maps ?? []).map((map, index) => {
                 const mapType = sanitizeText(map.type, `maps[${index}].type`, 32) || 'world';
                 return {
@@ -2803,6 +3764,11 @@ export class AiService {
         for (const [index, skill] of (normalized.skills ?? []).entries()) {
             if (!skill.name) {
                 pushError({ scope: `skills[${index}]`, code: 'INVALID_INPUT', detail: 'Skill name is required' });
+            }
+        }
+        for (const [index, setting] of (normalized.worldSettings ?? []).entries()) {
+            if (!setting.name) {
+                pushError({ scope: `worldSettings[${index}]`, code: 'INVALID_INPUT', detail: 'World setting name is required' });
             }
         }
         for (const [index, map] of (normalized.maps ?? []).entries()) {
@@ -2878,12 +3844,14 @@ export class AiService {
         checkDraftDuplicates(normalized.characters ?? [], 'characters');
         checkDraftDuplicates(normalized.items ?? [], 'items');
         checkDraftDuplicates(normalized.skills ?? [], 'skills');
+        checkDraftDuplicates(normalized.worldSettings ?? [], 'worldSettings');
         checkDraftDuplicates(normalized.maps ?? [], 'maps');
 
-        const [existingPlotLines, existingCharacters, existingItems, existingMaps] = await Promise.all([
+        const [existingPlotLines, existingCharacters, existingItems, existingWorldSettings, existingMaps] = await Promise.all([
             (db as any).plotLine.findMany({ where: { novelId: payload.novelId }, select: { name: true } }),
             (db as any).character.findMany({ where: { novelId: payload.novelId }, select: { name: true } }),
             (db as any).item.findMany({ where: { novelId: payload.novelId }, select: { name: true } }),
+            (db as any).worldSetting.findMany({ where: { novelId: payload.novelId }, select: { name: true } }),
             (db as any).mapCanvas.findMany({ where: { novelId: payload.novelId }, select: { name: true } }),
         ]);
 
@@ -2891,6 +3859,7 @@ export class AiService {
             plotLines: new Set(existingPlotLines.map((row: { name: string }) => row.name.trim().toLowerCase())),
             characters: new Set(existingCharacters.map((row: { name: string }) => row.name.trim().toLowerCase())),
             items: new Set(existingItems.map((row: { name: string }) => row.name.trim().toLowerCase())),
+            worldSettings: new Set(existingWorldSettings.map((row: { name: string }) => row.name.trim().toLowerCase())),
             maps: new Set(existingMaps.map((row: { name: string }) => row.name.trim().toLowerCase())),
         };
 
@@ -2913,6 +3882,7 @@ export class AiService {
         checkExistingConflicts(normalized.characters ?? [], 'characters', 'characters');
         checkExistingConflicts(normalized.items ?? [], 'items', 'items');
         checkExistingConflicts(normalized.skills ?? [], 'items', 'skills');
+        checkExistingConflicts(normalized.worldSettings ?? [], 'worldSettings', 'worldSettings');
         checkExistingConflicts(normalized.maps ?? [], 'maps', 'maps');
 
         if ((normalized.plotPoints?.length ?? 0) > 0 && (normalized.plotLines?.length ?? 0) === 0) {
@@ -2936,6 +3906,7 @@ export class AiService {
                 characters: payload.draft.characters?.length ?? 0,
                 items: payload.draft.items?.length ?? 0,
                 skills: payload.draft.skills?.length ?? 0,
+                worldSettings: payload.draft.worldSettings?.length ?? 0,
                 maps: payload.draft.maps?.length ?? 0,
             }),
         });
@@ -2946,6 +3917,7 @@ export class AiService {
             characters: 0,
             items: 0,
             skills: 0,
+            worldSettings: 0,
             maps: 0,
             mapImages: 0,
         };
@@ -3091,6 +4063,21 @@ export class AiService {
                     });
                     createdEntities.push(createCreativeAssetEntitySnapshot('item', createdSkill));
                     localCreated.skills += 1;
+                }
+
+                for (const setting of draft.worldSettings ?? []) {
+                    const createdWorldSetting = await (tx as any).worldSetting.create({
+                        data: {
+                            novelId: payload.novelId,
+                            name: setting.name,
+                            type: setting.type || 'other',
+                            content: setting.content || '',
+                            icon: setting.icon || null,
+                            sortOrder: Date.now() + localCreated.worldSettings,
+                        },
+                    });
+                    createdEntities.push(createCreativeAssetEntitySnapshot('worldSetting', createdWorldSetting));
+                    localCreated.worldSettings += 1;
                 }
 
                 for (const mapDraft of draft.maps ?? []) {
@@ -3344,23 +4331,6 @@ export class AiService {
         }
     }
 
-    async invokeOpenClawSkill(input: { name: string; input?: unknown }): Promise<{ ok: boolean; data?: unknown; error?: string; code?: string }> {
-        try {
-            const data = await this.executeAction({
-                actionId: input.name,
-                payload: input.input,
-            });
-            return { ok: true, data };
-        } catch (error: any) {
-            const normalized = normalizeAiError(error);
-            return {
-                ok: false,
-                error: formatAiErrorForDisplay(normalized.code, normalized.message || 'OpenClaw skill invoke failed'),
-                code: normalized.code,
-            };
-        }
-    }
-
     private compactContinueHardContext(input: Record<string, unknown>): Record<string, unknown> {
         const worldSettings = Array.isArray(input.worldSettings) ? input.worldSettings : [];
         const plotLines = Array.isArray(input.plotLines) ? input.plotLines : [];
@@ -3582,11 +4552,11 @@ export class AiService {
                         : []),
                     ...(writeMode === 'rewrite_chapter'
                         ? (isZh
-                            ? ['输出完整替换正文。', '不得追加在原文之后或解释修改过程。']
-                            : ['Output a complete replacement chapter.', 'Do not append to the original or explain edits.'])
+                            ? ['输出完整替换正文。', '不得追加在原文之后或解释修改过程。', '不要输出章节标题、章号或重复章名行；正文从第一段开始。']
+                            : ['Output a complete replacement chapter.', 'Do not append to the original or explain edits.', 'Do not output a chapter title, chapter number, or duplicate title line; start directly with the prose.'])
                         : (isZh
-                            ? ['不得重复已有段落。', '只输出生成的续写正文。']
-                            : ['Do not repeat existing paragraphs.', 'Output only generated chapter text.'])),
+                            ? ['不得重复已有段落。', '只输出生成的续写正文。', '不要输出章节标题、章号或重复章名行；正文从第一段开始。']
+                            : ['Do not repeat existing paragraphs.', 'Output only generated chapter text.', 'Do not output a chapter title, chapter number, or duplicate title line; start directly with the prose.'])),
                 ],
             },
             usedContext: context.usedContext,
@@ -3626,6 +4596,7 @@ export class AiService {
             characters: [{ name: 'string', role: 'string?', description: 'string?' }],
             items: [{ name: 'string', type: 'item|skill|location', description: 'string?' }],
             skills: [{ name: 'string', description: 'string?' }],
+            worldSettings: [{ name: 'string', type: 'history|geography|magic_system|faction|technology|other', content: 'string?', icon: 'string?' }],
             maps: [{ name: 'string', type: 'world|region|scene', description: 'string?', imagePrompt: 'string?' }],
         };
 

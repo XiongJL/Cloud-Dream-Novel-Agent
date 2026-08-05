@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from fastmcp import Client, FastMCP
@@ -20,6 +21,8 @@ class AutomationInvoker(Protocol):
         params: dict[str, Any] | None = None,
         origin: str = "desktop-ui",
         request_id: str | None = None,
+        parent_request_id: str | None = None,
+        deadline_at: str | None = None,
     ) -> Any: ...
 
     async def cancel(self, request_id: str) -> bool: ...
@@ -34,6 +37,8 @@ class AgentToolAdapter(Protocol):
         params: dict[str, Any] | None = None,
         origin: str = "desktop-ui",
         request_id: str | None = None,
+        parent_request_id: str | None = None,
+        deadline_at: str | None = None,
     ) -> Any: ...
 
     async def cancel(self, request_id: str) -> bool: ...
@@ -54,10 +59,22 @@ class HttpAgentToolAdapter:
         params: dict[str, Any] | None = None,
         origin: str = "desktop-ui",
         request_id: str | None = None,
+        parent_request_id: str | None = None,
+        deadline_at: str | None = None,
     ) -> Any:
         if method not in self._allowed_tools:
             raise AutomationInvokeError("TOOL_NOT_ALLOWED", f"Tool is not registered for Agent use: {method}")
-        return await self.upstream.invoke(method, params, origin, request_id=request_id)
+        try:
+            return await self.upstream.invoke(
+                method, params, origin,
+                request_id=request_id,
+                parent_request_id=parent_request_id,
+                deadline_at=deadline_at,
+            )
+        except TypeError as error:
+            if "unexpected keyword argument" not in str(error):
+                raise
+            return await self.upstream.invoke(method, params, origin, request_id=request_id)
 
     async def cancel(self, request_id: str) -> bool:
         return await self.upstream.cancel(request_id)
@@ -70,6 +87,8 @@ class HttpAgentToolAdapter:
 class _InvocationContext:
     origin: str
     request_id: str | None
+    parent_request_id: str | None
+    deadline_at: str | None
 
 
 _INVOCATION_CONTEXT: ContextVar[_InvocationContext | None] = ContextVar(
@@ -89,7 +108,7 @@ class _AutomationProxyTool(Tool):
             annotations=ToolAnnotations(
                 readOnlyHint=definition.read_only,
                 destructiveHint=not definition.read_only,
-                idempotentHint=definition.read_only,
+                idempotentHint=definition.read_only or definition.idempotent,
                 openWorldHint=False,
             ),
         )
@@ -104,12 +123,21 @@ class _AutomationProxyTool(Tool):
                 "message": "FastMCP invocation context is missing",
             })
         try:
-            data = await self._upstream.invoke(
-                self.name,
-                arguments,
-                context.origin,
-                request_id=context.request_id,
-            )
+            try:
+                data = await self._upstream.invoke(
+                    self.name,
+                    arguments,
+                    context.origin,
+                    request_id=context.request_id,
+                    parent_request_id=context.parent_request_id,
+                    deadline_at=context.deadline_at,
+                )
+            except TypeError as error:
+                if "unexpected keyword argument" not in str(error):
+                    raise
+                data = await self._upstream.invoke(
+                    self.name, arguments, context.origin, request_id=context.request_id,
+                )
             return self.convert_result({"ok": True, "data": data})
         except AutomationInvokeError as error:
             return self.convert_result({
@@ -149,11 +177,24 @@ class FastMcpAgentToolAdapter:
         params: dict[str, Any] | None = None,
         origin: str = "desktop-ui",
         request_id: str | None = None,
+        parent_request_id: str | None = None,
+        deadline_at: str | None = None,
     ) -> Any:
         if method not in self._allowed_tools:
             raise AutomationInvokeError("TOOL_NOT_ALLOWED", f"Tool is not registered for Agent use: {method}")
         call_timeout = self._tool_timeouts.get(method, self.timeout_seconds)
-        token = _INVOCATION_CONTEXT.set(_InvocationContext(origin=origin, request_id=request_id))
+        if deadline_at:
+            try:
+                parsed_deadline = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+                call_timeout = max(0.1, min(call_timeout, (parsed_deadline - datetime.now(timezone.utc)).total_seconds() - 1.0))
+            except ValueError:
+                pass
+        token = _INVOCATION_CONTEXT.set(_InvocationContext(
+            origin=origin,
+            request_id=request_id,
+            parent_request_id=parent_request_id,
+            deadline_at=deadline_at,
+        ))
         try:
             try:
                 async with Client(self.server, timeout=max(self.timeout_seconds, call_timeout)) as client:

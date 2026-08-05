@@ -58,7 +58,13 @@ export class McpCliProvider implements AiProvider {
             promptEmbeddedInArgs: hasPromptPlaceholder,
         });
 
-        const { stdout } = await this.runProcess(parsedArgs, hasPromptPlaceholder ? '' : prompt, this.settings.mcpCli.startupTimeoutMs, req.signal);
+        const { stdout } = await this.runProcess(
+            parsedArgs,
+            hasPromptPlaceholder ? '' : prompt,
+            this.settings.mcpCli.startupTimeoutMs,
+            req.signal,
+            req.onActivity,
+        );
 
         devLog('INFO', 'McpCliProvider.generate.response', 'MCP CLI generate response', {
             cliPath: this.settings.mcpCli.cliPath,
@@ -71,7 +77,13 @@ export class McpCliProvider implements AiProvider {
         };
     }
 
-    private async runProcess(args: string[], stdinText: string, timeoutMs: number, signal?: AbortSignal): Promise<{ stdout: string; stderr: string }> {
+    private async runProcess(
+        args: string[],
+        stdinText: string,
+        timeoutMs: number,
+        signal?: AbortSignal,
+        onActivity?: (kind: 'first_byte' | 'chunk') => void,
+    ): Promise<{ stdout: string; stderr: string }> {
         const { cliPath, workingDir, envJson } = this.settings.mcpCli;
         const extraEnv = this.parseEnvJson(envJson);
         const startedAt = Date.now();
@@ -87,6 +99,7 @@ export class McpCliProvider implements AiProvider {
             let stdout = '';
             let stderr = '';
             let done = false;
+            let receivedFirstByte = false;
             const removeAbortListener = () => signal?.removeEventListener('abort', onAbort);
             const onAbort = () => {
                 if (done) return;
@@ -114,6 +127,8 @@ export class McpCliProvider implements AiProvider {
 
             child.stdout.on('data', (chunk) => {
                 stdout += chunk.toString();
+                onActivity?.(receivedFirstByte ? 'chunk' : 'first_byte');
+                receivedFirstByte = true;
             });
 
             child.stderr.on('data', (chunk) => {

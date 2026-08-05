@@ -260,6 +260,59 @@ export default function AIWorkbenchDraftDock({
           ))}
         </AssetDraftList>
 
+        <AssetDraftList title={t('aiWorkbench.sectionWorldSettings')} count={draft.worldSettings?.length ?? 0} theme={theme} emptyText={t('aiWorkbench.emptyDraft')}>
+          {(draft.worldSettings ?? []).map((setting, index) => (
+            <div key={`world-setting-${index}`} className={clsx('rounded-lg border p-2 space-y-1.5', isDark ? 'border-white/10' : 'border-gray-200')}>
+              <div className="flex items-center gap-2">
+                <input type="checkbox" checked={selection.worldSettings[index] || false} onChange={(event) => updateSelectionAt('worldSettings', index, event.target.checked)} />
+                <input
+                  value={setting.name || ''}
+                  onChange={(event) => {
+                    const next = { ...draft, worldSettings: [...(draft.worldSettings ?? [])] };
+                    next.worldSettings![index] = { ...next.worldSettings![index], name: event.target.value };
+                    onDraftChange(next);
+                  }}
+                  placeholder={t('aiWorkbench.placeholderWorldSettingName')}
+                  className={clsx('flex-1 rounded border px-2 py-1 text-xs', isDark ? 'bg-black/20 border-white/10 text-neutral-200' : 'bg-white border-gray-200 text-gray-700')}
+                />
+                <button onClick={() => removeAt('worldSettings', index)} className={clsx('p-1 rounded border', isDark ? 'border-white/10 text-neutral-300' : 'border-gray-200 text-gray-600')}>
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <select
+                value={setting.type || 'other'}
+                onChange={(event) => {
+                  const next = { ...draft, worldSettings: [...(draft.worldSettings ?? [])] };
+                  next.worldSettings![index] = {
+                    ...next.worldSettings![index],
+                    type: event.target.value as 'history' | 'geography' | 'magic_system' | 'faction' | 'technology' | 'other',
+                  };
+                  onDraftChange(next);
+                }}
+                className={clsx('w-full rounded border px-2 py-1 text-xs', isDark ? 'bg-black/20 border-white/10 text-neutral-200' : 'bg-white border-gray-200 text-gray-700')}
+              >
+                <option value="history">{t('aiWorkbench.worldSettingTypeHistory')}</option>
+                <option value="geography">{t('aiWorkbench.worldSettingTypeGeography')}</option>
+                <option value="magic_system">{t('aiWorkbench.worldSettingTypeMagicSystem')}</option>
+                <option value="faction">{t('aiWorkbench.worldSettingTypeFaction')}</option>
+                <option value="technology">{t('aiWorkbench.worldSettingTypeTechnology')}</option>
+                <option value="other">{t('aiWorkbench.worldSettingTypeOther')}</option>
+              </select>
+              <textarea
+                value={setting.content || ''}
+                onChange={(event) => {
+                  const next = { ...draft, worldSettings: [...(draft.worldSettings ?? [])] };
+                  next.worldSettings![index] = { ...next.worldSettings![index], content: event.target.value };
+                  onDraftChange(next);
+                }}
+                rows={3}
+                placeholder={t('aiWorkbench.placeholderWorldSettingContent')}
+                className={clsx('w-full rounded border px-2 py-1 text-xs resize-y', isDark ? 'bg-black/20 border-white/10 text-neutral-200' : 'bg-white border-gray-200 text-gray-700')}
+              />
+            </div>
+          ))}
+        </AssetDraftList>
+
         <AssetDraftList title={t('aiWorkbench.sectionMaps')} count={draft.maps?.length ?? 0} theme={theme} emptyText={t('aiWorkbench.emptyDraft')}>
           {(draft.maps ?? []).map((map, index) => (
             <div key={`map-${index}`} className={clsx('rounded-lg border p-2 space-y-1.5', isDark ? 'border-white/10' : 'border-gray-200')}>

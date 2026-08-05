@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -11,11 +12,15 @@ from .tool_manifest import AGENT_TOOL_BY_NAME
 
 
 AUTOMATION_METHOD_TIMEOUT_SECONDS: dict[str, float] = {
-    "agent.generate_chat": 180,
+    # Normal generation plus one bounded structured-output repair share the chat deadline.
+    "agent.generate_chat": 300,
     "agent.generate_plan": 180,
     "agent.revise_plan": 180,
     "agent.generate_report": 240,
     "agent.generate_consistency_review": 270,
+    "agent.generate_skill_draft": 270,
+    "agent.generate_novel_bootstrap": 270,
+    "agent.generate_style_skill_pack": 450,
     "agent.generate_editor_range_review": 270,
     "agent.generate_writer_range_revision_plan": 270,
     "agent.generate_reader_chapter_evaluation": 270,
@@ -25,6 +30,16 @@ AUTOMATION_METHOD_TIMEOUT_SECONDS: dict[str, float] = {
     "agent.generate_scope_audit": 270,
     "agent.generate_plotline_analysis": 270,
     "agent.detect_creative_direction": 180,
+    "agent.repair_structured_output": 180,
+    "agent.reprocess_saved_structured_output": 30,
+    "agent_skill.list": 30,
+    "agent_skill.get": 30,
+    "agent_skill.binding.list": 30,
+    "agent_skill.draft.list": 30,
+    "agent_skill.draft.get": 30,
+    "agent_skill.draft.upsert": 45,
+    "agent_skill.draft.commit": 60,
+    "agent_skill.draft.discard": 30,
 }
 
 
@@ -58,6 +73,8 @@ class AutomationClient:
         params: dict[str, Any] | None = None,
         origin: str = "desktop-ui",
         request_id: str | None = None,
+        parent_request_id: str | None = None,
+        deadline_at: str | None = None,
     ) -> Any:
         runtime = self._read_runtime()
         url = f"http://127.0.0.1:{runtime['port']}/invoke"
@@ -66,8 +83,17 @@ class AutomationClient:
             "method": method,
             "params": params or {},
             "origin": origin,
+            "parentRequestId": parent_request_id,
+            "deadlineAt": deadline_at,
         }
         request_timeout = resolve_automation_timeout(method, self.timeout_seconds)
+        if deadline_at:
+            try:
+                parsed_deadline = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+                remaining = (parsed_deadline - datetime.now(timezone.utc)).total_seconds()
+                request_timeout = max(0.1, min(request_timeout, remaining))
+            except ValueError:
+                pass
         try:
             async with httpx.AsyncClient(timeout=request_timeout) as client:
                 response = await client.post(

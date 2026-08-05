@@ -5,10 +5,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from novel_agent_runtime.events import AgentEventBus
 from novel_agent_runtime.runtime import NovelAgentRuntime
 from novel_agent_runtime.store import AgentStateStore
-from novel_agent_runtime.toolchains.reader_journey_review import reader_chapter_request
+from novel_agent_runtime.toolchains.reader_journey_review import (
+    build_reader_journey_artifact,
+    normalize_reader_chapter_evaluation,
+    reader_chapter_request,
+)
 from novel_agent_runtime.toolchains.schemas import ChapterScopeBundle
 
 from test_runtime import FakeAutomationClient
@@ -96,6 +102,7 @@ def _evaluation(chapter_id: str, index: int) -> dict[str, Any]:
     return {
         "chapterId": chapter_id,
         "chapterTitle": f"第{index}章",
+        "scoreScale": 100,
         "clarityScore": 82 - index,
         "emotionalIntensity": 60 + index,
         "suspenseScore": 70 + index,
@@ -141,6 +148,54 @@ def test_reader_request_contains_only_current_chapter_and_prior_reader_state() -
     assert "SECRET_2" in second
     assert "FUTURE_SECRET_3" not in second
     assert "BACKSTAGE_RULE" not in second
+
+
+def test_reader_score_protocol_requires_explicit_percentage_scale() -> None:
+    chapter = ChapterScopeBundle.model_validate(_scope_bundle()).chapters[0]
+    valid = _evaluation(chapter.chapterId, 1)
+    valid["retentionScore"] = 8
+
+    evaluation = normalize_reader_chapter_evaluation(valid, chapter)
+    assert evaluation.scoreScale == 100
+    assert evaluation.retentionScore == 8
+
+    missing_scale = dict(valid)
+    missing_scale.pop("scoreScale")
+    with pytest.raises(Exception):
+        normalize_reader_chapter_evaluation(missing_scale, chapter)
+
+    wrong_scale = {**valid, "scoreScale": 10}
+    with pytest.raises(Exception):
+        normalize_reader_chapter_evaluation(wrong_scale, chapter)
+
+
+def test_reader_score_protocol_rejects_out_of_range_scores_and_too_many_findings() -> None:
+    chapter = ChapterScopeBundle.model_validate(_scope_bundle()).chapters[0]
+    invalid_score = {**_evaluation(chapter.chapterId, 1), "clarityScore": 101}
+    with pytest.raises(Exception):
+        normalize_reader_chapter_evaluation(invalid_score, chapter)
+
+    too_many_findings = _evaluation(chapter.chapterId, 1)
+    too_many_findings["findings"] = [
+        {**too_many_findings["findings"][0], "findingId": f"finding_{index}"}
+        for index in range(5)
+    ]
+    with pytest.raises(Exception):
+        normalize_reader_chapter_evaluation(too_many_findings, chapter)
+
+
+def test_reader_journey_builds_warning_for_summary_chapter() -> None:
+    bundle_payload = _scope_bundle()
+    bundle_payload["chapters"][0]["contentMode"] = "summary"
+    bundle = ChapterScopeBundle.model_validate(bundle_payload)
+    evaluation = normalize_reader_chapter_evaluation(
+        _evaluation(bundle.chapters[0].chapterId, 1),
+        bundle.chapters[0],
+    )
+
+    journey = build_reader_journey_artifact([evaluation], bundle)
+
+    assert "1 章仅以摘要或摘录评估" in journey.warnings[-1]
 
 
 async def _wait_terminal(runtime: NovelAgentRuntime, run_id: str) -> None:

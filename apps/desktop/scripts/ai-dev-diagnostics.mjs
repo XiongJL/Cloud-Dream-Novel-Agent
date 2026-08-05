@@ -71,7 +71,7 @@ const COVERAGE_BASELINE = [
 function parseArgs(argv) {
     const tokens = [...argv];
     if (tokens.length === 0 || (tokens[0] !== 'smoke' && tokens[0] !== 'coverage')) {
-        return { error: 'Usage: ai:diag -- smoke <mcp|skill> [--json] [--db <path>] [--user-data <path>] | ai:diag -- coverage [--json] [--db <path>] [--user-data <path>]' };
+        return { error: 'Usage: ai:diag -- smoke mcp [--json] [--db <path>] [--user-data <path>] | ai:diag -- coverage [--json] [--db <path>] [--user-data <path>]' };
     }
 
     const action = tokens.shift();
@@ -83,8 +83,8 @@ function parseArgs(argv) {
         userDataPath: undefined,
     };
 
-    if (command.action === 'smoke' && command.kind !== 'mcp' && command.kind !== 'skill') {
-        return { error: 'smoke requires kind: mcp | skill' };
+    if (command.action === 'smoke' && command.kind !== 'mcp') {
+        return { error: 'smoke requires kind: mcp' };
     }
 
     for (let index = 0; index < tokens.length; index += 1) {
@@ -157,7 +157,8 @@ function calcCoverage() {
     };
 }
 
-async function runSmoke(kind) {
+async function runSmoke() {
+    const kind = 'mcp';
     const missingActions = OPENCLAW_REQUIRED_ACTIONS.filter((actionId) => !SUPPORTED_ACTIONS.includes(actionId));
     const checks = [];
 
@@ -265,7 +266,7 @@ function formatReadable(command, result) {
     initDb(`file:${dbPath}`);
 
     try {
-        const result = command.action === 'coverage' ? calcCoverage() : await runSmoke(command.kind);
+        const result = command.action === 'coverage' ? calcCoverage() : await runSmoke();
         if (command.json) {
             console.log(JSON.stringify(result, null, 2));
         } else {

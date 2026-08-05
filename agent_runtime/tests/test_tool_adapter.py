@@ -89,6 +89,9 @@ def test_fastmcp_tool_adapter_exposes_annotations_validates_and_preserves_errors
         assert tools["chapter.get"].annotations.destructiveHint is False
         assert tools["chapter.generate_draft"].annotations.readOnlyHint is False
         assert tools["chapter.generate_draft"].annotations.destructiveHint is True
+        assert tools["chapter.draft.start"].annotations.idempotentHint is True
+        assert tools["chapter.draft.get_status"].annotations.readOnlyHint is True
+        assert tools["chapter.draft.cancel"].annotations.idempotentHint is True
         assert tools["creative_assets.validate_draft"].annotations.readOnlyHint is False
         assert tools["creative_assets.validate_draft"].annotations.destructiveHint is True
 

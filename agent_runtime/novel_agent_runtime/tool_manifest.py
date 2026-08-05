@@ -11,6 +11,7 @@ class AgentToolDefinition:
     input_schema: dict[str, Any]
     read_only: bool
     timeout_seconds: float = 90
+    idempotent: bool = False
 
 
 def _object_schema(
@@ -244,6 +245,8 @@ AGENT_TOOL_MANIFEST: tuple[AgentToolDefinition, ...] = (
                 "context": {"type": "object"},
                 "taskMode": {"type": "string", "enum": ["sequence_continuation", "batch_rewrite"]},
                 "targetChapterIds": {"type": "array", "minItems": 1, "maxItems": 5, "items": _ID},
+                "revisionInstruction": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "previousBeats": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "object"}},
             },
             ["novelId", "chapterId", "goal", "chapterCount"],
         ),
@@ -272,6 +275,20 @@ AGENT_TOOL_MANIFEST: tuple[AgentToolDefinition, ...] = (
                 "runId": _ID,
             },
             ["novelId", "volumeId", "anchorChapterId", "mode", "beats"],
+        ),
+        False,
+        30,
+    ),
+    AgentToolDefinition(
+        "draft.batch.update_outline",
+        "使用乐观锁保存新一版父子章节节拍。",
+        _object_schema(
+            {
+                "draftBatchId": _ID,
+                "version": {"type": "integer", "minimum": 1},
+                "beats": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "object"}},
+            },
+            ["draftBatchId", "version", "beats"],
         ),
         False,
         30,
@@ -333,6 +350,59 @@ AGENT_TOOL_MANIFEST: tuple[AgentToolDefinition, ...] = (
                 "error": {"type": "object"},
             },
             ["draftBatchId", "version", "childIndex", "generationRevision", "error"],
+        ),
+        False,
+        30,
+    ),
+    AgentToolDefinition(
+        "chapter.draft.start",
+        "幂等受理一个后台章节草稿 Operation，并立即返回 operationId。",
+        _object_schema(
+            {
+                "operationKey": _ID,
+                "generationRevision": {"type": "integer", "minimum": 1},
+                "operationDeadlineAt": {"type": "string", "format": "date-time"},
+                "maxAttempts": {"type": "integer", "minimum": 1, "maximum": 4},
+                "owner": {"type": "object"},
+                "payload": {"type": "object"},
+            },
+            ["operationKey", "generationRevision", "payload"],
+        ),
+        False,
+        30,
+        True,
+    ),
+    AgentToolDefinition(
+        "chapter.draft.get_status",
+        "读取后台章节草稿 Operation 的权威状态和结果引用。",
+        _object_schema({"operationId": _ID}, ["operationId"]),
+        True,
+        30,
+        True,
+    ),
+    AgentToolDefinition(
+        "chapter.draft.cancel",
+        "请求取消后台章节草稿 Operation。",
+        _object_schema(
+            {
+                "operationId": _ID,
+                "expectedVersion": {"type": "integer", "minimum": 1},
+            },
+            ["operationId"],
+        ),
+        False,
+        30,
+        True,
+    ),
+    AgentToolDefinition(
+        "chapter.draft.retry",
+        "对明确失败且仍在预算内的章节草稿 Operation 发起新 attempt。",
+        _object_schema(
+            {
+                "operationId": _ID,
+                "expectedVersion": {"type": "integer", "minimum": 1},
+            },
+            ["operationId"],
         ),
         False,
         30,

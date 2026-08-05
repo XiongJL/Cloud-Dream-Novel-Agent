@@ -8,11 +8,11 @@ import pytest
 
 from novel_agent_runtime.automation import AutomationInvokeError
 from novel_agent_runtime.events import AgentEventBus
-from novel_agent_runtime.invocations import SideEffectResultUnknown
+from novel_agent_runtime.invocations import DraftOperationFailed
 from novel_agent_runtime.request_graph import RetryableRequestGraph
-from novel_agent_runtime.retry import agent_retry_policy
+from novel_agent_runtime.retry import AgentRequestError, agent_retry_policy, normalize_agent_error
 from novel_agent_runtime.runtime import NovelAgentRuntime
-from novel_agent_runtime.schemas import AgentRun
+from novel_agent_runtime.schemas import AgentPlan, AgentPlanStep, AgentRecoveryDescriptor, AgentRun
 from novel_agent_runtime.store import AgentStateStore
 
 
@@ -28,8 +28,10 @@ class FlakyInvoker:
         params: dict[str, Any] | None = None,
         origin: str = "desktop-ui",
         request_id: str | None = None,
+        parent_request_id: str | None = None,
+        deadline_at: str | None = None,
     ) -> Any:
-        del origin, request_id
+        del origin, request_id, parent_request_id, deadline_at
         count = self.calls.get(method, 0) + 1
         self.calls[method] = count
         if method == "agent.generate_plan":
@@ -44,8 +46,27 @@ class FlakyInvoker:
             return {"content": "报告完成", "conversationSummary": "报告完成"}
         if method == "chapter.get":
             return {"id": (params or {}).get("chapterId"), "title": "第一章"}
-        if method == "chapter.generate_draft":
-            raise AutomationInvokeError("NETWORK_ERROR", "write response lost")
+        if method == "chapter.draft.start":
+            return {
+                "operationId": "operation-definitive-failure",
+                "operationKey": (params or {})["operationKey"],
+                "status": "queued",
+                "phase": "accepted",
+                "version": 1,
+                "attempt": 0,
+                "maxAttempts": 4,
+                "pollAfterMs": 1,
+            }
+        if method == "chapter.draft.get_status":
+            return {
+                "operationId": (params or {})["operationId"],
+                "status": "definitive_failed",
+                "phase": "terminal",
+                "version": 2,
+                "attempt": 1,
+                "maxAttempts": 4,
+                "error": {"code": "NETWORK_ERROR", "userMessage": "provider failed definitively"},
+            }
         return {"ok": True}
 
     async def cancel(self, _request_id: str) -> bool:
@@ -102,17 +123,65 @@ def test_run_model_and_read_only_tool_emit_retry_events(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_side_effect_tool_never_enters_request_retry_graph(tmp_path: Path) -> None:
+def test_semantic_draft_tool_uses_durable_operation_without_sync_fallback(tmp_path: Path) -> None:
     async def scenario() -> None:
         runtime, invoker = create_runtime(tmp_path)
         run = AgentRun(runId="run-write", threadId="thread-1", planId="plan-1", status="running", currentStepId="step-write")
         runtime.state.runs[run.runId] = run
 
-        with pytest.raises(SideEffectResultUnknown):
+        with pytest.raises(DraftOperationFailed):
             await runtime._tool_invoke(run, "chapter.generate_draft", {"chapterId": "chapter-1"})
 
-        assert invoker.calls["chapter.generate_draft"] == 1
+        assert invoker.calls["chapter.draft.start"] == 1
+        assert invoker.calls["chapter.draft.get_status"] == 1
+        assert "chapter.generate_draft" not in invoker.calls
         assert not any(event.type.startswith("request_retry") for event in run.events)
+
+    asyncio.run(scenario())
+
+
+def test_typed_retry_uses_retryable_failed_run_from_prior_runs(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, invoker = create_runtime(tmp_path)
+        failed = AgentRun(
+            runId="run-prior-failed",
+            threadId="thread-1",
+            planId="plan-1",
+            status="failed",
+            failureRevision=1,
+        )
+        runtime.state.runs[failed.runId] = failed
+        await runtime._emit(
+            failed,
+            "request_retry_exhausted",
+            status="failed",
+            payload={"code": "PROVIDER_UNAVAILABLE", "retryable": True},
+        )
+        await runtime._emit(
+            failed,
+            "run_failed",
+            status="failed",
+            payload={"code": "PROVIDER_UNAVAILABLE", "failureRevision": 1},
+        )
+
+        recovery_intent = await runtime.chat(
+            {
+                "message": "重试",
+                "conversationId": "conversation-retry",
+                "conversationContext": {
+                    "activeRun": None,
+                    "priorRuns": [{"runId": failed.runId, "status": "failed"}],
+                },
+            },
+            {},
+        )
+
+        assert recovery_intent.intentDecision is not None
+        assert recovery_intent.intentDecision.route == "retry_failed_run"
+        assert recovery_intent.intentDecision.recovery is not None
+        assert recovery_intent.intentDecision.recovery.failedRunId == failed.runId
+        assert recovery_intent.suggestedActions == [{"label": "重试失败步骤", "method": "agent.retry_run"}]
+        assert invoker.calls.get("agent.generate_chat", 0) == 0
 
     asyncio.run(scenario())
 
@@ -246,5 +315,277 @@ def test_retry_run_rejects_side_effect_unknown_before_loading_checkpoint(tmp_pat
                 {"failedRunId": failed.runId, "expectedFailureRevision": 1, "mode": "failed_node"},
                 {},
             )
+
+    asyncio.run(scenario())
+
+
+def test_context_budget_error_keeps_actionable_message_without_retry() -> None:
+    failure = normalize_agent_error(AutomationInvokeError(
+        "CONTEXT_BUDGET_UNSATISFIABLE",
+        "Required context cannot fit within the model input budget.",
+        {"contextWindowTokens": 8192},
+    ))
+
+    assert failure.code == "CONTEXT_BUDGET_UNSATISFIABLE"
+    assert failure.retryable is False
+    assert "当前窗口无法同时容纳" in failure.user_message
+
+
+def test_invalid_model_output_uses_one_saved_result_repair_without_repeating_original_request(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, invoker = create_runtime(tmp_path)
+        original_invoke = invoker.invoke
+
+        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None) -> Any:
+            if method == "agent.generate_scope_audit":
+                invoker.calls[method] = invoker.calls.get(method, 0) + 1
+                raise AutomationInvokeError("MODEL_OUTPUT_INVALID", "bad shape", {
+                    "modelResultRef": "model-result-1",
+                    "contractId": "agent.scope_audit.response",
+                    "contractVersion": "1.0.0",
+                    "validationIssues": [{"path": "$.experts[0]", "message": "Expected object"}],
+                })
+            if method == "agent.repair_structured_output":
+                invoker.calls[method] = invoker.calls.get(method, 0) + 1
+                assert params and params["repairAttempt"] == 1
+                assert params["modelResultRef"] == "model-result-1"
+                return {"repairedPayload": {"summary": "已修复", "experts": [], "findings": [], "conflicts": []}}
+            return await original_invoke(method, params, origin, request_id)
+
+        invoker.invoke = invoke  # type: ignore[method-assign]
+        run = AgentRun(runId="run-model-repair", threadId="thread-1", planId="plan-1", status="running")
+        runtime.state.runs[run.runId] = run
+
+        result = await runtime._automation_invoke(
+            run,
+            "agent.generate_scope_audit",
+            {"reports": []},
+            node_id="audit.synthesize",
+        )
+
+        assert result["summary"] == "已修复"
+        assert invoker.calls["agent.generate_scope_audit"] == 1
+        assert invoker.calls["agent.repair_structured_output"] == 1
+        assert run.recovery is None
+
+    asyncio.run(scenario())
+
+
+def test_failed_auto_repair_exposes_manual_button_then_allows_fresh_request_without_retry_event(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, invoker = create_runtime(tmp_path)
+
+        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None) -> Any:
+            del origin, request_id
+            invoker.calls[method] = invoker.calls.get(method, 0) + 1
+            if method == "agent.repair_structured_output":
+                raise AutomationInvokeError("MODEL_OUTPUT_INVALID", "repair is still invalid", {
+                    "modelResultRef": (params or {}).get("modelResultRef"),
+                })
+            return {"ok": True}
+
+        invoker.invoke = invoke  # type: ignore[method-assign]
+        plan = AgentPlan(
+            planId="plan-model-repair",
+            threadId="thread-model-repair",
+            title="结构化审核",
+            goal="审核章节",
+            steps=[AgentPlanStep(stepId="step-model-repair", agent="supervisor", title="综合审核")],
+        )
+        failed = AgentRun(
+            runId="run-model-repair-failed",
+            threadId=plan.threadId,
+            planId=plan.planId,
+            status="failed",
+            currentStepId=plan.steps[0].stepId,
+            failureRevision=1,
+            recovery=AgentRecoveryDescriptor(
+                failureKind="model_output_invalid",
+                failedAtPhase="normalizing",
+                retryStrategy="repair_model_output",
+                canRecover=True,
+                recoveryRevision=1,
+                actionLabel="修复 JSON 后继续",
+                diagnosticRef="diagnostic-model-repair",
+            ),
+        )
+        runtime.state.plans[plan.planId] = plan
+        runtime.state.runs[failed.runId] = failed
+        runtime.state.recoveryRecords[failed.runId] = {
+            "nodeId": "audit.synthesize",
+            "sourceMethod": "agent.generate_scope_audit",
+            "modelResultRef": "model-result-2",
+            "contractId": "agent.scope_audit.response",
+            "contractVersion": "1.0.0",
+            "validationIssues": [],
+        }
+        runtime.execution_graph.load_checkpoint_state = lambda _thread_id: {  # type: ignore[method-assign]
+            "run_id": failed.runId,
+            "approved_step_ids": [plan.steps[0].stepId],
+            "novel_id": "novel-1",
+            "volume_id": None,
+            "chapter_id": "chapter-1",
+            "current_content": "",
+            "locale": "zh-CN",
+            "step_index": 0,
+            "tool_index": 0,
+            "phase": "toolchain",
+            "action": "continue",
+            "checkpoint": None,
+            "resume_response": None,
+            "latest_analysis_summary": "",
+            "report_findings": [],
+            "creative_direction_checked": False,
+            "toolchain_state": None,
+            "pending_operation": None,
+        }
+
+        with pytest.raises(AgentRequestError):
+            await runtime.retry_run({
+                "failedRunId": failed.runId,
+                "expectedFailureRevision": 1,
+                "mode": "failed_node",
+                "strategy": "repair_model_output",
+            }, {})
+
+        assert failed.failureRevision == 2
+        assert failed.recovery and failed.recovery.retryStrategy == "retry_request"
+        assert failed.recovery.actionLabel == "重新请求模型"
+        assert failed.recovery.blockedReason == "repair_exhausted"
+
+        async def no_op_guarded(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        runtime._run_graph_guarded = no_op_guarded  # type: ignore[method-assign]
+        linked = await runtime.retry_run({
+            "failedRunId": failed.runId,
+            "expectedFailureRevision": 2,
+            "mode": "failed_node",
+            "strategy": "retry_request",
+        }, {})
+        assert linked.retryOfRunId == failed.runId
+        assert linked.resumedFrom and linked.resumedFrom["strategy"] == "retry_request"
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+
+def test_programming_error_after_saved_model_result_is_not_blindly_retried(tmp_path: Path) -> None:
+    runtime, _ = create_runtime(tmp_path)
+    run = AgentRun(runId="run-local-error", threadId="thread-1", planId="plan-1", status="running")
+    runtime.state.runs[run.runId] = run
+    runtime._model_result_refs[(run.runId, "audit.synthesize")] = {
+        "modelResultRef": "model-result-local-error",
+        "sourceMethod": "agent.generate_scope_audit",
+    }
+
+    runtime._classify_local_transform_failure(run, AttributeError("missing chapterTitle"))
+
+    assert run.recovery is not None
+    assert run.recovery.failureKind == "local_transform_failed"
+    assert run.recovery.retryStrategy == "none"
+    assert run.recovery.canRecover is False
+    assert run.recovery.blockedReason == "processor_update_required"
+    assert "chapterTitle" not in runtime._public_failure_message(run, AttributeError("missing chapterTitle"))
+
+    runtime._STRUCTURED_OUTPUT_PROCESSOR_VERSION = "agent-runtime-structured-output-v2"
+    status = runtime.run_status({"runId": run.runId})
+    assert status.recovery is not None
+    assert status.recovery.retryStrategy == "reprocess_saved_result"
+    assert status.recovery.canRecover is True
+    assert status.recovery.actionLabel == "继续处理已保存结果"
+
+
+def test_processor_upgrade_creates_linked_run_from_saved_result_without_model_call(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, invoker = create_runtime(tmp_path)
+
+        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None) -> Any:
+            del origin, request_id
+            invoker.calls[method] = invoker.calls.get(method, 0) + 1
+            if method == "agent.reprocess_saved_structured_output":
+                assert params and params["modelResultRef"] == "model-result-upgrade"
+                return {
+                    "payload": {"content": "已保存的最终报告", "conversationSummary": "已保存的最终报告"},
+                    "revision": 1,
+                }
+            if method == "agent.generate_report":
+                raise AssertionError("local reprocessing must not call the original model method")
+            return {"ok": True}
+
+        invoker.invoke = invoke  # type: ignore[method-assign]
+        plan = AgentPlan(
+            planId="plan-local-upgrade",
+            threadId="thread-local-upgrade",
+            title="最终报告",
+            goal="生成最终报告",
+            steps=[AgentPlanStep(stepId="step-local-upgrade", agent="supervisor", title="整理报告")],
+        )
+        failed = AgentRun(
+            runId="run-local-upgrade",
+            threadId=plan.threadId,
+            planId=plan.planId,
+            status="failed",
+            currentStepId=plan.steps[0].stepId,
+            failureRevision=1,
+            recovery=AgentRecoveryDescriptor(
+                failureKind="local_transform_failed",
+                failedAtPhase="normalizing",
+                retryStrategy="none",
+                canRecover=False,
+                recoveryRevision=1,
+                blockedReason="processor_update_required",
+                diagnosticRef="diagnostic-local-upgrade",
+            ),
+        )
+        runtime.state.plans[plan.planId] = plan
+        runtime.state.runs[failed.runId] = failed
+        runtime.state.recoveryRecords[failed.runId] = {
+            "nodeId": "final_report",
+            "sourceMethod": "agent.generate_report",
+            "modelResultRef": "model-result-upgrade",
+            "processorVersion": "agent-runtime-structured-output-v1",
+            "automaticRepairAttempts": 0,
+        }
+        runtime._STRUCTURED_OUTPUT_PROCESSOR_VERSION = "agent-runtime-structured-output-v2"
+        runtime.execution_graph.load_checkpoint_state = lambda _thread_id: {  # type: ignore[method-assign]
+            "run_id": failed.runId,
+            "approved_step_ids": [plan.steps[0].stepId],
+            "novel_id": "novel-1",
+            "volume_id": None,
+            "chapter_id": "chapter-1",
+            "current_content": "",
+            "locale": "zh-CN",
+            "step_index": 0,
+            "tool_index": 0,
+            "phase": "final_report",
+            "action": "continue",
+            "checkpoint": None,
+            "resume_response": None,
+            "latest_analysis_summary": "",
+            "report_findings": [],
+            "creative_direction_checked": False,
+            "toolchain_state": None,
+            "pending_operation": None,
+        }
+
+        async def no_op_guarded(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        runtime._run_graph_guarded = no_op_guarded  # type: ignore[method-assign]
+        status = runtime.run_status({"runId": failed.runId})
+        linked = await runtime.retry_run({
+            "failedRunId": failed.runId,
+            "expectedFailureRevision": status.failureRevision,
+            "mode": "failed_node",
+            "strategy": "reprocess_saved_result",
+        }, {})
+
+        assert linked.retryOfRunId == failed.runId
+        assert invoker.calls["agent.reprocess_saved_structured_output"] == 1
+        assert invoker.calls.get("agent.generate_report", 0) == 0
+        pending = runtime.state.pendingModelResults[f"{linked.runId}:final_report"]
+        assert pending["payload"]["content"] == "已保存的最终报告"
+        await asyncio.sleep(0)
 
     asyncio.run(scenario())

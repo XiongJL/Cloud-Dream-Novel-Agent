@@ -23,11 +23,11 @@
     "build": "node scripts/generate-prisma-client.mjs && tsc"
   },
   "dependencies": {
-    "@prisma/client": "^5.10.2",
+    "@prisma/client": "6.19.2",
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "prisma": "^5.10.2",
+    "prisma": "6.19.2",
     "typescript": "^5.3.3",
     "@types/node": "^20.11.24"
   }

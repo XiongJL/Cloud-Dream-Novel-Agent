@@ -27,8 +27,7 @@
     "include": [
         "src",
         "electron",
-        "shared",
-        "vite.config.ts"
+        "shared"
     ],
     "references": [
         {

@@ -440,8 +440,9 @@
       },
       "baseUrl": "Base URL",
       "modelPreset": "Common text models (optional)",
-      "modelPresetHint": "Selecting a preset model will automatically fill the input below",
-      "model": "Text model",
+      "modelPresetHint": "Enter the model ID directly; provider, name, and capacity shown in suggestions are never added to its value",
+      "model": "Text model ID",
+      "modelNoResults": "No suggestion found. Press Enter or leave the field to use this model ID",
       "imageModelPreset": "Common image models (optional)",
       "imageModelPresetHint": "Selecting an image model will automatically fill the input below",
       "imageModel": "Image model",
@@ -451,9 +452,23 @@
       "timeoutMs": "Request timeout (ms)",
       "maxTokens": "Max output tokens",
       "maxTokensHint": "Limits maximum output length (too small may cause truncation)",
-      "contextWindowTokens": "Model context window tokens",
-      "contextWindowTokensHint": "Enter the model's supported context window (at least 8192); use 0 for a conservative model-name profile",
-      "contextWindowTokensMcpHint": "MCP CLI may not expose its underlying model window; use 0 for a conservative 32768-token budget",
+      "contextWindowTokens": "Context capacity",
+      "contextWindowTokensHint": "Automatic is recommended; switching models reapplies that model's recommended capability profile",
+      "contextWindowTokensMcpHint": "Automatic is recommended; adjust this only when the external CLI model capacity is known",
+      "contextWindowAutoProfile": "Automatic recommendation ({{tokens}})",
+      "contextWindowAutoFallback": "Conservative automatic ({{tokens}})",
+      "contextWindowAutoMcp": "Automatic ({{tokens}})",
+      "contextWindowCustom": "Advanced custom value",
+      "contextWindowDetectionProfile": "Recognized {{model}}; automatic capacity is {{tokens}}",
+      "contextWindowDetectionFallback": "{{model}} is not in the catalog; using a conservative {{tokens}} until another capacity is selected",
+      "contextWindowPreset": {
+        "basic": "Test / small window 8K",
+        "standard": "Basic 32K",
+        "long": "Long conversation 64K",
+        "novel": "Long-form 128K",
+        "extended": "Common 258K",
+        "million": "Million-token context 1M"
+      },
       "cliPath": "CLI path",
       "workingDir": "Working directory",
       "argsTemplate": "Args template",
@@ -591,8 +606,7 @@
       "capabilityCoverage": "Capability Coverage",
       "capabilityCoverageResult": "Capability Coverage Matrix",
       "capabilityCoverageComplete": "No missing actions",
-      "testOpenclawMcpSmoke": "Smoke OpenClaw MCP",
-      "testOpenclawSkillSmoke": "Smoke OpenClaw Skill"
+      "testOpenclawMcpSmoke": "Smoke OpenClaw MCP"
     }
   },
   "backup": {
@@ -796,6 +810,7 @@
       "characters": "Characters",
       "items": "Items",
       "skills": "Skills",
+      "worldSettings": "World Settings",
       "maps": "Maps"
     },
       "generateDraft": "Generate Draft",
@@ -824,6 +839,7 @@
     "countCharacters": "Characters",
     "countItems": "Items",
     "countSkills": "Skills",
+    "countWorldSettings": "World Settings",
     "countMaps": "Maps",
     "countMapImages": "Map Images",
     "warningsTitle": "Warnings",
@@ -842,6 +858,7 @@
     "sectionCharacters": "Characters",
     "sectionItems": "Items",
     "sectionSkills": "Skills",
+    "sectionWorldSettings": "World Settings",
     "sectionMaps": "Maps",
     "placeholderPlotLineName": "Plot line name",
     "placeholderPlotLineDescription": "Plot line description",
@@ -855,6 +872,8 @@
     "placeholderItemDescription": "Item description",
     "placeholderSkillName": "Skill name",
     "placeholderSkillDescription": "Skill description",
+    "placeholderWorldSettingName": "World setting name",
+    "placeholderWorldSettingContent": "World setting content",
     "placeholderMapName": "Map name",
     "placeholderMapDescription": "Map description",
     "placeholderMapImagePrompt": "Image prompt (imagePrompt)",
@@ -862,6 +881,12 @@
     "itemTypeItem": "Item",
     "itemTypeSkill": "Skill",
     "itemTypeLocation": "Location",
+    "worldSettingTypeHistory": "History",
+    "worldSettingTypeGeography": "Geography",
+    "worldSettingTypeMagicSystem": "Magic System",
+    "worldSettingTypeFaction": "Faction",
+    "worldSettingTypeTechnology": "Technology",
+    "worldSettingTypeOther": "Other",
     "mapTypeWorld": "World",
     "mapTypeRegion": "Region",
     "mapTypeScene": "Scene",
@@ -953,6 +978,17 @@
         "medium": "Medium confidence",
         "low": "Low confidence"
       }
+    }
+  },
+  "agentWorkspace": {
+    "inspector": {
+      "title": "Inspector",
+      "open": "Open inspector",
+      "close": "Close inspector",
+      "collapse": "Collapse inspector",
+      "resize": "Resize inspector",
+      "restoreSidebar": "Restore inspector sidebar",
+      "enlarge": "Enlarge inspector"
     }
   },
   "aiError": {

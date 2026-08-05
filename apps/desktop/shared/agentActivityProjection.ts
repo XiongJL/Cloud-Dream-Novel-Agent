@@ -1,4 +1,4 @@
-export type ActivityRunStatus = 'idle' | 'waiting_approval' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
+export type ActivityRunStatus = 'idle' | 'waiting_approval' | 'waiting_user_input' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
 
 export type ActivityEvent = {
     eventId: string;
@@ -32,6 +32,22 @@ export type AgentActivityProjection = {
     retry: RetryActivityState | null;
 };
 
+export type ChatActivityEvent = {
+    eventId: string;
+    sequence: number;
+    requestId: string;
+    callId?: string;
+    type: string;
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+    displayName: string;
+    createdAt: string;
+    toolName?: string;
+    elapsedMs?: number;
+    details?: Record<string, unknown>;
+};
+
+export type ChatActivityProjection = Pick<AgentActivityProjection, 'summary' | 'tone' | 'details'>;
+
 export type RetryActivityState = {
     phase: 'scheduled' | 'started' | 'succeeded' | 'exhausted' | 'resuming';
     retryAttempt: number;
@@ -41,6 +57,8 @@ export type RetryActivityState = {
     diagnosticRef: string;
     retryable: boolean;
 };
+
+type ChatTerminalStatus = 'completed' | 'failed' | 'cancelled';
 
 const SENSITIVE_KEY = /(?:authorization|api[-_]?key|token|secret|password|cookie)/iu;
 const MAX_VALUE_LENGTH = 1200;
@@ -92,6 +110,10 @@ function metadataFromPayload(payload: Record<string, unknown>): ActivityDetail['
         ['命令', 'command', true],
         ['工作目录', 'cwd', true],
         ['退出码', 'exitCode', true],
+        ['任务编号', 'operationId', true],
+        ['任务状态', 'operationStatus'],
+        ['阶段', 'phase'],
+        ['尝试次数', 'attempt'],
         ['耗时', 'durationMs'],
         ['标准输出', 'stdout', true],
         ['错误输出', 'stderr', true],
@@ -101,6 +123,140 @@ function metadataFromPayload(payload: Record<string, unknown>): ActivityDetail['
         if (!value) return [];
         return [{ label, value: key === 'durationMs' ? `${value} ms` : value, mono }];
     });
+}
+
+function chatDetailFromEvent(event: ChatActivityEvent): ActivityDetail {
+    const kind: ActivityDetail['kind'] = event.type.startsWith('tool_')
+        ? 'tool'
+        : event.type.startsWith('model_')
+            ? 'model'
+            : event.status === 'failed' ? 'error' : 'status';
+    const metadata: ActivityDetail['metadata'] = [
+        ...(typeof event.elapsedMs === 'number'
+            ? [{ label: '耗时', value: `${Math.max(0, Math.round(event.elapsedMs))} ms` }]
+            : []),
+        ...(event.details?.errorCode
+            ? [{ label: '错误码', value: safeValue('errorCode', event.details.errorCode), mono: true }]
+            : []),
+    ];
+    return {
+        eventId: event.eventId,
+        sequence: event.sequence,
+        kind,
+        title: event.displayName,
+        ...(event.toolName ? { summary: event.toolName } : {}),
+        status: event.status,
+        createdAt: event.createdAt,
+        metadata,
+    };
+}
+
+function completedChatTitle(title: string): string {
+    return title.startsWith('正在') ? `已${title.slice(2)}` : title;
+}
+
+function cancelledChatTitle(title: string): string {
+    return title.startsWith('正在') ? `${title.slice(2)}已取消` : title;
+}
+
+function chatCallFamily(type: string): 'tool' | 'model' | null {
+    if (type.startsWith('tool_')) return 'tool';
+    if (type.startsWith('model_')) return 'model';
+    return null;
+}
+
+function chatCallKey(event: ChatActivityEvent): string | null {
+    const family = chatCallFamily(event.type);
+    return family && event.callId ? `${family}\u0000${event.callId}` : null;
+}
+
+function isChatCallStarted(event: ChatActivityEvent): boolean {
+    return event.type === 'tool_started' || event.type === 'model_started';
+}
+
+function isChatCallTerminal(event: ChatActivityEvent): boolean {
+    return event.type === 'tool_completed' || event.type === 'tool_failed' || event.type === 'model_completed';
+}
+
+function coalesceChatActivityDetails(
+    events: ChatActivityEvent[],
+    live: boolean,
+    requestTerminalStatus: ChatTerminalStatus | null,
+): ActivityDetail[] {
+    const details: ActivityDetail[] = [];
+    const runningCalls = new Map<string, number>();
+
+    for (const event of events) {
+        const detail = chatDetailFromEvent(event);
+        const key = chatCallKey(event);
+        if (isChatCallStarted(event) && key) {
+            runningCalls.set(key, details.length);
+            details.push(detail);
+            continue;
+        }
+        if (isChatCallTerminal(event) && key) {
+            const index = runningCalls.get(key);
+            if (index !== undefined) {
+                const started = details[index];
+                details[index] = {
+                    ...started,
+                    kind: detail.kind,
+                    title: detail.title,
+                    summary: detail.summary || started.summary,
+                    status: detail.status,
+                    metadata: mergeMetadata(started.metadata, detail.metadata),
+                };
+                runningCalls.delete(key);
+                continue;
+            }
+        }
+        details.push(detail);
+    }
+
+    if (live || !requestTerminalStatus) return details;
+    const fallbackStatus = requestTerminalStatus === 'cancelled' ? 'cancelled' : 'completed';
+    return details.map((detail) => detail.status === 'running'
+        ? {
+            ...detail,
+            title: fallbackStatus === 'completed'
+                ? completedChatTitle(detail.title)
+                : cancelledChatTitle(detail.title),
+            status: fallbackStatus,
+        }
+        : detail);
+}
+
+export function projectChatActivity(events: ChatActivityEvent[], live = false): ChatActivityProjection {
+    const orderedEvents = [...events].sort((left, right) => left.sequence - right.sequence);
+    const latest = orderedEvents.at(-1);
+    if (!latest) {
+        return { summary: '等待处理请求', tone: live ? 'running' : 'idle', details: [] };
+    }
+    const requestTerminal = [...orderedEvents].reverse().find((event) => [
+        'request_completed',
+        'request_failed',
+        'request_cancelled',
+    ].includes(event.type));
+    const terminalStatus = requestTerminal?.status === 'completed'
+        || requestTerminal?.status === 'failed'
+        || requestTerminal?.status === 'cancelled'
+        ? requestTerminal.status
+        : null;
+    const finalEvent = requestTerminal ?? latest;
+    const tone: ChatActivityProjection['tone'] = live
+        ? 'running'
+        : finalEvent.status === 'failed'
+            ? 'failed'
+            : finalEvent.status === 'cancelled'
+                ? 'cancelled'
+                : finalEvent.status === 'completed' ? 'completed' : 'running';
+    const summary = live
+        ? latest.displayName
+        : finalEvent.status === 'failed'
+            ? '请求处理失败'
+            : finalEvent.status === 'cancelled' ? '请求已取消' : '请求处理完成';
+    const details = coalesceChatActivityDetails(orderedEvents, live, terminalStatus);
+    return { summary, tone, details };
 }
 
 function numberFromPayload(payload: Record<string, unknown>, key: string): number | null {
@@ -178,11 +334,30 @@ function detailFromEvent(event: ActivityEvent): ActivityDetail | null {
         case 'tool_result': return { ...base, kind: payload.command ? 'command' : 'tool', title: event.toolName || '工具结果', summary, status: event.status === 'failed' ? 'failed' : event.status === 'skipped' ? 'cancelled' : 'completed' };
         case 'toolchain_started': return { ...base, kind: 'step', title: payloadText(payload, 'title') || '开始执行工具链', summary: payloadText(payload, 'toolchainId'), status: 'running' };
         case 'toolchain_node_started': return { ...base, kind: payload.kind === 'model' ? 'model' : 'tool', title: payloadText(payload, 'nodeId') || '工具链节点', summary, status: 'running' };
-        case 'toolchain_node_completed': return { ...base, kind: payload.kind === 'model' ? 'model' : 'tool', title: payloadText(payload, 'nodeId') || '工具链节点', summary, status: event.status === 'partial' ? 'info' : event.status === 'skipped' ? 'cancelled' : 'completed' };
+        case 'toolchain_node_completed': return { ...base, kind: event.status === 'failed' ? 'error' : payload.kind === 'model' ? 'model' : 'tool', title: payloadText(payload, 'nodeId') || '工具链节点', summary, status: event.status === 'failed' ? 'failed' : event.status === 'partial' ? 'info' : event.status === 'skipped' ? 'cancelled' : 'completed' };
         case 'toolchain_completed': return { ...base, kind: 'step', title: payloadText(payload, 'title') || '工具链已完成', summary: payloadText(payload, 'toolchainId'), status: 'completed' };
         case 'toolchain_failed': return { ...base, kind: 'error', title: '工具链执行失败', summary, status: 'failed' };
         case 'approval_required': return { ...base, kind: 'approval', title: payloadText(payload, 'title') || '需要你确认', summary: payloadText(payload, 'question', 'reason'), status: 'waiting' };
+        case 'user_input_required': return { ...base, kind: 'approval', title: payloadText(payload, 'title') || '需要你决定', summary: payloadText(payload, 'reason'), status: 'waiting' };
+        case 'user_input_resolved': return { ...base, kind: 'approval', title: '已提交决定', summary: payloadText(payload, 'understandingSummary'), status: 'completed' };
         case 'draft_created': return { ...base, kind: 'artifact', title: '已生成可审核草稿', summary: payloadText(payload, 'previewSummary'), status: 'completed' };
+        case 'draft_operation_started': return { ...base, kind: 'tool', title: '草稿任务已受理', summary: '正在后台生成，可安全重连', status: 'running' };
+        case 'draft_operation_progress': {
+            const operationStatus = payloadText(payload, 'operationStatus');
+            const title = operationStatus === 'retry_wait' ? '草稿任务等待重试'
+                : operationStatus === 'running_postprocess' ? '正在整理草稿'
+                    : operationStatus === 'committing' ? '正在保存草稿'
+                        : operationStatus === 'succeeded' ? '后台草稿任务已完成'
+                            : operationStatus === 'definitive_failed' ? '后台草稿任务失败'
+                                : operationStatus === 'reconcile_required' ? '草稿任务需要核对'
+                                    : operationStatus === 'cancelled' ? '草稿任务已取消'
+                                        : '正在后台生成草稿';
+            const status = operationStatus === 'succeeded' ? 'completed'
+                : operationStatus === 'definitive_failed' || operationStatus === 'reconcile_required' ? 'failed'
+                    : operationStatus === 'cancelled' ? 'cancelled'
+                        : 'running';
+            return { ...base, kind: status === 'failed' ? 'error' : 'tool', title, status };
+        }
         case 'artifact_created': {
             const artifact = payload.artifact && typeof payload.artifact === 'object' ? payload.artifact as Record<string, unknown> : {};
             return { ...base, kind: 'artifact', title: `已生成产物：${String(artifact.title || artifact.type || '未命名产物')}`, summary: typeof artifact.summary === 'string' ? artifact.summary : undefined, status: 'completed' };
@@ -360,6 +535,7 @@ export function projectAgentActivity(run: { status: ActivityRunStatus; events: A
     if (run.status === 'cancelled') return { summary: '任务已取消', tone: 'cancelled', details, toolCount, draftCount, elapsedMs, retry };
     if (run.status === 'cancelling') return { summary: '正在取消任务', tone: 'running', details, toolCount, draftCount, elapsedMs, retry };
     if (run.status === 'waiting_approval') return { summary: `需要你确认：${payloadText(latestPayload, 'title') || '执行选项'}`, tone: 'waiting', details, toolCount, draftCount, elapsedMs, retry };
+    if (run.status === 'waiting_user_input') return { summary: `需要你决定：${payloadText(latestPayload, 'title') || '关键方向'}`, tone: 'waiting', details, toolCount, draftCount, elapsedMs, retry };
 
     if (latest?.type === 'request_retry_scheduled' || latest?.type === 'request_retry_started') {
         const attempt = retry?.retryAttempt || 1;
@@ -368,6 +544,17 @@ export function projectAgentActivity(run: { status: ActivityRunStatus; events: A
     }
     if (latest?.type === 'request_retry_succeeded') return { summary: '连接已恢复，正在继续', tone: 'running', details, toolCount, draftCount, elapsedMs, retry };
     if (latest?.type === 'run_retry_started') return { summary: '正在从失败步骤继续', tone: 'running', details, toolCount, draftCount, elapsedMs, retry };
+
+    if (latest?.type === 'draft_operation_started') return { summary: '草稿任务已受理，正在后台生成', tone: 'running', details, toolCount, draftCount, elapsedMs, retry };
+    if (latest?.type === 'draft_operation_progress') {
+        const operationStatus = payloadText(latestPayload, 'operationStatus');
+        const summary = operationStatus === 'retry_wait' ? '生成暂时中断，后台将自动重试'
+            : operationStatus === 'running_postprocess' ? '正文已生成，正在整理草稿'
+                : operationStatus === 'committing' ? '正在安全保存草稿'
+                    : operationStatus === 'succeeded' ? '草稿生成完成，正在读取结果'
+                        : '正在后台生成草稿';
+        return { summary, tone: 'running', details, toolCount, draftCount, elapsedMs, retry };
+    }
 
     if (latest?.type === 'tool_call') return { summary: `正在调用 ${latest.toolName || '工具'}`, tone: 'running', details, toolCount, draftCount, elapsedMs, retry };
     if (latest?.type === 'toolchain_started') return { summary: `正在执行${payloadText(latestPayload, 'title') || '工具链'}`, tone: 'running', details, toolCount, draftCount, elapsedMs, retry };

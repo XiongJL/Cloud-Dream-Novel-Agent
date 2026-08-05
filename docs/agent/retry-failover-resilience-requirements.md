@@ -1,7 +1,9 @@
-# Agent 网络重试、熔断、切换与任务恢复设计
+# Agent 运行韧性、重试、降级与任务恢复需求
 
-状态：评审草案 v0.2  
-日期：2026-07-20  
+状态：已确认 v0.6
+
+日期：2026-08-04
+
 适用范围：Electron AI Provider、Automation、Python Agent Runtime、Toolchain、多 Agent Supervisor、SSE 活动流与 Agent Renderer。
 
 ## 1. 背景
@@ -14,6 +16,10 @@
 
 网络瞬时失败是常见产品场景。系统需要把自动重试、熔断、Provider/模型切换、Run 恢复和副作用对账分成不同层级，避免每层各自重试造成请求放大。
 
+当前还存在一类影响更大的失败：模型已经完成回答，程序却在本地解析、Schema 校验、领域对象转换、Artifact 发布、最终报告装配或状态投影阶段失败。例如字段重命名后仍访问旧属性，或模型返回的列表元素与 Pydantic 领域模型不一致。此时再次请求模型通常没有必要，但现有流程会把 Run 直接置为 `failed`，并将审核入口和接受/暂缓/驳回按钮一并禁用；后端又只允许带 `request_retry_exhausted` 事件的 Run 调用恢复接口，最终迫使用户发送“重试”来启动一项新任务。
+
+上述现象不是某个 Toolchain 的单点缺陷。本需求将“模型请求成功后的本地处理”纳入统一运行韧性契约，覆盖聊天、计划、范围审核、多 Agent 综合、报告生成、修订批次、章节草稿和 Artifact 发布等所有流程。
+
 ## 2. 目标
 
 - 可重试网络错误默认自动重试 3 次，耗尽后才向用户报告失败。
@@ -24,6 +30,10 @@
 - 多 Agent 只重试失败专家，成功专家和共享章节读取不重复执行。
 - 所有写操作继续遵守调用账本；结果未知时禁止自动重放。
 - Renderer 可展示简明进度，展开后才显示请求、重试、切换与恢复明细。
+- 模型结果一旦完整返回，必须先形成可恢复 checkpoint；后续本地失败默认优先复用该结果，不重新调用模型。
+- 任何可安全恢复的失败都必须提供直接操作入口，不能要求用户通过发送“重试”重新触发任务。
+- Run、步骤和 Artifact 分别表达执行状态；父 Run 后续失败不能取消已完成、未过期 Artifact 的查看和审核能力。
+- 可独立成立的部分结果允许降级发布，并明确覆盖率、缺失项和恢复入口，避免单个尾部综合节点阻塞全部结果。
 
 ## 3. 非目标
 
@@ -31,7 +41,29 @@
 - 本方案不把所有业务错误都包装成网络重试。
 - 本方案不允许绕过草稿审核、报告审批或副作用对账。
 - 本方案不在未配置后备路由时自动选择任意模型。
-- 本阶段先完成协议与后端设计；所有 Renderer 变更必须先经过 Stitch 原型评审。
+- 本方案不把 Schema 校验放宽为无条件接受未知结构；结构不合法时必须修复、降级或明确失败。
+- 本方案不保证任意程序缺陷都能自动修复，但要求缺陷不能无条件抹掉已保存的模型结果和已就绪产物。
+- 本次不做失败卡和审核面板的整体视觉重设计；恢复入口复用现有任务卡、活动卡和审核面板。
+
+### 3.1 v0.6 本次落地范围
+
+本次实现聚焦“模型已经返回、流程死在本地程序中”的闭环，不把整份运行韧性规划一次性扩成大规模基础设施重写：
+
+- 结构化 Agent 响应在解析前保存原文、契约版本、修复 revision 和内容哈希。
+- 所有已注册结构化 Agent 方法执行统一契约校验；业务 JSON 不与 JSON-RPC 传输层混淆。
+- 非法 JSON/Schema 不匹配自动修复一次；仍失败后显示一次“修复 JSON 后继续”；再次失败后只读流程可直接“重新请求模型”。
+- 深层 Pydantic/领域模型校验复用同一恢复器，不允许 Electron 校验通过后在 Python 中无恢复地终止。
+- 本地 `AttributeError`、`KeyError`、`TypeError` 等程序缺陷保存原始结果，但同一处理器版本不显示必然失败的按钮；处理器版本变化后显示“继续处理已保存结果”，且不调用原创作模型。
+- 终态恢复创建关联 Run；失败 Run 不重新改回 `running`，恢复版本和按钮状态持久化并可在刷新/重启后恢复。
+- 父 Run 失败或取消不再禁用已 `ready`、未过期 Artifact 的审核操作。
+- 计划卡中的“会话背景”默认折叠，仅在用户点击“查看会话背景”后展开。
+- 计划创建前的普通聊天也属于结构化恢复边界，不能因为尚未创建 Run 而跳过自动修复或直接恢复入口。
+- `agent.chat.response@1.0.0` 的 `inputRequest` 明确接受 `object | null`；`null` 表示无需用户补充输入，不能被结构校验误报。
+- 聊天结构校验失败时自动修复 1 次；若仍失败，Runtime 持久化后端恢复记录，Renderer 只保存不透明 `recoveryRef` 并显示“修复 JSON 并继续”。
+- 用户点击聊天恢复按钮后先以当前契约重处理已保存结果；仍不合法时才执行第 2 次 JSON 修复。第 2 次失败后按钮切换为“重新生成回答”，不继续形成修复循环。
+- 旧失败记录若没有恢复引用，允许在同一用户消息上直接重新请求模型；不得重复追加用户消息，也不得要求用户发送“重试”。
+
+`resume_publish`、完整的副作用对账 UI、Provider 后备路由管理、所有 Toolchain 的确定性部分发布策略和模型结果生命周期清理仍按本文后续章节实施，不属于本次闭环的完成条件。
 
 ## 4. 术语与默认口径
 
@@ -54,6 +86,26 @@
 | 节点级自动重试 | Agent 图中的模型/只读网络节点瞬时失败 | LangGraph `RetryPolicy` | 否 |
 | Run 级恢复 | LangGraph 自动重试耗尽，用户选择继续 | Python Runtime | 是，关联原 Run |
 | 副作用恢复 | 写请求结果未知 | 调用账本与人工对账 | 否，先对账，禁止重发 |
+
+### 4.3 运行阶段与可恢复边界
+
+一次逻辑节点必须显式经过以下阶段，不能只用 `running/failed/completed` 概括全过程：
+
+```text
+model_pending
+  -> model_received
+  -> normalizing
+  -> publishing
+  -> completed
+```
+
+- `model_received`：完整原始模型结果及调用元数据已经持久化。进入此状态后，网络请求视为成功。
+- `normalizing`：执行 JSON 提取、Schema 修复、Pydantic/TypeScript 校验、字段映射、去重和领域转换。
+- `publishing`：以稳定键写入 Artifact、DraftSession、报告、事件和 UI 投影。
+- 任一阶段失败时都必须保存 `failedAtPhase`、结构化失败类型和最近可用 checkpoint。
+- 重试的最小单位是失败阶段，不是整个 Run。只有现有 checkpoint 无法满足恢复前置条件时，才允许回退到更早阶段。
+
+“可重试”在本文中包括三类不同动作：重新请求外部服务、复用已保存结果重新处理、从稳定写入点继续发布。协议不得再用单个 `retryable: boolean` 或是否出现 `request_retry_exhausted` 来推断具体恢复动作。
 
 ## 5. 核心原则：每一层只有一个重试责任人
 
@@ -156,6 +208,39 @@ type AgentRequestFailure = {
 ```
 
 用户看到“模型服务暂时不可用，已重试 3 次”，诊断区可通过 `diagnosticRef` 查看脱敏信息；不得显示截图中的原始 `HTTP 504: <html>...`。
+
+请求失败只描述外部调用阶段。Runtime 还必须使用独立的执行恢复描述，避免把本地转换异常伪装成网络错误：
+
+```ts
+type AgentRecoveryDescriptor = {
+  failureKind:
+    | 'transport'
+    | 'model_output_invalid'
+    | 'local_transform_failed'
+    | 'artifact_publish_failed'
+    | 'persistence_failed'
+    | 'side_effect_unknown';
+  failedAtPhase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing';
+  retryStrategy:
+    | 'retry_request'
+    | 'repair_model_output'
+    | 'reprocess_saved_result'
+    | 'resume_publish'
+    | 'reconcile_side_effect'
+    | 'none';
+  canRecover: boolean;
+  recoveryRevision: number;
+  actionLabel?: string;
+  blockedReason?: 'processor_update_required' | 'stale_dependency' | 'unsafe_side_effect' | 'repair_exhausted';
+  completedArtifactIds: string[];
+  affectedArtifactIds: string[];
+  diagnosticRef: string;
+};
+```
+
+`model_output_invalid` 表示原始结果已完整收到但不符合输出契约，不属于网络失败。它可以进入有界结构化修复；`local_transform_failed` 表示输入可能有效但本地程序处理异常，必须保留原始结果，并且只在处理器版本变化、存在兼容转换器或瞬时前置条件已经恢复时允许重新处理。相同 `resultHash + nodeId + processorVersion + failureFingerprint` 不得循环执行同一处理器。
+
+Renderer 只接收上述公开描述，不接收 `modelResultRef`、checkpoint、结果哈希、异常指纹或内部处理器版本。用户界面只显示短错误摘要和可执行恢复动作，Pydantic traceback、内部对象名和完整模型正文只进入受限诊断。
 
 ## 7. 熔断器
 
@@ -268,6 +353,100 @@ type RetryRunRequest = {
 
 相同计划和范围的恢复不重复计划审批；新增副作用权限或扩大范围时必须重新审批。
 
+### 9.3 模型已返回后的阶段恢复
+
+模型已经返回时不得默认创建新计划或重新调用模型。Runtime 按以下顺序选择成本最低且不会扩大副作用的恢复方式：
+
+| 失败位置 | 首选恢复动作 | 是否再次调用模型 | 是否创建新 Run |
+| --- | --- | --- | --- |
+| 原始结果无法解析为约定结构 | `repair_model_output`，自动 1 次、用户确认后再 1 次 | 是，只提交原始结果、目标 Schema 与短错误 | 自动修复留在当前 Run；手动修复创建关联 Run |
+| Pydantic/TypeScript/领域对象转换异常 | 先区分输出契约错误与程序缺陷；前者修复输出，后者等待处理器变化 | 仅输出契约错误需要 | 终态后的恢复创建关联 Run |
+| Artifact/报告/事件投影发布失败 | `resume_publish` | 否 | 创建关联 Run，按稳定发布键续写 |
+| 数据库暂时锁定或进程重启 | 从 checkpoint 恢复当前阶段 | 否 | 终态后创建关联 Run |
+| 外部写入结果未知 | `reconcile_side_effect` | 否 | 否；完成对账前禁止继续 |
+| 模型结果缺失、损坏或无法修复 | `retry_request` | 是 | 可创建关联恢复 Run |
+
+阶段恢复必须满足：
+
+1. Electron 在解析前按 `requestId + attempt` 持久化原始模型响应，并生成内部 `modelResultRef`；记录版本化输出契约、Provider/模型、内容哈希和有界原始结果。Python 只保存引用、已解析 checkpoint 和恢复状态，不重复保存完整原文。
+2. 每个结构化 Agent 方法必须注册稳定的 `contractId + contractVersion + JSON Schema`。模型负责修复业务 JSON payload；JSON-RPC 仅是 Automation 的传输协议，模型不得生成或修改 JSON-RPC envelope。
+3. `reprocess_saved_result` 只能执行无外部副作用的确定性转换；仅当处理器版本变化、存在不同兼容转换器或瞬时前置条件恢复后才允许。处理器版本相同且失败指纹不变时设置 `retryStrategy=none`。
+4. `resume_publish` 使用稳定的 Artifact key、事件去重键和数据库唯一约束；重复点击不会产生重复报告、草稿或活动项。
+5. `repair_model_output` 先自动执行一次；仍失败时保留原结果并提供一次“修复 JSON 后继续”。手动修复再次失败后停止修复循环，只读流程可转为重新请求原任务。
+6. 修复调用使用稳定 `repairAttemptId` 和调用账本；重复点击、响应丢失或刷新不得导致重复模型调用和重复计费。
+7. 恢复前重新校验章节 version/contentHash、计划 revision、Artifact revision 和权限。依赖已过期时转为 `stale` 并提示重新规划，不静默覆盖新内容。
+8. 恢复操作由 `retryStrategy` 驱动。前端、IntentService 和 `agent.retry_run` 不得以是否存在 `request_retry_exhausted` 作为唯一准入条件。
+
+内部 Automation 方法固定为：
+
+```ts
+type RepairStructuredOutputRequest = {
+  modelResultRef: string;
+  sourceMethod: string;
+  contractId: string;
+  contractVersion: string;
+  validationIssues: Array<{ path: string; message: string }>;
+  repairAttemptId: string;
+  repairAttempt: 1 | 2;
+};
+
+type RepairStructuredOutputResult = {
+  modelResultRef: string;
+  revision: number;
+  repairedPayload: Record<string, unknown>;
+  resultHash: string;
+};
+
+type ReprocessSavedStructuredOutputRequest = {
+  modelResultRef: string;
+  sourceMethod: string;
+};
+
+type ReprocessSavedStructuredOutputResult = {
+  modelResultRef: string;
+  revision: number;
+  payload: Record<string, unknown>;
+  resultHash: string;
+};
+```
+
+修复模型只接收保存的错误 JSON、服务端注册的目标 Schema 和最多 20 条脱敏校验错误，不重新接收项目上下文，不重新执行原创作任务。`reprocess_saved_structured_output` 只读取、解析和校验已保存结果，不调用模型。原始响应单条默认上限 4 MiB，不得静默截断；随会话/Run 删除并清理，不进入普通日志、SSE 或 Renderer。
+
+### 9.4 恢复入口与任务连续性
+
+统一恢复接口接受明确策略，不让客户端自行猜测失败原因：
+
+```ts
+type ResumeRunRequest = {
+  failedRunId: string;
+  expectedFailureRevision: number;
+  strategy:
+    | 'retry_request'
+    | 'repair_model_output'
+    | 'reprocess_saved_result'
+    | 'resume_publish'
+    | 'reconcile_side_effect';
+};
+```
+
+服务端必须校验请求策略与当前持久化 `AgentRecoveryDescriptor` 一致；不一致返回最新 descriptor，不执行客户端要求的更高风险动作。
+
+- 当 `canRecover=true` 时，失败卡必须直接提供与策略对应的主操作：`重新处理`、`继续发布`、`修复 JSON 后继续`、`重试模型请求`或`检查执行结果`。
+- 点击恢复按钮直接调用结构化恢复接口，只携带 `failedRunId`、`failureRevision` 和预期策略；服务端解析内部 checkpoint，不向聊天插入伪造的用户消息，也不重新走普通意图分类。
+- 已进入终态后的任何恢复都创建关联 Recovery Run；Renderer 将恢复链折叠在原任务卡中，不把终态 Run 重新改回 `running`。
+- 用户自然输入“重试”仍可作为便捷入口，但它只能映射到同一恢复接口，不能成为唯一入口。
+- 恢复执行期间，已有计划卡、报告卡、草稿卡和活动卡原位更新，不新增一套重复 UI。
+- Renderer 刷新、应用重启和 SSE 重连后必须根据持久化恢复描述重建相同按钮状态。
+- 恢复动作失败时更新 `failureRevision` 和诊断信息；只要仍有安全策略就继续保留按钮，不因一次恢复失败永久锁死。
+
+聊天转计划属于 Run 创建前的独立恢复边界，也必须遵守同一原则：
+
+- 聊天阶段已确定的章节 `id/ids`、selector 和 IntentDecision 是计划阶段的权威输入；计划阶段不得只复用“最后一章”等少数 selector，也不得因再次解析会话背景而丢弃“第 N 卷第 N 章”、章节标题或章节范围的确定性结果。
+- 文本兜底解析只能解析当前任务正文，不能把“会话背景（仅用于理解当前任务）”中的旧章节引用当成新目标。
+- 若 Renderer 目录尚未加载完整，计划阶段先从持久化项目目录补水并重做确定性目标解析；这一动作不调用模型。
+- Run 尚未创建时发生可恢复的计划前失败，错误卡必须保留原计划目标并显示“重新生成计划草稿”等直接按钮。按钮复用已保存的 IntentDecision/章节目标，不重新请求已经完成的聊天回答，也不要求用户发送“重试”。
+- 运行时自行创建的恢复字段、模型结果 checkpoint 和修复账本必须同时登记在 Prisma 源 Schema 与打包首启 SQL 中；应用启动时的 `db push` 不得把这些恢复数据当成未知表/列删除。
+
 ## 10. 多 Agent 与 Supervisor 重试
 
 ### 10.1 基础规则
@@ -307,6 +486,39 @@ type RetryRunRequest = {
 - 报告 Artifact 发布使用稳定 Artifact key；响应丢失后优先查询既有 Artifact，不重复发布。
 - 流式正文已部分可见但尚未形成可对账草稿时，状态标记为 `partial_output_unknown`，不得静默覆盖。
 
+### 11.1 Run 状态与产物审核解耦
+
+Run 是编排容器，Artifact 是用户可消费结果。审核资格必须从 Artifact 自身状态、revision、依赖新鲜度和权限计算，不能简单映射父 Run 的终态。
+
+- `ready` 且未 `stale/discarded` 的报告、草稿或审核包，即使父 Run 随后因另一个节点失败，仍可查看并执行其允许的审核操作。
+- 父 Run 失败只能禁用仍在生成、受失败节点直接影响、依赖过期或结果不确定的 Artifact。
+- “接受/稍后处理/忽略建议”“打开草稿审核”“查看已生成内容”等按钮分别依据 Artifact capability 判断，不能统一依赖 `run.status === completed`。
+- 一个审核包要求整体提交时，未完成部分可以阻止最终提交，但不能阻止查看、批注、暂缓、驳回和恢复失败部分。
+- 多章批次后续章节失败时，已完成且连续有效的前缀保持可读、可审核；是否允许提交继续遵守多章节非过期前缀和整包约束。
+- UI 必须明确区分“任务未全部完成”“当前产物可审核”“提交暂不可用”三种状态，禁止用一个灰色“审核未完成”覆盖全部语义。
+
+### 11.2 多章批次的章节身份展示
+
+多章批次的 `childIndex` 只表示批次执行位置，不能作为小说目录中的真实章号。审核、生成进度、节拍预览、失败对账和恢复提示必须使用一致的章节身份规则：
+
+- 已有章节的改写批次优先按 `targetChapterId` 查询当前权威目录，并显示目录中的真实卷序、章序；例如批次子项 1 指向目录第 2 章时必须显示“第 2 章”，不能显示“第 1 章”。
+- `childIndex` 继续用于提交前缀、断点恢复、对账和幂等键，不得因展示修正而改变批次执行语义或目标章节 ID。
+- 目录暂不可用或目标尚未写入目录时，文案必须明确为“批次第 N 项”或“新增第 N 章”，禁止伪装成真实目录章号。
+- 重试按钮、Toast、计划标题、审批意见和无障碍标签使用同一解析结果，不能只修正审核页签。
+- “可提交”表达批次前缀数量，例如“可提交批次前 2 章”，不能写成可能被误解为目录章号的“可连续提交至第 2 章”。
+
+### 11.3 部分成功与确定性降级
+
+当主结果已经存在且剩余节点只负责综合、润色或投影时，应优先发布带覆盖声明的部分结果：
+
+- 团队 Supervisor 综合失败：保留所有成功专家 Artifact，并允许使用确定性模板合并标题、摘要、严重度、来源和缺失专家列表；不得伪造新的综合判断。
+- 最终报告 handoff 失败：根据已登记 Artifact 和步骤状态生成确定性完成摘要，并保留“重新生成综合报告”入口。
+- 读者顺序评估在第 N 章耗尽：发布前 N-1 章结果及覆盖警告，不读取或跳到未来章节。
+- 修订或草稿批次后续子项失败：展示已完成有效前缀、失败子项和继续生成入口，不把成功子项回退为不可用。
+- DraftSession/DraftBatch 已持久化但返回对象解析失败：从存储按稳定 operationId、draftSessionId 或 draftBatchId 重新投影，禁止重新生成正文。
+
+是否允许降级必须由 Toolchain/Operation manifest 声明 `partialResultPolicy`，并列出 `requiredOutputs`、`optionalOutputs` 和 `deterministicFallback`。未声明时不得擅自把不完整结果标为完成，但仍必须保留恢复入口和已完成 Artifact。
+
 ## 12. 其他相同问题场景
 
 | 场景 | 默认策略 | 与模型重试的区别 |
@@ -317,7 +529,11 @@ type RetryRunRequest = {
 | RAG/Embedding 网络调用 | 只读请求使用统一重试与熔断 | hash fallback 必须显式记录为降级 |
 | 搜索/外部资料源 | GET/只读可重试；写入走调用账本 | 受第三方限流和 `Retry-After` 控制 |
 | 图片生成 | 支持有界重试，但优先使用供应商 request ID | 可能重复计费，默认可覆盖为更低次数 |
-| JSON/Schema 解析失败 | 最多 1 至 2 次结构化修复 | 不消耗网络重试次数 |
+| JSON/Schema 解析失败 | 自动 1 次、用户确认后再 1 次结构化修复 | 不消耗网络重试次数 |
+| 本地字段/领域对象转换异常 | 保存原始模型结果；前置条件变化后由关联 Run 重新处理 | 不再次调用模型；相同处理器版本不循环 |
+| Artifact 或最终报告发布失败 | 从稳定发布键继续 | 不重复模型调用和已成功写入 |
+| 父 Run 尾部失败但已有就绪 Artifact | 保留查看与审核，单独恢复失败节点 | 审核能力由 Artifact 状态决定 |
+| 多章/多专家部分失败 | 发布有效部分与覆盖率，重试失败子项 | 不重跑成功子项 |
 | SQLite busy/事务锁 | 短退避重试 | version/hash 冲突不可重试 |
 | 应用离线 | 快速进入离线熔断，监听网络恢复后半开探测 | 不应让每个专家各自等待完整三次 |
 | 设置切换 | 新请求使用新配置；旧请求保持原路由或取消 | 不允许运行中无审计地改模型 |
@@ -336,8 +552,14 @@ type RetryRunRequest = {
 - `provider_switched`
 - `run_retry_started`
 - `expert_retry_started`
+- `model_result_checkpointed`
+- `local_reprocess_started`
+- `local_reprocess_succeeded`
+- `artifact_publish_resumed`
+- `partial_result_published`
+- `recovery_action_required`
 
-事件必须包含 `runId`、`stepId/nodeId`、`requestId`、attempt、最大次数、错误码、脱敏 Provider/模型、下一次等待时间和时间戳。
+事件按适用范围包含 `runId`、`stepId/nodeId`、`requestId`、attempt、最大次数、错误码、`failedAtPhase`、`retryStrategy`、Artifact ID、脱敏 Provider/模型、下一次等待时间和时间戳。内部 checkpoint、`modelResultRef`、结果哈希和失败指纹不得进入 SSE 或 Renderer。
 
 会话中只保留一个原位更新的活动摘要：
 
@@ -346,6 +568,9 @@ type RetryRunRequest = {
 - `主模型暂不可用，正在切换到已配置的后备模型`
 - `编辑专家失败，其他专家继续；稍后将重试`
 - `已重试 3 次，任务暂停`
+- `模型回答已保存，本地处理失败，可重新处理`
+- `报告发布未完成，可从保存点继续`
+- `任务未全部完成，已有 4 项结果可审核`
 
 点击展开后显示每次尝试、HTTP 状态、耗时、熔断和切换记录。不得展示隐藏提示词、思维过程、API key、完整响应正文或原始 HTML。
 
@@ -376,10 +601,33 @@ type RequestAttemptRecord = {
 };
 ```
 
+模型调用成功后还必须持久化节点级恢复记录：
+
+```ts
+type NodeRecoveryRecord = {
+  runId: string;
+  nodeId: string;
+  executionRevision: number;
+  phase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing' | 'completed';
+  modelResultRef?: string;
+  modelResultHash?: string;
+  outputContractVersion?: string;
+  processorVersion?: string;
+  failureFingerprint?: string;
+  publishKey?: string;
+  recovery?: AgentRecoveryDescriptor;
+  updatedAt: string;
+};
+```
+
+恢复记录和模型结果引用必须在发布 `model_result_checkpointed` 前提交。进程若在状态更新边界崩溃，恢复时通过内容哈希、Artifact key 和调用账本查询实际结果，而不是假设上一阶段未执行。
+
 - 日志和数据库只保存脱敏摘要，Provider 原始错误进入受限诊断日志并做长度限制。
 - 可按 Provider、模型、错误码观察成功率、重试后恢复率、熔断次数、P95 延迟和额外成本。
 - `requestId` 在 Electron、Automation、Runtime 事件中保持一致，便于定位一次逻辑请求。
 - 对“首次 + 3 次”建立请求放大率告警，避免配置错误造成 `4 × Toolchain × Agent` 放大。
+- 增加模型成功后的本地失败率、无模型重调用恢复率、发布续写成功率、重复 Artifact 拦截数、可审核部分结果数量和“用户靠聊天重启任务”次数指标。
+- 对 `model_received` 后再次产生相同逻辑模型请求建立告警；除 `repair_model_output` 或明确 `retry_request` 外应为零。
 
 ## 15. 验收场景
 
@@ -398,16 +646,33 @@ type RequestAttemptRecord = {
 13. SSE 重连和 Runtime 重启不会额外消耗模型重试次数。
 14. Automation 外层超时会真正向底层传播取消，不留下迟到回答或 Artifact。
 15. 全链路不存在嵌套默认重试；单个逻辑请求的网络尝试数可证明且不超过 4。
+16. 模型返回合法结果后，本地代码访问不存在字段而失败：原始结果已持久化；同一处理器版本不显示必然失败的“重新处理”，处理器版本变化后创建关联 Run 复用原结果，不产生第二次原创作模型调用。
+17. 模型返回非法 JSON 或结构与目标 Schema 不符：解析前已保存原文；先自动修复 1 次，仍失败时允许用户手动修复 1 次，两次均失败后停止修复循环并保留原结果与诊断。
+18. Artifact 发布至一半进程退出：重启后从稳定发布键继续，不重复 Artifact、DraftSession、消息或活动事件。
+19. Supervisor 或最终报告综合失败：成功专家 Artifact 仍可打开；允许查看、处置已有 finding，并可单独重试综合节点。
+20. 父 Run 为 `failed`，但其中报告 Artifact 为 `ready` 且未过期：接受、稍后处理和忽略建议按钮仍可操作；最终整包提交只在其自身前置条件不足时禁用。
+21. 多章批次第 4 章失败：前 3 章保持可查看和批注，恢复只处理第 4 章；已成功章节不重新请求模型。
+22. 草稿已落库但 Runtime 在反序列化返回对象时失败：通过 operationId 找回同一 DraftSession/Batch，不生成第二份草稿。
+23. 点击失败卡恢复按钮直接恢复 checkpoint，不向对话新增“重试”消息；手动输入“重试”得到相同效果。
+24. 恢复再次失败且仍可安全重试：按钮继续存在，`failureRevision` 更新；刷新和重启后状态一致。
+25. `SIDE_EFFECT_UNKNOWN` 永远不显示普通“重试”按钮，只允许对账；任何恢复路径都不能重复外部写入。
+26. 改写批次的第 1、2 个子项分别指向目录第 2、3 章：所有审核页签、节拍预览、恢复提示和计划标题显示第 2、3 章；提交与重生成仍使用原 `childIndex` 和 `targetChapterId`，没有串章。
+27. 普通聊天返回 `inputRequest: null`：结构校验通过并展示回答，不调用 JSON 修复模型。
+28. 普通聊天返回非法 JSON：原文先落 checkpoint，自动修复 1 次；修复成功后继续同一聊天流程，不新增用户消息、不创建替代任务。
+29. 聊天自动修复仍失败：刷新或重启后“修复 JSON 并继续”仍存在；点击时 Renderer 只提交 `recoveryRef`，内部 `modelResultRef`、契约和校验详情不进入会话持久化数据。
+30. 已保存聊天结果在代码升级后可通过新契约直接通过：点击恢复只做本地重处理，不请求模型；只有本地重处理仍失败时才执行第 2 次 JSON 修复。
 
 ## 16. 建议实施顺序
 
 ### P0：先解决当前问题
 
-1. 统一错误分类和脱敏，移除隐式 transport 二次派发。
-2. 拆分现有大 `advance`/专家执行单元，在模型与只读网络节点落地 LangGraph `RetryPolicy(max_attempts=4)`、节点超时和尝试事件。
-3. `AiService` 改为单次派发并落地错误分类、熔断/限流门禁；对齐 LangGraph、Automation 与 Provider 超时并让取消信号贯穿到底层。
-4. 新增 `agent.retry_run`、失败 checkpoint 和 `retry_failed_run` Intent。
-5. 失败卡与活动摘要先完成 Stitch 原型，再实现“重试失败步骤/调整并重新规划”。
+1. 在所有模型调用边界先持久化 `model_received` checkpoint，再执行严格解析、Pydantic/TypeScript 转换和 Artifact 发布；盘点聊天、计划、全部 Toolchain、团队综合、报告、修订批次和草稿 Operation，禁止仅修复当前报错链。
+2. 落地统一 `AgentRecoveryDescriptor` 与阶段恢复接口，解除 `agent.retry_run` 对 `request_retry_exhausted` 的唯一依赖；先支持 `reprocess_saved_result`、`resume_publish` 和 `repair_model_output`。
+3. 将审核可用性改为 Artifact capability 计算，父 Run 失败时保留 ready/non-stale 产物的查看、批注和允许操作；补齐多章有效前缀与团队部分结果。
+4. 为失败卡提供直接恢复按钮，刷新/重启后可恢复；用户输入“重试”只作为同一接口的别名。
+5. 统一错误分类和脱敏，移除隐式 transport 二次派发。
+6. 拆分现有大 `advance`/专家执行单元，在模型与只读网络节点落地 LangGraph `RetryPolicy(max_attempts=4)`、节点超时和尝试事件。
+7. `AiService` 改为单次派发并落地错误分类、熔断/限流门禁；对齐 LangGraph、Automation 与 Provider 超时并让取消信号贯穿到底层。
 
 ### P1：并发可靠性
 
@@ -435,3 +700,10 @@ type RequestAttemptRecord = {
 | 最终失败后的“继续” | 沿用原计划，新建关联 Run，从失败节点恢复 |
 | 多 Agent | 只重试失败专家；Supervisor 只重试综合 |
 | 副作用未知 | 永不自动重试，必须先对账 |
+| 模型返回后的本地失败 | 先保存结果，再按阶段重新处理或继续发布；默认不重调模型 |
+| JSON 修复次数 | 自动 1 次；失败卡允许用户再触发 1 次；之后停止修复循环 |
+| 终态后的恢复 | 创建关联 Recovery Run，Renderer 在原任务卡中折叠展示，不重开终态 Run |
+| 恢复内部引用 | checkpoint、modelResultRef、结果哈希与失败指纹仅留在后端，Renderer 不持有 |
+| 恢复资格 | 由 `AgentRecoveryDescriptor.retryStrategy` 决定，不依赖单一耗尽事件 |
+| 父 Run 失败后的审核 | ready 且未过期 Artifact 继续可查看、批注和执行其允许操作 |
+| 用户恢复入口 | 失败卡直接操作为主，聊天输入“重试”为可选别名 |

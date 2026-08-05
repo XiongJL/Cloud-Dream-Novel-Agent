@@ -75,7 +75,14 @@ export interface AiGenerateRequest {
     systemPrompt?: string;
     maxTokens?: number;
     temperature?: number;
+    /** Hard limit for the complete provider attempt. */
     timeoutMs?: number;
+    /** Time allowed before the first response body bytes arrive. */
+    firstByteTimeoutMs?: number;
+    /** Maximum silence between chunks once a streaming response starts. */
+    streamIdleTimeoutMs?: number;
+    /** Provider transport activity for durable attempt telemetry. */
+    onActivity?: (kind: 'first_byte' | 'chunk') => void;
     signal?: AbortSignal;
 }
 
@@ -149,6 +156,8 @@ export interface ChapterBeatGenerationPayload {
     context?: Record<string, unknown>;
     taskMode?: 'sequence_continuation' | 'batch_rewrite';
     targetChapterIds?: string[];
+    revisionInstruction?: string;
+    previousBeats?: ChapterBeatGenerationResult['beats'];
 }
 
 export interface ChapterBeatGenerationResult {
@@ -224,6 +233,12 @@ export interface CreativeAssetsDraft {
         description?: string;
         profile?: Record<string, string>;
     }>;
+    worldSettings?: Array<{
+        name: string;
+        type?: 'history' | 'geography' | 'magic_system' | 'faction' | 'technology' | 'other';
+        content?: string;
+        icon?: string;
+    }>;
     maps?: Array<{
         name: string;
         type?: 'world' | 'region' | 'scene';
@@ -274,7 +289,7 @@ export interface CreativeAssetsGeneratePayload {
     brief: string;
     novelId: string;
     overrideUserPrompt?: string;
-    targetSections?: Array<'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'maps'>;
+    targetSections?: Array<'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'worldSettings' | 'maps'>;
     contextChapterCount?: number;
     includeExistingEntities?: boolean;
     filterCompletedPlotLines?: boolean;
@@ -325,13 +340,9 @@ export interface AiActionExecutePayload {
     payload?: unknown;
 }
 
-export interface OpenClawSmokePayload {
-    kind: 'mcp' | 'skill';
-}
-
 export interface OpenClawSmokeResult {
     ok: boolean;
-    kind: 'mcp' | 'skill';
+    kind: 'mcp';
     detail: string;
     missingActions: string[];
     checks: Array<{

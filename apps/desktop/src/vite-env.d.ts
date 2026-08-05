@@ -5,6 +5,8 @@ interface DBAPI {
     createNovel: (title: string) => Promise<Novel>
     getAgentConversations: (novelId: string) => Promise<AgentConversationRecord[]>
     upsertAgentConversation: (conversation: AgentConversationRecord) => Promise<{ ok: boolean }>
+    updateAgentConversationDraft: (payload: { conversationId: string; composerDraft: string }) => Promise<{ ok: boolean }>
+    acknowledgeAgentConversationRun: (payload: { conversationId: string; runId: string | null }) => Promise<{ ok: boolean }>
     deleteAgentConversation: (conversationId: string) => Promise<{ ok: boolean }>
     getVolumes: (novelId: string) => Promise<Volume[]>
     createVolume: (data: { novelId: string; title: string }) => Promise<Volume>
@@ -535,7 +537,7 @@ interface AIAPI {
         brief: string;
         novelId: string;
         overrideUserPrompt?: string;
-        targetSections?: Array<'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'maps'>;
+        targetSections?: Array<'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'worldSettings' | 'maps'>;
         contextChapterCount?: number;
         includeExistingEntities?: boolean;
         filterCompletedPlotLines?: boolean;
@@ -555,7 +557,7 @@ interface AIAPI {
         brief: string;
         novelId: string;
         overrideUserPrompt?: string;
-        targetSections?: Array<'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'maps'>;
+        targetSections?: Array<'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'worldSettings' | 'maps'>;
         contextChapterCount?: number;
         includeExistingEntities?: boolean;
         filterCompletedPlotLines?: boolean;
@@ -612,10 +614,16 @@ interface AIAPI {
         path?: string
     }>
     rebuildChapterSummary: (chapterId: string) => Promise<{ ok: boolean; detail?: string }>
+    rebuildAgentContextSummary: (storageConversationId: string) => Promise<{
+        ok: boolean
+        status: 'completed' | 'in_progress' | 'failed'
+        revision: number
+        generation: number
+        diagnostics: AgentContextCompressionCoordinatorDiagnostics
+    }>
     executeAction: (actionId: string, payload?: unknown) => Promise<unknown>
     openClawInvoke: (name: string, args?: unknown) => Promise<{ ok: boolean; data?: unknown; error?: string; code?: string }>
     openClawMcpInvoke: (name: string, args?: unknown) => Promise<{ ok: boolean; data?: unknown; error?: string; code?: string }>
-    openClawSkillInvoke: (name: string, input?: unknown) => Promise<{ ok: boolean; data?: unknown; error?: string; code?: string }>
 }
 
 interface CreativeDraftSelection {
@@ -699,7 +707,7 @@ type DraftBatchReconcileUnknownInput = import('../shared/draftBatch').DraftBatch
 
 type AgentName = 'supervisor' | 'writer' | 'editor' | 'reader' | 'worldbuilding' | 'research_rag'
 type AgentStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped'
-type AgentRunStatus = 'idle' | 'waiting_approval' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling'
+type AgentRunStatus = 'idle' | 'waiting_approval' | 'waiting_user_input' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling'
 type AgentRunEventType =
     | 'run_started'
     | 'plan_pending'
@@ -717,8 +725,12 @@ type AgentRunEventType =
     | 'toolchain_completed'
     | 'toolchain_failed'
     | 'draft_created'
+    | 'draft_operation_started'
+    | 'draft_operation_progress'
     | 'artifact_created'
     | 'approval_required'
+    | 'user_input_required'
+    | 'user_input_resolved'
     | 'error'
     | 'run_completed'
     | 'run_failed'
@@ -730,15 +742,49 @@ type AgentRunEventType =
     | 'run_retry_started'
 
 type AgentRoleMode = 'team' | 'writer' | 'editor' | 'reader' | 'worldbuilding' | 'research_rag'
+type AgentConversationMessageKind = 'chat' | 'role_status' | 'workflow_notice' | 'context_compression'
 
 interface AgentConversationMessageRecord {
     id: string
     role: 'user' | 'assistant' | 'system'
     content: string
     createdAt: string
+    kind?: AgentConversationMessageKind
     contextReads?: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>
     contextDiagnostics?: AgentContextDiagnostics
     attachmentIds?: string[]
+    chapterScopeSnapshot?: import('../shared/agentChapterScopeSelection').AgentChapterScopeSelection
+    activities?: AgentChatActivityEvent[]
+    failure?: AgentChatFailure
+    evidenceSnapshotId?: string
+}
+
+interface AgentChatActivityEvent {
+    eventId: string
+    sequence: number
+    requestId: string
+    callId?: string
+    type: 'request_started' | 'model_started' | 'model_completed' | 'tool_started' | 'tool_completed' | 'tool_failed' | 'finalization_started' | 'request_completed' | 'request_failed' | 'request_cancelled'
+    stage: 'scope_validation' | 'context_read' | 'analysis' | 'finalization'
+    toolName?: string
+    displayName: string
+    status: 'running' | 'completed' | 'failed' | 'cancelled'
+    elapsedMs?: number
+    details?: Record<string, unknown>
+    createdAt: string
+}
+
+interface AgentChatFailure {
+    code: 'SCOPE_CONFLICT' | 'CONTEXT_READ_TIMEOUT' | 'CONTEXT_READ_FAILED' | 'MODEL_SUMMARY_TIMEOUT' | 'REQUEST_DEADLINE_EXCEEDED' | 'CANCELLED' | 'EVIDENCE_SNAPSHOT_MISSING' | string
+    message: string
+    retryable?: boolean
+    coverage?: { completed: number; total: number }
+    recovery?: AgentChatRecoveryDescriptor
+}
+
+interface AgentChatRecoveryDescriptor {
+    recoveryRef: string
+    recoveryAction: 'repair_model_output'
 }
 
 interface AgentConversationSummaryEntry {
@@ -776,6 +822,55 @@ interface AgentConversationSummary {
     updatedAt: string
 }
 
+interface AgentConversationSummaryEntryV2 {
+    id: string
+    text: string
+    sourceMessageIds?: string[]
+    sourceArtifactIds?: string[]
+    authority: 'user' | 'project' | 'assistant'
+    status: 'active' | 'resolved' | 'superseded'
+    supersededBy?: string
+}
+
+interface AgentConversationSummaryV2 {
+    version: 'agent-conversation-summary-v2'
+    revision: number
+    previousRevision: number
+    generation: number
+    rebuild?: {
+        previousGeneration: number
+        reason: 'source_changed' | 'manual_quality_rebuild'
+    }
+    coverage: {
+        startMessageId: string
+        endMessageId: string
+        messageCount: number
+        sourceHash: string
+    }
+    semanticProjection: {
+        activeIntent: AgentConversationSummaryEntryV2[]
+        hardConstraints: AgentConversationSummaryEntryV2[]
+        confirmedDecisions: AgentConversationSummaryEntryV2[]
+        canonFacts: AgentConversationSummaryEntryV2[]
+        creativeContinuity: AgentConversationSummaryEntryV2[]
+        unresolvedQuestions: AgentConversationSummaryEntryV2[]
+        completedOutcomes: AgentConversationSummaryEntryV2[]
+        pendingWork: AgentConversationSummaryEntryV2[]
+        artifactRefs: AgentConversationArtifactRef[]
+    }
+    sourceIndex: {
+        userMessageLedger: Array<{
+            messageId: string
+            gist: string
+            classification: 'semantic' | 'transient'
+            supersedesMessageIds?: string[]
+        }>
+        sourceFingerprints: Array<Record<string, unknown>>
+        dependencyHash: string
+    }
+    updatedAt: string
+}
+
 interface AgentConversationRecord {
     id: string
     novelId: string
@@ -784,12 +879,17 @@ interface AgentConversationRecord {
     role: AgentRoleMode
     runtimeConversationId: string | null
     updatedAt: string
+    chapterScope?: import('../shared/agentChapterScopeSelection').AgentChapterScopeSelection | null
     messages: AgentConversationMessageRecord[]
     suggestedGoal: string | null
     plan: AgentPlan | null
     run: AgentRun | null
     runs?: AgentRun[]
-    contextSummary?: AgentConversationSummary | null
+    contextSummary?: AgentConversationSummary | AgentConversationSummaryV2 | null
+    pendingUserInput?: AgentUserInputRequest | null
+    userInputResolutions?: AgentUserInputResolution[]
+    composerDraft?: string
+    attentionAcknowledgedRunId?: string | null
     error: string
 }
 
@@ -803,6 +903,7 @@ interface AgentPlanStep {
         version: string
         input: Record<string, unknown>
     } | null
+    skills?: AgentSkillRef[]
     status: AgentStepStatus
 }
 
@@ -821,7 +922,55 @@ interface AgentRoleDefinition {
     description: string
     tools: string[]
     skills: string[]
+    defaultSkillIds: string[]
     presets: AgentPresetTask[]
+}
+
+interface AgentSkillIndexEntry {
+    id: string
+    stableId: string
+    title: string
+    description: string
+    scope: 'builtin' | 'user' | 'novel'
+    ownerNovelId?: string | null
+    category: 'style' | 'narrative_method' | 'generation' | 'review' | 'character_voice' | 'novel_rules' | 'other'
+    guidanceMode: 'adaptive' | 'guided' | 'strict'
+    semanticSelection: 'off' | 'suggest' | 'auto'
+    triggerHints: string[]
+    antiTriggerHints: string[]
+    allowedRoles: string[]
+    supportedOperations: string[]
+    version: string
+    revisionId: string
+    enabled: boolean
+}
+
+interface AgentSkillRef {
+    skillId: string
+    stableId: string
+    revisionId: string
+    version: string
+    contentHash: string
+    scope: 'builtin' | 'user' | 'novel'
+    selectionSource: 'explicit' | 'shortcut' | 'role' | 'preset' | 'semantic' | 'user' | 'novel' | 'builtin'
+    position: 'primary' | 'auxiliary'
+}
+
+interface AgentSkillResolveResult {
+    primary?: AgentSkillRef | null
+    auxiliary?: AgentSkillResolveResult['primary']
+    reasonCodes: string[]
+    warnings: string[]
+}
+
+interface AgentSkillPreviewResult {
+    resolved: AgentSkillResolveResult
+    compiled: {
+        sections: Array<{ skill: NonNullable<AgentSkillResolveResult['primary']>; prompt: string; estimatedTokens: number }>
+        prompt: string
+        estimatedTokens: number
+        warnings: string[]
+    }
 }
 
 interface AgentPlan {
@@ -834,6 +983,7 @@ interface AgentPlan {
     preferredRole?: 'team' | AgentName
     deliverable?: 'report' | 'expert_report' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft'
     requestedEffect?: 'unknown' | 'none' | 'read_only' | 'draft_write' | 'data_write' | 'external'
+    userDecisions?: Record<string, unknown> | null
 }
 
 interface AgentRunEvent {
@@ -855,7 +1005,7 @@ interface AgentArtifact {
     artifactId: string
     runId: string
     planId: string
-    type: 'report' | 'context_bundle' | 'chapter_scope_context' | 'consistency_review' | 'plotline_analysis' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft' | 'writer_revision_plan' | 'chapter_range_review' | 'reader_journey' | 'worldbuilding_consistency' | 'research_fact_check' | 'scope_audit'
+    type: 'report' | 'context_bundle' | 'chapter_scope_context' | 'consistency_review' | 'plotline_analysis' | 'chapter_draft' | 'chapter_draft_batch' | 'creative_assets_draft' | 'writer_revision_plan' | 'chapter_range_review' | 'reader_journey' | 'worldbuilding_consistency' | 'research_fact_check' | 'scope_audit' | 'novel_bootstrap_draft' | 'agent_skill_pack_draft'
     title: string
     status: 'ready' | 'committed' | 'discarded' | 'failed'
     summary?: string | null
@@ -884,7 +1034,14 @@ interface AgentApprovalRequest {
     reason?: string
     options: AgentApprovalOption[]
     allowFreeText: boolean
+    freeTextPlaceholder?: string
     stepId?: string
+    draftBatchId?: string
+    outlineRevision?: number
+    revisionCount?: number
+    maxRevisionCount?: number
+    revisionError?: string
+    beats?: DraftBatchRecord['outline']['beats']
 }
 
 interface AgentApprovalResponse {
@@ -892,6 +1049,100 @@ interface AgentApprovalResponse {
     checkpointType?: string
     selectedOptionIds: string[]
     freeText?: string
+    draftBatchId?: string
+    outlineRevision?: number
+}
+
+type AgentUserInputPhase = 'pre_plan' | 'execution'
+
+interface AgentUserInputEvidence {
+    evidenceId: string
+    sourceKind: 'editor_snapshot' | 'chapter' | 'attachment' | 'rag' | 'search' | 'creative_setting'
+    sourceId: string
+    title: string
+    version?: string
+    contentHash?: string
+    coverage?: string
+}
+
+interface AgentUserInputOption {
+    optionId: string
+    label: string
+    description: string
+    evidenceIds?: string[]
+}
+
+interface AgentUserInputQuestion {
+    questionId: string
+    header: string
+    prompt: string
+    options: AgentUserInputOption[]
+    recommendedOptionId: string
+    recommendationReason: string
+    evidenceIds?: string[]
+    allowCustom: true
+}
+
+interface AgentUserInputRequest {
+    schemaVersion: 'agent-user-input-v1'
+    requestId: string
+    inputSessionId: string
+    conversationId: string
+    sourceMessageId?: string
+    phase: AgentUserInputPhase
+    round: 1 | 2 | 3
+    maxRounds: 1 | 2 | 3
+    previousRequestId?: string
+    title: string
+    reason: string
+    questions: AgentUserInputQuestion[]
+    evidence: AgentUserInputEvidence[]
+    runId?: string
+    stepId?: string
+    createdAt: string
+}
+
+type AgentUserInputAnswer =
+    | { questionId: string; answerKind: 'option'; selectedOptionId: string }
+    | { questionId: string; answerKind: 'custom'; customText: string }
+    | { questionId: string; answerKind: 'skipped' }
+
+interface AgentUserInputEffectiveAnswer {
+    questionId: string
+    answerKind: 'option' | 'custom'
+    selectedOptionId?: string
+    customText?: string
+    source: 'user' | 'recommended_fallback'
+}
+
+interface AgentUserInputResolution {
+    requestId: string
+    inputSessionId?: string
+    round: 1 | 2 | 3
+    phase: AgentUserInputPhase
+    status: 'resolved' | 'dismissed'
+    answers: AgentUserInputAnswer[]
+    effectiveAnswers: AgentUserInputEffectiveAnswer[]
+    understandingSummary: string
+    resolvedAt: string
+    nextAction: 'follow_up_required' | 'plan_created' | 'run_resumed' | 'returned_to_chat' | 'run_cancelled'
+    request?: AgentUserInputRequest
+    pendingUserInput?: AgentUserInputRequest
+    plan?: AgentPlan
+    run?: AgentRun
+}
+
+interface AgentRecoveryDescriptor {
+    failureKind: 'transport' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown'
+    failedAtPhase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing'
+    retryStrategy: 'retry_request' | 'repair_model_output' | 'reprocess_saved_result' | 'resume_publish' | 'reconcile_side_effect' | 'none'
+    canRecover: boolean
+    recoveryRevision: number
+    actionLabel?: string
+    blockedReason?: 'processor_update_required' | 'stale_dependency' | 'unsafe_side_effect' | 'repair_exhausted'
+    completedArtifactIds: string[]
+    affectedArtifactIds: string[]
+    diagnosticRef: string
 }
 
 interface AgentRun {
@@ -903,17 +1154,31 @@ interface AgentRun {
     progress: number
     events: AgentRunEvent[]
     artifacts?: AgentArtifact[]
+    skillSnapshot?: AgentSkillRef[]
     draftSessionId?: string
     draftBatchId?: string
+    draftOperationId?: string
+    draftOperationKey?: string
+    draftOperationStatus?: string
+    draftOperationVersion?: number
     cancelRequested?: boolean
     pendingApproval?: AgentApprovalRequest | null
     approvalResponses?: AgentApprovalResponse[]
+    pendingUserInput?: AgentUserInputRequest | null
+    userInputResponses?: Array<{
+        requestId: string
+        checkpointType?: string
+        answers: AgentUserInputAnswer[]
+        understandingSummary: string
+    }>
     planSnapshot?: AgentPlan
     retryOfRunId?: string
     retryRootRunId?: string
     retryAttempt?: number
     failureRevision?: number
     resumedFrom?: Record<string, unknown>
+    completionKind?: 'complete' | 'partial'
+    recovery?: AgentRecoveryDescriptor | null
 }
 
 interface AgentRunStatusResult {
@@ -929,11 +1194,19 @@ interface AgentRunStatusResult {
     lastEventAt?: string
     draftSessionId?: string
     draftBatchId?: string
+    draftOperationId?: string
+    draftOperationKey?: string
+    draftOperationStatus?: string
+    draftOperationVersion?: number
     artifacts: AgentArtifact[]
+    pendingApproval?: AgentApprovalRequest | null
+    pendingUserInput?: AgentUserInputRequest | null
     retryOfRunId?: string
     retryRootRunId?: string
     retryAttempt: number
     failureRevision: number
+    completionKind: 'complete' | 'partial'
+    recovery?: AgentRecoveryDescriptor | null
 }
 
 interface AgentChatResponse {
@@ -949,14 +1222,23 @@ interface AgentChatResponse {
     contextReads: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>
     contextDiagnostics?: AgentContextDiagnostics
     contextCompression?: AgentContextCompression
-    conversationSummary?: AgentConversationSummary
     intentDecision?: AgentIntentDecision
+    pendingUserInput?: AgentUserInputRequest | null
+    status: 'completed' | 'failed' | 'cancelled'
+    activities: AgentChatActivityEvent[]
+    failure?: AgentChatFailure
+    evidenceSnapshotId?: string
 }
 
 interface AgentIntentTargetRef {
-    kind: 'novel' | 'volume' | 'chapter' | 'selection' | 'conversation'
+    kind: 'novel' | 'volume' | 'chapter' | 'chapter_scope' | 'selection' | 'conversation'
     source: 'explicit_id' | 'current_selection' | 'conversation_reference'
     id?: string
+    ids?: string[]
+    selector?: string
+    volumeId?: string
+    title?: string
+    label?: string
 }
 
 interface AgentIntentOperation {
@@ -982,6 +1264,12 @@ interface AgentIntentDecision {
     reasonCodes: string[]
     responseContent: string
     explorationPerformed: boolean
+    requestedSkills: Array<{
+        skillId: string
+        requestedRevisionId?: string | null
+        selectionSource: 'explicit' | 'shortcut' | 'preset' | 'semantic'
+    }>
+    disabledSkillsForTurn: boolean
     recovery?: {
         failedRunId: string
         expectedFailureRevision: number
@@ -1007,11 +1295,11 @@ interface AgentContextSectionSource {
 }
 
 interface AgentContextDiagnostics {
-    contextVersion: 'agent-context-v1'
+    contextVersion: 'agent-context-v1' | 'agent-context-v2'
     providerType: 'http' | 'mcp-cli'
     model: string
     contextWindowTokens: number
-    contextWindowSource: 'configured' | 'model-profile'
+    contextWindowSource: 'configured' | 'model-profile' | 'compatibility-fallback'
     outputTokens: number
     safetyTokens: number
     systemTokens: number
@@ -1035,10 +1323,107 @@ interface AgentContextDiagnostics {
     compressedSectionIds: string[]
     omittedSectionIds: string[]
     warnings: string[]
+    compressionMode?: 'none' | 'projection' | 'micro' | 'semantic' | 'degraded'
+    hardTokenCountMethod?: 'provider_exact' | 'tokenizer_exact' | 'conservative_upper_bound' | 'estimated'
+    tokenCounterProfileId?: string
+    contextTokens?: number
+    providerInputTokens?: number
+    hardContextBudget?: number
+    hardProviderInputLimit?: number
+    providerReserveTokens?: number
+    fixedProviderInputTokens?: number
+    triggerContextBudget?: number
+    targetContextBudget?: number
+    nextTurnReserveTokens?: number
+    projectedNextTurnContextTokens?: number
+    wouldRetriggerNextTurn?: boolean
+    semanticSummaryVersion?: 2
+    semanticSummaryDependencyStatus?: 'none' | 'valid' | 'stale'
+    sourceIndexLedgerEntries?: number
+    sourceIndexBytes?: number
+    coordinator?: AgentContextCompressionCoordinatorDiagnostics
+}
+
+interface AgentContextCompressionCoordinatorDiagnostics {
+    mode: 'none' | 'projection' | 'semantic' | 'degraded'
+    operationKind: 'none' | 'coverage_increment' | 'dependency_refresh' | 'generation_rebuild' | 'background_precompression'
+    triggered: boolean
+    triggerReason: 'none' | 'high_water' | 'forced' | 'source_changed' | 'dependency_changed' | 'manual_rebuild'
+    currentRequestIdentityStatus: 'not_applicable' | 'valid' | 'mismatch'
+    currentRequestPayloadOccurrences: number
+    preCompressionContextTokens: number
+    postCompressionContextTokens: number
+    preCompressionProviderInputTokens: number
+    postCompressionProviderInputTokens: number
+    hardTokenCountMethod: 'provider_exact' | 'tokenizer_exact' | 'conservative_upper_bound'
+    hardTokenCountProfileId: string
+    targetContextBudget: number
+    summaryRevision: number
+    summaryGeneration: number
+    rebuildReason?: 'source_changed' | 'manual_quality_rebuild'
+    rebuildTaskId: string | null
+    rebuildStatus: 'idle' | 'running' | 'completed' | 'discarded' | 'limit_exceeded'
+    rebuildCompletedChunks: number
+    rebuildMaxChunks: number
+    rebuildElapsedMs: number
+    rebuildMaxDurationMs: number
+    /** @deprecated Legacy aliases retained for persisted diagnostics. */
+    rebuildChunksCompleted?: number
+    rebuildChunkCount?: number
+    coverageMessageCount: number
+    coverageStartMessageId?: string
+    coverageEndMessageId?: string
+    sourceHashStatus: 'none' | 'valid' | 'stale'
+    dependencyHashStatus: 'none' | 'valid' | 'stale'
+    boundaryUnitId?: string
+    atomicUnitCount: number
+    blockingUnitId?: string
+    blockingSequenceStart?: number
+    blockingSequenceEnd?: number
+    newlyCoveredMessageCount: number
+    recentTailMessageCount: number
+    recentTailContextTokens: number
+    recentTailUnitCount: number
+    sourceIndexLedgerEntries: number
+    sourceIndexBytes: number
+    semanticLedgerEntries: number
+    transientLedgerEntries: number
+    unprojectedSemanticMessageCount: number
+    invalidatedSourceCount: number
+    qualitySample?: {
+        reason: 'initial' | 'periodic' | 'rebuild'
+        revision: number
+        generation: number
+        projectionEntryCount: number
+        semanticLedgerEntries: number
+        directlyProjectedSemanticEntries: number
+        validationPassed: true
+    }
+    compactor?: {
+        providerType: 'http' | 'mcp-cli'
+        model: string
+        promptVersion: string
+        elapsedMs: number
+        inputTokens: number
+        outputTokens: number
+        tokenCountMethod: 'provider_exact' | 'tokenizer_exact' | 'conservative_upper_bound'
+        inputBytes: number
+        outputBytes: number
+        retries: number
+    }
+    statusCodes: Array<'CONTEXT_REBUILD_IN_PROGRESS' | 'CONTEXT_PRECOMPRESSION_IN_PROGRESS'>
+    errorCode?: string
+    /** @deprecated Use statusCodes/errorCode. */
+    failureCode?: string
+    consecutiveFailures: number
+    circuitOpen: boolean
+    casConflict: boolean
+    warnings: string[]
 }
 
 interface AgentContextCompression {
     applied: true
+    mode: 'none' | 'projection' | 'micro' | 'semantic' | 'degraded'
     model: string
     contextWindowTokens: number
     inputBudgetTokens: number
@@ -1054,6 +1439,35 @@ interface AgentContextCompression {
     recalledArtifactCount: number
     compressedSectionIds: string[]
     omittedSectionIds: string[]
+    operationKind?: 'none' | 'coverage_increment' | 'dependency_refresh' | 'generation_rebuild' | 'background_precompression'
+    triggerReason?: 'none' | 'high_water' | 'forced' | 'source_changed' | 'dependency_changed' | 'manual_rebuild'
+    currentRequestIdentityStatus?: 'not_applicable' | 'valid' | 'mismatch'
+    currentRequestPayloadOccurrences?: number
+    summaryGeneration?: number
+    rebuildReason?: 'source_changed' | 'manual_quality_rebuild'
+    rebuildTaskId?: string | null
+    rebuildStatus?: 'idle' | 'running' | 'completed' | 'discarded' | 'limit_exceeded'
+    rebuildCompletedChunks?: number
+    rebuildMaxChunks?: number
+    rebuildElapsedMs?: number
+    rebuildMaxDurationMs?: number
+    preCompressionContextTokens?: number
+    postCompressionContextTokens?: number
+    preCompressionProviderInputTokens?: number
+    postCompressionProviderInputTokens?: number
+    hardTokenCountMethod?: 'provider_exact' | 'tokenizer_exact' | 'conservative_upper_bound'
+    hardTokenCountProfileId?: string
+    statusCodes?: Array<'CONTEXT_REBUILD_IN_PROGRESS' | 'CONTEXT_PRECOMPRESSION_IN_PROGRESS'>
+    errorCode?: string
+    /** @deprecated Legacy aliases retained for persisted diagnostics. */
+    rebuildChunksCompleted?: number
+    rebuildChunkCount?: number
+    sourceHashStatus?: 'none' | 'valid' | 'stale'
+    dependencyHashStatus?: 'none' | 'valid' | 'stale'
+    failureCode?: string
+    consecutiveFailures?: number
+    circuitOpen?: boolean
+    casConflict?: boolean
 }
 
 interface AgentHealthResult {
@@ -1081,7 +1495,18 @@ interface AgentAPI {
     ensureReady: () => Promise<AgentHealthResult>
     restart: () => Promise<AgentHealthResult>
     roles: (payload?: Record<string, unknown>) => Promise<AgentRoleDefinition[]>
+    skills: (payload?: Record<string, unknown>) => Promise<AgentSkillIndexEntry[]>
+    resolveSkill: (payload: Record<string, unknown>) => Promise<AgentSkillResolveResult>
+    previewSkill: (payload: Record<string, unknown>) => Promise<AgentSkillPreviewResult>
+    authorSkill: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+    skillDrafts: (payload?: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>
+    skillDraft: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>
+    commitSkillDraft: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+    discardSkillDraft: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
     chat: (payload: Record<string, unknown>, options?: { requestId?: string }) => Promise<AgentChatResponse>
+    recoverChat: (payload: Record<string, unknown>, options?: { requestId?: string }) => Promise<AgentChatResponse>
+    retryChatSummary: (payload: Record<string, unknown>, options?: { requestId?: string }) => Promise<AgentChatResponse>
+    deleteChatContext: (payload: { conversationId: string; storageConversationId?: string }) => Promise<{ ok: boolean; removedEvidenceSnapshots: number }>
     cancelChat: (payload: { requestId: string }) => Promise<{ ok: boolean; cancelled: boolean }>
     onChatProgress: (callback: (payload: {
         requestId: string
@@ -1090,6 +1515,15 @@ interface AgentAPI {
         toolName?: string
         attachmentId?: string
         selector?: unknown
+        eventId?: string
+        callId?: string
+        type?: AgentChatActivityEvent['type']
+        stage?: AgentChatActivityEvent['stage']
+        displayName?: string
+        status?: AgentChatActivityEvent['status']
+        elapsedMs?: number
+        details?: Record<string, unknown>
+        createdAt?: string
     }) => void) => () => void
     plan: (payload: Record<string, unknown>) => Promise<AgentPlan>
     registerPlan: (payload: Record<string, unknown>) => Promise<AgentPlan>
@@ -1103,6 +1537,8 @@ interface AgentAPI {
     runStatus: (payload: Record<string, unknown>) => Promise<AgentRunStatusResult>
     cancel: (payload: Record<string, unknown>) => Promise<AgentRun>
     submitApproval: (payload: Record<string, unknown>) => Promise<AgentRun>
+    submitUserInput: (payload: Record<string, unknown>) => Promise<AgentUserInputResolution>
+    dismissUserInput: (payload: Record<string, unknown>) => Promise<AgentUserInputResolution>
     subscribeRun: (runId: string, options?: { afterSequence?: number }) => Promise<{ ok: boolean }>
     unsubscribeRun: (runId: string) => Promise<{ ok: boolean }>
     onRunEvent: (callback: (event: AgentRunEvent) => void) => () => void
@@ -1146,6 +1582,7 @@ interface Window {
     electron: {
         toggleFullScreen: () => Promise<boolean>
         getUserDataPath: () => Promise<string>
+        openExternal: (url: string) => Promise<boolean>
         onFullScreenChange: (callback: (isFullScreen: boolean) => void) => () => void
     }
     sync: SyncAPI

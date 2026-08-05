@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Bot, PanelLeftClose, PanelLeftOpen, Settings, ChevronRight, LayoutGrid, FileText, Sparkles, ScrollText, Loader2 } from 'lucide-react';
+import { ArrowLeft, Bot, CircleAlert, CircleHelp, ClipboardCheck, FileCheck2, PanelLeftClose, PanelLeftOpen, Settings, ChevronRight, LayoutGrid, FileText, Sparkles, ScrollText, Loader2 } from 'lucide-react';
 import NarrativeMatrix from '../../components/StoryWorkbench/NarrativeMatrix';
 import Sidebar from '../../components/Sidebar';
 import ActivityBar, { ActivityTab } from '../../components/ActivityBar';
@@ -21,7 +21,8 @@ import { GlobalIdeaModal } from '../../components/GlobalIdeaModal';
 import WorldWorkbench from '../../components/WorldWorkbench/WorldWorkbench';
 import AIWorkbenchShell from '../../components/AIWorkbench/AIWorkbenchShell';
 import AIWorkbenchDraftDock from '../../components/AIWorkbench/AIWorkbenchDraftDock';
-import AgentWorkspace from '../../components/AgentWorkspace/AgentWorkspace';
+import AgentWorkspace, { type AgentChapterContext, type AgentEditorContentSnapshot } from '../../components/AgentWorkspace/AgentWorkspace';
+import type { AgentWorkspaceAttentionSummary } from '../../../shared/agentWorkspaceAttention';
 import type { DraftSessionRecord } from '../../components/AIWorkbench/types';
 import PlotSidebar from '../../components/StoryWorkbench/PlotSidebar';
 import PlotContextMenu from '../../components/StoryWorkbench/PlotContextMenu';
@@ -44,6 +45,15 @@ import { usePlotInteractions } from './hooks/usePlotInteractions';
 import { ContinueWritingModal } from '../../components/Editor/ContinueWritingModal';
 
 type ProductMode = 'writing' | 'agent';
+
+const IDLE_AGENT_ATTENTION: AgentWorkspaceAttentionSummary = {
+    kind: 'idle',
+    count: 0,
+    counts: { failed: 0, waiting_user_input: 0, waiting_approval: 0, review_ready: 0, running: 0 },
+    targetConversationId: null,
+    label: '空闲',
+    title: 'Agent 模式',
+};
 
 function extractPlainTextFromLexical(content: string): string {
     if (!content?.trim()) return '';
@@ -188,6 +198,8 @@ export default function Editor({ novelId, onBack }: EditorProps) {
             return 'writing';
         }
     });
+    const [agentAttention, setAgentAttention] = useState<AgentWorkspaceAttentionSummary>(IDLE_AGENT_ATTENTION);
+    const [agentAttentionRequestId, setAgentAttentionRequestId] = useState(0);
     const [pendingAgentGoal, setPendingAgentGoal] = useState('');
     const [isSidePanelOpen, setIsSidePanelOpen] = useState(true);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -260,6 +272,10 @@ export default function Editor({ novelId, onBack }: EditorProps) {
     }, [agentModeStorageKey, productMode]);
 
     useEffect(() => {
+        setAgentAttention(IDLE_AGENT_ATTENTION);
+    }, [novelId]);
+
+    useEffect(() => {
         const reloadMapCharacters = async () => {
             try {
                 const next = await window.db.getCharacters(novelId);
@@ -296,7 +312,14 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                     }
                 })();
             }
-            if (method === 'chapter.create' || method === 'chapter.save') {
+            if (
+                method === 'chapter.create' ||
+                method === 'chapter.save' ||
+                method === 'draft.commit' ||
+                method === 'draft.undo' ||
+                method === 'draft.batch.commit_prefix' ||
+                method === 'draft.batch.undo'
+            ) {
                 void (async () => {
                     try {
                         const refreshedVolumes = await window.db.getVolumes(novelId);
@@ -310,6 +333,9 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                             latest.content !== contentRef.current ||
                             latest.title !== titleRef.current;
 
+                        if (shouldRefreshEditor) {
+                            isSwitchingChapterRef.current = true;
+                        }
                         setCurrentChapter(latest);
                         setTitle(latest.title);
                         setContent(latest.content);
@@ -317,8 +343,12 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                         titleRef.current = latest.title;
                         if (shouldRefreshEditor) {
                             setEditorRefreshToken((prev) => prev + 1);
+                            window.setTimeout(() => {
+                                isSwitchingChapterRef.current = false;
+                            }, 300);
                         }
                     } catch (error) {
+                        isSwitchingChapterRef.current = false;
                         console.error('[Editor] failed to refresh chapter after automation update:', error);
                     }
                 })();
@@ -441,7 +471,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
     const hasContinuePreviewDraft = continuePreviewText.trim().length > 0;
 
     // --- 5. Flow / Title ---
-    const { isFlowMode, isFlowEntering, isFlowSwitching, toggleFlowMode } = useFlowModeController({
+    const { isFlowMode, isFullScreen, isFlowEntering, isFlowSwitching, toggleFlowMode } = useFlowModeController({
         editorRef,
         isSidePanelOpen,
         setIsSidePanelOpen,
@@ -509,11 +539,47 @@ export default function Editor({ novelId, onBack }: EditorProps) {
         }
     }, [currentChapter, t]);
 
+    const getAgentContentSnapshot = useCallback((): AgentEditorContentSnapshot => ({
+        novelId,
+        chapterId: chapterRef.current?.id ?? null,
+        content: contentRef.current || '',
+        capturedAt: new Date().toISOString(),
+    }), [chapterRef, contentRef, novelId]);
+
+    const agentChapterContext = useMemo<AgentChapterContext | null>(() => currentChapter ? ({
+        id: currentChapter.id,
+        title: currentChapter.title,
+        volumeId: currentChapter.volumeId,
+        wordCount: currentChapter.wordCount,
+    }) : null, [currentChapter?.id, currentChapter?.title, currentChapter?.volumeId, currentChapter?.wordCount]);
+
+    const handleAgentAttentionChange = useCallback((summary: AgentWorkspaceAttentionSummary) => {
+        setAgentAttention((current) => (
+            current.kind === summary.kind
+            && current.count === summary.count
+            && current.targetConversationId === summary.targetConversationId
+            && current.title === summary.title
+                ? current
+                : summary
+        ));
+    }, []);
+
+    const openAgentMode = useCallback(() => {
+        if (productMode !== 'agent' && agentAttention.targetConversationId) {
+            setAgentAttentionRequestId((current) => current + 1);
+        }
+        setProductMode('agent');
+    }, [agentAttention.targetConversationId, productMode]);
+
     const sendCurrentChapterToAgent = useCallback((goal: string) => {
         if (!currentChapter) return;
         setPendingAgentGoal(goal);
         setProductMode('agent');
     }, [currentChapter]);
+
+    const handleInitialAgentGoalConsumed = useCallback(() => {
+        setPendingAgentGoal('');
+    }, []);
 
     const appendGeneratedTextToEditor = useCallback((generated: string, existingPlainText?: string) => {
         if (!generated.trim()) return;
@@ -572,6 +638,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
         + (creativeDraft.maps?.length ?? 0)
     ), [creativeDraft]);
     const isCompactDraftDock = viewportWidth < 1700;
+    const isNarrowViewport = viewportWidth < 640;
 
     return (
         <motion.div
@@ -582,7 +649,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
             className={`fixed inset-0 z-50 flex ${preferences.theme === 'dark' ? 'bg-[#0a0a0f] text-neutral-200' : 'bg-[var(--ui-canvas)] text-[var(--ui-text-primary)]'}`}
         >
             {/* Activity Bar (Leftmost) */}
-            {productMode === 'writing' && (
+            {productMode === 'writing' && !isNarrowViewport && (
                 <ActivityBar
                     activeTab={isSidePanelOpen ? activeTab : null}
                     onTabChange={handleTabChange}
@@ -592,7 +659,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
 
             {/* Side Panel */}
             <AnimatePresence mode='wait'>
-                {productMode === 'writing' && isSidePanelOpen && (
+                {productMode === 'writing' && !isNarrowViewport && isSidePanelOpen && (
                     <motion.div
                         id="sidebar-root"
                         initial={{ x: -100, opacity: 0 }}
@@ -760,16 +827,16 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                     className={clsx(
                         "flex items-center justify-between relative border-b",
                         preferences.theme === 'dark' ? 'border-white/5 bg-[#0a0a0f] text-neutral-400' : 'border-[var(--ui-border)] bg-[var(--ui-canvas)] text-[var(--ui-text-muted)]',
-                        "h-[70px] px-4 shrink-0"
+                        "h-[70px] px-2 sm:px-4 shrink-0"
                     )}
                     style={{ zIndex: 40 }}
                 >
                     {/* Left: Navigation (Width fixed to ensure center alignment) */}
-                    <div className="flex items-center gap-2 w-[180px] shrink-0">
+                    <div className="flex w-auto shrink-0 items-center gap-2 sm:w-[180px]">
                         <button onClick={onBack} className={`p-2 rounded-full transition-colors ${preferences.theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'}`}>
                             <ArrowLeft className="w-5 h-5" />
                         </button>
-                        {productMode === 'writing' && (
+                        {productMode === 'writing' && !isNarrowViewport && (
                             <button onClick={() => setIsSidePanelOpen(!isSidePanelOpen)} className={`p-2 rounded-full transition-colors ${preferences.theme === 'dark' ? 'hover:bg-white/10 hover:text-white' : 'hover:bg-black/5 hover:text-black'}`}>
                                 {isSidePanelOpen ? <PanelLeftClose className="w-5 h-5" /> : <PanelLeftOpen className="w-5 h-5" />}
                             </button>
@@ -777,7 +844,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                     </div>
 
                     {/* Center: Title & View Switcher (Flex-1 to take available space) */}
-                    <div className="flex-1 flex justify-center items-center gap-4 min-w-0">
+                    <div className="flex min-w-0 flex-1 items-center justify-center gap-1 sm:gap-4">
                         {currentChapter && (
                             <span className={clsx("text-xs font-mono uppercase tracking-widest hidden lg:block whitespace-nowrap overflow-hidden text-ellipsis max-w-[200px]", preferences.theme === 'dark' ? 'text-neutral-600' : 'text-neutral-400')}>
                                 {isLoading ? t('common.loading') : t('editor.editing')}
@@ -797,18 +864,52 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                 写作
                             </button>
                             <button
-                                onClick={() => setProductMode('agent')}
-                                className={clsx("px-3 py-2 rounded-full transition-all flex items-center gap-2 text-xs", productMode === 'agent' ? (preferences.theme === 'dark' ? "bg-white/20 text-white" : "bg-[var(--ui-surface-muted)] text-[var(--ui-text-primary)]") : "opacity-60 hover:opacity-100")}
-                                title="Agent 模式"
+                                onClick={openAgentMode}
+                                className={clsx(
+                                    "relative w-[82px] px-3 py-2 rounded-full transition-all flex items-center justify-center gap-1.5 text-xs",
+                                    productMode === 'agent'
+                                        ? (preferences.theme === 'dark' ? "bg-white/20 text-white" : "bg-[var(--ui-surface-muted)] text-[var(--ui-text-primary)]")
+                                        : agentAttention.kind === 'idle' ? "opacity-60 hover:opacity-100" : "opacity-100",
+                                )}
+                                title={agentAttention.title}
+                                aria-label={agentAttention.title}
                             >
                                 Agent
+                                {productMode === 'writing' && agentAttention.kind !== 'idle' && (
+                                    <span
+                                        aria-hidden="true"
+                                        className={clsx(
+                                            "relative grid h-4 w-4 shrink-0 place-items-center",
+                                            agentAttention.kind === 'failed' && "text-red-600 dark:text-red-400",
+                                            (agentAttention.kind === 'waiting_user_input' || agentAttention.kind === 'waiting_approval') && "text-amber-600 dark:text-amber-400",
+                                            agentAttention.kind === 'review_ready' && "text-indigo-600 dark:text-indigo-400",
+                                            agentAttention.kind === 'running' && "text-blue-600 dark:text-blue-400",
+                                        )}
+                                    >
+                                        {agentAttention.kind === 'failed' ? <CircleAlert className="h-3.5 w-3.5" />
+                                            : agentAttention.kind === 'waiting_user_input' ? <CircleHelp className="h-3.5 w-3.5" />
+                                                : agentAttention.kind === 'waiting_approval' ? <ClipboardCheck className="h-3.5 w-3.5" />
+                                                    : agentAttention.kind === 'review_ready' ? <FileCheck2 className="h-3.5 w-3.5" />
+                                                        : <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}
+                                        {agentAttention.kind !== 'running' && agentAttention.count > 0 && (
+                                            <span className={clsx(
+                                                "absolute -right-2.5 -top-2 min-w-4 h-4 rounded-full px-1 text-[9px] leading-4 text-center text-white",
+                                                agentAttention.kind === 'failed' ? "bg-red-600"
+                                                    : agentAttention.kind === 'review_ready' ? "bg-indigo-600"
+                                                        : "bg-amber-600",
+                                            )}>
+                                                {agentAttention.count > 9 ? '9+' : agentAttention.count}
+                                            </span>
+                                        )}
+                                    </span>
+                                )}
                             </button>
                         </div>
 
                         {/* View Mode Toggle */}
                         {productMode === 'writing' && (
                         <div className={clsx(
-                            "flex items-center p-1 rounded-full border shadow-sm shrink-0",
+                            "hidden items-center p-1 rounded-full border shadow-sm shrink-0 sm:flex",
                             preferences.theme === 'dark' ? "border-white/20 bg-black/40" : "border-gray-300 bg-white"
                         )}>
                             <button
@@ -854,11 +955,13 @@ export default function Editor({ novelId, onBack }: EditorProps) {
 
                     {/* Right: Actions (Width fixed to match left) */}
                     <div className="flex items-center gap-2 justify-end min-w-fit shrink-0">
-                        <FlowModeButton
-                            isActive={isFlowMode}
-                            onClick={toggleFlowMode}
-                            className="mr-1 shrink-0"
-                        />
+                        <div className="mr-1 hidden shrink-0 sm:block">
+                            <FlowModeButton
+                                isActive={isFlowMode}
+                                onClick={toggleFlowMode}
+                                className="shrink-0"
+                            />
+                        </div>
                         <button
                             onClick={() => {
                                 setSettingsInitialTab('general');
@@ -872,19 +975,25 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                     </div>
                 </div>
 
-                {/* Editor Area, Matrix, Map, or Agent */}
-                {productMode === 'agent' ? (
+                {/* The controller stays mounted; AgentWorkspace suspends its heavy view while hidden. */}
+                <div className={clsx('flex-1 min-h-0', productMode !== 'agent' && 'hidden')} aria-hidden={productMode !== 'agent'}>
                     <AgentWorkspace
                         novel={novel}
                         novelId={novelId}
-                        currentChapter={currentChapter}
-                        currentContent={content}
+                        currentChapter={agentChapterContext}
+                        getCurrentContentSnapshot={getAgentContentSnapshot}
                         locale={i18n.language}
                         theme={preferences.theme}
+                        isVisible={productMode === 'agent'}
+                        isFullScreen={isFullScreen}
+                        attentionRequestId={agentAttentionRequestId}
+                        attentionTargetConversationId={agentAttention.targetConversationId}
+                        onAttentionChange={handleAgentAttentionChange}
                         initialGoal={pendingAgentGoal}
-                        onInitialGoalConsumed={() => setPendingAgentGoal('')}
+                        onInitialGoalConsumed={handleInitialAgentGoalConsumed}
                     />
-                ) : viewMode === 'map' && activeMapId ? (
+                </div>
+                {productMode === 'writing' && (viewMode === 'map' && activeMapId ? (
                     <MapCanvasView
                         mapId={activeMapId}
                         novelId={novelId}
@@ -925,7 +1034,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                 <LexicalChapterEditor
                                     key={`${currentChapter.id}:${editorRefreshToken}`}
                                     namespace={currentChapter.id}
-                                    initialContent={currentChapter.content}
+                                    initialContent={content}
                                     onChange={(editorState) => {
                                         if (isSwitchingChapterRef.current) return;
                                         editorState.read(() => {
@@ -1237,7 +1346,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                             <p>{t('editor.selectChapter')}</p>
                         </div>
                     )
-                )}
+                ))}
 
             </div>
             {

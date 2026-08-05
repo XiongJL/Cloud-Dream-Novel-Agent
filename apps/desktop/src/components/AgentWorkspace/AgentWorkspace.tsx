@@ -1,22 +1,28 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Component, Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type ErrorInfo, type ReactNode, type RefObject, type SetStateAction } from 'react';
 import {
   AlertCircle,
   ArrowDown,
+  ArrowRight,
   Bot,
+  ChevronLeft,
+  ChevronRight,
   ChevronDown,
   CheckCircle2,
+  CircleHelp,
   ClipboardList,
   FileDiff,
   FileText,
   ListChecks,
   Loader2,
   MessageSquare,
+  Maximize2,
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Paperclip,
+  Pencil,
   Save,
   RotateCcw,
   Play,
@@ -33,25 +39,40 @@ import {
 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { toast } from 'sonner';
+import { useTranslation } from 'react-i18next';
 import type { Chapter, Novel, Volume } from '../../types';
 import { shouldApplyRunSequence, shouldResubscribeRun } from '../../../shared/agentSseProtocol';
 import {
   applyAgentRunEvent,
   getActiveRunApproval,
+  getActiveRunUserInput,
   getRunRecoverySnapshot,
+  projectChapterBeatTimeline,
 } from '../../../shared/agentRunProjection';
 import {
+  projectDraftBatchConversationState,
+  type ChapterBeatCheckpointSnapshot,
+  type DraftInspectorSelection,
+} from '../../../shared/agentDraftBatchConversation';
+import {
+  agentDateTimestamp,
   buildAgentConversationTimeline,
   mergeAgentRunHistory,
 } from '../../../shared/agentConversationTimeline';
-import { buildAgentPlanGoal } from '../../../shared/agentPlanGoal';
+import { buildAgentPlanGoal, splitAgentPlanGoal } from '../../../shared/agentPlanGoal';
+import {
+    inferAgentConversationMessageKind,
+  type AgentConversationMessageKind,
+} from '../../../shared/agentConversationContext';
 import {
   projectAgentActivity,
+  projectChatActivity,
   type ActivityDetail,
 } from '../../../shared/agentActivityProjection';
 import { appendPlainTextToLexical, extractReadableText } from '../../../shared/lexicalDocument';
 import {
   chapterScopePayload,
+  chapterScopeSelectionFromPlan,
   createDefaultChapterScope,
   isChapterScopeSelectionValid,
   normalizeChapterScopeSelection,
@@ -60,20 +81,31 @@ import {
 import { ChapterScopeSelector } from './ChapterScopeSelector';
 import { ConsolidatedReportCard } from './ConsolidatedReportCard';
 import { DraftBatchReviewPanel } from './DraftBatchReviewPanel';
+import { ChapterBeatPreviewPanel } from './ChapterBeatPreviewPanel';
+import {
+  DraftBatchProgressCard,
+  type DraftBatchProgressCardDraft,
+} from './DraftBatchProgressCard';
 import { DraftDiffView } from './DraftDiffView';
 import { DraftMoreMenu } from './DraftMoreMenu';
-import { ReviewableParagraphs, useReviewComments } from './DraftReviewComments';
+import { useReviewComments } from './DraftReviewComments';
 import { ReviewSubmitDialog } from './ReviewSubmitDialog';
 import { CreativeAssetsReviewPanel } from './CreativeAssetsReviewPanel';
+import AssistantMarkdown from '../AssistantMarkdown';
 import { ExpertReportPanel } from './ExpertReportPanel';
 import { RevisionTaskWorkspace } from './RevisionTaskWorkspace';
+import {
+  resolveReportReviewAvailability,
+  type ReportReviewAvailability,
+} from './reportReviewAvailability';
 import type {
   AgentRevisionTask,
   ArtifactReviewSubmitResult,
   RevisionTaskSyncRunInput,
 } from '../../../shared/expertReport';
-import { getExpertReport } from '../../../shared/agentExpertReportProjection';
+import { getExpertReport, selectConsolidatedReportArtifact } from '../../../shared/agentExpertReportProjection';
 import type { DraftBatchRecord } from '../../../shared/draftBatch';
+import { resolveDraftBatchChapterDisplay } from '../../../shared/draftBatchChapterLabel';
 import type { ReviewCommentRecord } from '../../../shared/reviewComments';
 import type { AgentAttachmentContent, AgentAttachmentRecord } from '../../../shared/agentAttachment';
 import { formatReviewCommentsForConversation } from '../../../shared/reviewComments';
@@ -82,14 +114,47 @@ import {
   type AgentPendingPhase,
   type AgentPendingStatus,
 } from '../../../shared/agentPendingStatus';
+import { resolveAgentComposerAction } from '../../../shared/agentComposerAction';
+import {
+  agentSkillEntryHint,
+  agentSkillShortcutSeed,
+  buildAgentSkillMenuItems,
+  findAgentSkillSlashQuery,
+  removeAgentSkillSlashQuery,
+  shouldOpenAgentSkillSlashMenu,
+  type AgentSkillComposerMode,
+  type AgentSkillMenuItem,
+  type AgentSkillSlashQuery,
+} from '../../../shared/agentSkillComposer';
+import { formatAiErrorFromUnknown } from '../../utils/aiError';
+import {
+  agentConversationAttentionKind,
+  projectAgentWorkspaceAttention,
+  type AgentWorkspaceAttentionSummary,
+} from '../../../shared/agentWorkspaceAttention';
+import { AgentSkillSlashMenu } from './AgentSkillSlashMenu';
+
+export type AgentEditorContentSnapshot = {
+  novelId: string;
+  chapterId: string | null;
+  content: string;
+  capturedAt: string;
+};
+
+export type AgentChapterContext = Pick<Chapter, 'id' | 'title' | 'volumeId' | 'wordCount'>;
 
 type Props = {
   novel: Novel | null;
   novelId: string;
-  currentChapter: Chapter | null;
-  currentContent: string;
+  currentChapter: AgentChapterContext | null;
+  getCurrentContentSnapshot: () => AgentEditorContentSnapshot;
   locale: string;
   theme: 'dark' | 'light';
+  isVisible: boolean;
+  isFullScreen: boolean;
+  attentionRequestId: number;
+  attentionTargetConversationId: string | null;
+  onAttentionChange: (summary: AgentWorkspaceAttentionSummary) => void;
   initialGoal?: string;
   onInitialGoalConsumed: () => void;
 };
@@ -98,6 +163,17 @@ type AgentRoleMode = 'team' | 'writer' | 'editor' | 'reader' | 'worldbuilding' |
 type InspectorTab = 'context' | 'artifacts' | 'review' | 'evidence' | 'roles';
 type ApprovalMode = 'review_required' | 'chat_only' | 'full_control';
 type WorkspaceView = 'conversation' | 'revision_tasks';
+type UserInputCardDraft = {
+  questionIndex: number;
+  answers: Record<string, AgentUserInputAnswer>;
+  customQuestionId: string | null;
+  customDrafts: Record<string, string>;
+};
+type ApprovalCardDraft = {
+  customActive: boolean;
+  freeText: string;
+};
+type ChapterBeatCardDraft = DraftBatchProgressCardDraft;
 type RevisionBatchItem = {
   findingId: string;
   title: string;
@@ -124,9 +200,14 @@ type ConversationMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
   createdAt: string;
+  kind?: AgentConversationMessageKind;
   contextReads?: Array<{ toolName: string; status: 'completed' | 'failed'; message?: string }>;
   contextDiagnostics?: AgentContextDiagnostics;
   attachmentIds?: string[];
+  chapterScopeSnapshot?: AgentChapterScopeSelection;
+  activities?: AgentChatActivityEvent[];
+  failure?: AgentChatFailure;
+  evidenceSnapshotId?: string;
 };
 
 const CONTEXT_COMPRESSION_MESSAGE_KIND = 'agent_context_compression_v1';
@@ -135,12 +216,52 @@ function inspectorVisibilityStorageKey(novelId: string): string {
   return `novel_editor_agent_inspector_open:${novelId}`;
 }
 
-function readInspectorVisibility(novelId: string): boolean {
+const INSPECTOR_DEFAULT_WIDTH = 360;
+const INSPECTOR_ARTIFACT_WIDTH = 640;
+
+function inspectorLayoutStorageKey(novelId: string): string {
+  return `novel_editor_agent_inspector_layout:${novelId}`;
+}
+
+function activeConversationStorageKey(novelId: string): string {
+  return `novel_editor_agent_active_conversation:${novelId}`;
+}
+
+function readActiveConversationId(novelId: string): string | null {
   try {
-    return localStorage.getItem(inspectorVisibilityStorageKey(novelId)) === 'true';
+    return localStorage.getItem(activeConversationStorageKey(novelId));
   } catch {
-    return false;
+    return null;
   }
+}
+
+function readInspectorLayout(novelId: string): { width: number; manuallyResized: boolean } {
+  try {
+    const value = JSON.parse(localStorage.getItem(inspectorLayoutStorageKey(novelId)) || '{}') as Record<string, unknown>;
+    const width = typeof value.width === 'number' && Number.isFinite(value.width)
+      ? Math.min(900, Math.max(INSPECTOR_DEFAULT_WIDTH, Math.round(value.width)))
+      : INSPECTOR_DEFAULT_WIDTH;
+    return { width, manuallyResized: value.manuallyResized === true };
+  } catch {
+    return { width: INSPECTOR_DEFAULT_WIDTH, manuallyResized: false };
+  }
+}
+
+function readInspectorVisibilityPreference(novelId: string): boolean | null {
+  try {
+    const value = localStorage.getItem(inspectorVisibilityStorageKey(novelId));
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function requestedChapterCount(message: string): 2 | 3 | null {
+  if (/(?:这|那|前|后|选中|当前|连续|相邻)?(?<!第)(?:三|3)\s*(?:个)?章/.test(message)) return 3;
+  if (/(?:这|那|前|后|选中|当前|连续|相邻)?(?<!第)(?:两|二|2)\s*(?:个)?章/.test(message)) return 2;
+  return null;
 }
 
 function isRevisionBatchPlan(plan: AgentPlan): plan is RevisionBatchPlan {
@@ -222,6 +343,9 @@ function parseContextCompression(message: ConversationMessage): AgentContextComp
     if (compression.applied !== true || typeof compression.model !== 'string' || !numericFields.every(Number.isFinite)) return null;
     return {
       ...compression,
+      mode: ['none', 'projection', 'micro', 'semantic', 'degraded'].includes(compression.mode)
+        ? compression.mode
+        : 'micro',
       persistentSummaryRevision: Number.isFinite(compression.persistentSummaryRevision) ? compression.persistentSummaryRevision : 0,
       persistentSummaryMessageCount: Number.isFinite(compression.persistentSummaryMessageCount) ? compression.persistentSummaryMessageCount : 0,
       recalledMessageCount: Number.isFinite(compression.recalledMessageCount) ? compression.recalledMessageCount : 0,
@@ -251,7 +375,7 @@ function normalizeContextDiagnostics(value: unknown): AgentContextDiagnostics | 
     diagnostics.historyMessagesCompacted,
     diagnostics.persistentConstraintsCount,
   ];
-  if (diagnostics.contextVersion !== 'agent-context-v1'
+  if (!['agent-context-v1', 'agent-context-v2'].includes(diagnostics.contextVersion)
     || typeof diagnostics.model !== 'string'
     || !numericFields.every(Number.isFinite)) return null;
   return {
@@ -279,14 +403,24 @@ type AgentConversation = {
   role: AgentRoleMode;
   runtimeConversationId: string | null;
   updatedAt: string;
+  chapterScope?: AgentChapterScopeSelection | null;
   messages: ConversationMessage[];
   suggestedGoal: string | null;
   plan: AgentPlan | null;
   run: AgentRun | null;
   runs?: AgentRun[];
-  contextSummary?: AgentConversationSummary | null;
+  contextSummary?: AgentConversationSummary | AgentConversationSummaryV2 | null;
+  pendingUserInput?: AgentUserInputRequest | null;
+  userInputResolutions?: AgentUserInputResolution[];
+  composerDraft?: string;
+  attentionAcknowledgedRunId?: string | null;
   error: string;
 };
+
+function conversationForPersistence(conversation: AgentConversation): Omit<AgentConversation, 'contextSummary'> {
+  const { contextSummary: _contextSummary, ...persistentConversation } = conversation;
+  return persistentConversation;
+}
 
 const ROLE_OPTIONS: RoleOption[] = [
   { id: 'team', label: '团队', desc: '统筹多个专家完成复杂任务', tools: ['chapter.get', 'rag.ask', 'chapter.generate_draft'], skills: ['任务拆解', '多角色协同', '结果汇总'], presets: [{ id: 'team-project-audit', label: '项目全局审计', description: '检查情节、角色、设定与章节的一致性。', goal: '读取当前项目资料，进行全局一致性审计，按严重程度列出问题、证据和修改建议。', deliverable: 'report' }] },
@@ -314,15 +448,16 @@ function normalizeRoleOptions(roles: AgentRoleDefinition[]): RoleOption[] {
 }
 
 const APPROVAL_OPTIONS: Array<{ id: ApprovalMode; label: string; desc: string; disabled?: boolean }> = [
-  { id: 'review_required', label: '需要用户审核', desc: '可自动读取项目上下文；生成草稿或写回前需要人工确认计划。' },
+  { id: 'full_control', label: '自动工作', desc: '自动读取、分析并生成可回退草稿；正式写回仍需确认。' },
+  { id: 'review_required', label: '逐步审核', desc: '生成前展示计划，并保留创作方向和章节拍确认。' },
   { id: 'chat_only', label: '只讨论不执行', desc: '保留交流和建议，不生成计划或调用工具。' },
-  { id: 'full_control', label: '完全控制', desc: '预留模式，当前阶段不开放。', disabled: true },
 ];
 
-function createSeedConversations(novelId: string, currentChapter?: Chapter | null): AgentConversation[] {
+function createSeedConversations(novelId: string, currentChapter?: AgentChapterContext | null): AgentConversation[] {
   const chapterTitle = currentChapter?.title || '当前章';
   const seedId = (kind: 'conv' | 'msg', name: string) => `${novelId}:${kind}:${name}`;
-  return [
+  const defaultScope = createDefaultChapterScope(currentChapter?.id, currentChapter?.volumeId);
+  const conversations: AgentConversation[] = [
     {
       id: seedId('conv', 'current-chapter-review'),
       novelId,
@@ -339,7 +474,8 @@ function createSeedConversations(novelId: string, currentChapter?: Chapter | nul
         {
           id: seedId('msg', 'welcome'),
           role: 'assistant',
-          content: '你可以直接讨论创作问题。当前工作模式为“需要用户审核”：我可以先读取项目上下文；生成草稿或写回前会提供可修改计划供你确认。',
+          kind: 'workflow_notice',
+          content: '你可以直接讨论创作问题。当前工作模式为“自动工作”：我会按需读取项目并生成可回退草稿；正式写回前仍由你确认。',
           createdAt: new Date().toISOString(),
         },
       ],
@@ -360,6 +496,7 @@ function createSeedConversations(novelId: string, currentChapter?: Chapter | nul
       {
         id: seedId('msg', 'outline'),
         role: 'assistant',
+        kind: 'workflow_notice',
         content: '这里适合讨论卷纲、章节目标和情节推进。当前版本先保留为本地会话占位。',
         createdAt: new Date().toISOString(),
       },
@@ -381,6 +518,7 @@ function createSeedConversations(novelId: string, currentChapter?: Chapter | nul
       {
         id: seedId('msg', 'character'),
         role: 'assistant',
+        kind: 'workflow_notice',
         content: '这里可以沉淀角色讨论记录，后续会接入真实历史会话。',
         createdAt: new Date().toISOString(),
       },
@@ -402,6 +540,7 @@ function createSeedConversations(novelId: string, currentChapter?: Chapter | nul
       {
         id: seedId('msg', 'world'),
         role: 'assistant',
+        kind: 'workflow_notice',
         content: '世界观会话用于约束设定和术语，避免跨章节冲突。',
         createdAt: new Date().toISOString(),
       },
@@ -423,26 +562,65 @@ function createSeedConversations(novelId: string, currentChapter?: Chapter | nul
       {
         id: seedId('msg', 'reader'),
         role: 'assistant',
+        kind: 'workflow_notice',
         content: '读者模式适合模拟普通读者的理解成本、情绪反馈和追读动力。',
         createdAt: new Date().toISOString(),
       },
     ],
   },
   ];
+  return conversations.map((conversation) => ({
+    ...conversation,
+    chapterScope: { ...defaultScope, chapterIds: [...defaultScope.chapterIds], experts: [...defaultScope.experts] },
+  }));
 }
 
 function toErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error || '未知错误');
-  const timeout = message.match(/HTTP request timeout after (\d+)ms/i);
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  if (rawMessage.includes('CHAPTER_TARGET_UNRESOLVED')) {
+    return '暂时无法确定目标章节。章节目录或上一步解析结果可能尚未就绪，请点击“重新生成计划草稿”继续。';
+  }
+  const timeout = rawMessage.match(/HTTP request timeout after (\d+)ms/i);
   if (timeout) {
     return `模型响应超时（${Math.round(Number(timeout[1]) / 1000)} 秒）。本次消息未生成回复，请重试。`;
   }
-  return message;
+  return formatAiErrorFromUnknown(error, undefined, '请求处理失败，请重试。');
+}
+
+function isChapterTargetUnresolvedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '');
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code || '')
+    : '';
+  return code === 'CHAPTER_TARGET_UNRESOLVED'
+    || message.includes('CHAPTER_TARGET_UNRESOLVED')
+    || message.includes('暂时无法确定目标章节');
 }
 
 function isCancelledError(error: unknown): boolean {
   if (error && typeof error === 'object' && 'code' in error && String((error as { code?: unknown }).code) === 'CANCELLED') return true;
   return /cancelled|canceled|已取消/i.test(error instanceof Error ? error.message : String(error || ''));
+}
+
+function chatFailureFromError(error: unknown): AgentChatFailure {
+  const record = error && typeof error === 'object' ? error as { code?: unknown; details?: unknown } : {};
+  const details = record.details && typeof record.details === 'object' && !Array.isArray(record.details)
+    ? record.details as Record<string, unknown>
+    : {};
+  const code = String(record.code || details.code || 'UNKNOWN');
+  const recoveryRef = typeof details.recoveryRef === 'string' ? details.recoveryRef.trim() : '';
+  const recovery: AgentChatRecoveryDescriptor | undefined = code === 'MODEL_OUTPUT_INVALID' && recoveryRef
+    ? {
+      recoveryRef,
+      recoveryAction: 'repair_model_output',
+    }
+    : undefined;
+  return {
+    code,
+    message: toErrorMessage(error),
+    retryable: true,
+    ...(recovery ? { recovery } : {}),
+  };
 }
 
 function nowId(prefix: string): string {
@@ -489,6 +667,10 @@ function roleLabel(role: AgentRoleMode): string {
   return ROLE_OPTIONS.find((item) => item.id === role)?.label ?? role;
 }
 
+function roleStatusContent(role: AgentRoleMode): string {
+  return `当前角色：${roleLabel(role)}。后续响应与工具链将按此角色执行。`;
+}
+
 function eventSummary(event: AgentRunEvent): string {
   const payload = event.payload ?? {};
   if (typeof payload.summary === 'string') return payload.summary;
@@ -500,6 +682,10 @@ function eventSummary(event: AgentRunEvent): string {
 
 function getActiveApproval(run: AgentRun | null): AgentApprovalRequest | null {
   return getActiveRunApproval(run) as AgentApprovalRequest | null;
+}
+
+function getActiveUserInput(run: AgentRun | null): AgentUserInputRequest | null {
+  return getActiveRunUserInput(run) as AgentUserInputRequest | null;
 }
 
 function isTerminalRun(run: AgentRun | null): boolean {
@@ -514,27 +700,32 @@ function withCurrentRun(conversation: AgentConversation, run: AgentRun): AgentCo
   };
 }
 
-export default function AgentWorkspace({
+function AgentWorkspace({
   novel,
   novelId,
   currentChapter,
-  currentContent,
+  getCurrentContentSnapshot,
   locale,
   theme,
+  isVisible,
+  isFullScreen,
+  attentionRequestId,
+  attentionTargetConversationId,
+  onAttentionChange,
   initialGoal,
   onInitialGoalConsumed,
 }: Props) {
+  const { t } = useTranslation();
   const isDark = theme === 'dark';
   const initialConversations = useMemo(
     () => createSeedConversations(novelId, currentChapter),
     [currentChapter, novelId],
   );
-  const [input, setInput] = useState('');
   const [conversationSearch, setConversationSearch] = useState('');
   const [selectedRole, setSelectedRole] = useState<AgentRoleMode>('team');
   const [roleOptions, setRoleOptions] = useState<RoleOption[]>(ROLE_OPTIONS);
   const [roleMenuOpen, setRoleMenuOpen] = useState(false);
-  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('review_required');
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>('full_control');
   const [approvalMenuOpen, setApprovalMenuOpen] = useState(false);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
@@ -549,52 +740,230 @@ export default function AgentWorkspace({
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('context');
   const [reviewTarget, setReviewTarget] = useState<'draft' | 'report'>('report');
   const [selectedReviewRunId, setSelectedReviewRunId] = useState<string | null>(null);
+  const [draftInspectorSelection, setDraftInspectorSelection] = useState<DraftInspectorSelection | null>(null);
+  const [draftBatchRecords, setDraftBatchRecords] = useState<Record<string, DraftBatchRecord>>({});
+  const draftBatchRecordsRef = useRef<Record<string, DraftBatchRecord>>({});
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('conversation');
   const [conversationDrawerOpen, setConversationDrawerOpen] = useState(false);
-  const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(() => readInspectorVisibility(novelId));
-  const [inspectorOpen, setInspectorOpen] = useState(() => readInspectorVisibility(novelId));
-  const [activeConversationId, setActiveConversationId] = useState(initialConversations[0]?.id ?? 'conv-current-chapter-review');
+  // null means the user has not chosen yet, so fullscreen supplies the default.
+  const inspectorVisibilityPreferenceRef = useRef<boolean | null>(readInspectorVisibilityPreference(novelId));
+  const [inspectorDrawerOpen, setInspectorDrawerOpen] = useState(() => inspectorVisibilityPreferenceRef.current ?? isFullScreen);
+  const [inspectorOpen, setInspectorOpen] = useState(() => inspectorVisibilityPreferenceRef.current ?? isFullScreen);
+  const [inspectorWidth, setInspectorWidth] = useState(() => readInspectorLayout(novelId).width);
+  const [inspectorManuallyResized, setInspectorManuallyResized] = useState(() => readInspectorLayout(novelId).manuallyResized);
+  const [inspectorExpanded, setInspectorExpanded] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [activeConversationId, setActiveConversationId] = useState(
+    () => readActiveConversationId(novelId) ?? initialConversations[0]?.id ?? 'conv-current-chapter-review',
+  );
   const [conversations, setConversations] = useState<AgentConversation[]>(initialConversations);
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>(() => (
+    Object.fromEntries(initialConversations.map((conversation) => [conversation.id, conversation.composerDraft ?? '']))
+  ));
+  const [agentSkills, setAgentSkills] = useState<AgentSkillIndexEntry[]>([]);
+  const [agentSkillModes, setAgentSkillModes] = useState<Record<string, AgentSkillComposerMode | undefined>>({});
+  const [dismissedSkillSlashQuery, setDismissedSkillSlashQuery] = useState<AgentSkillSlashQuery | null>(null);
+  const [activeSkillMenuIndex, setActiveSkillMenuIndex] = useState(0);
+  const [userInputCardDrafts, setUserInputCardDrafts] = useState<Record<string, UserInputCardDraft>>({});
+  const [approvalCardDrafts, setApprovalCardDrafts] = useState<Record<string, ApprovalCardDraft>>({});
+  const [chapterBeatCardDrafts, setChapterBeatCardDrafts] = useState<Record<string, ChapterBeatCardDraft>>({});
   const [isConversationsLoading, setIsConversationsLoading] = useState(true);
   const [health, setHealth] = useState<AgentHealthResult | null>(null);
   const [isWorking, setIsWorking] = useState(false);
+  const [contextSummaryRebuildConversationId, setContextSummaryRebuildConversationId] = useState<string | null>(null);
   const [isRuntimeRecoveryPending, setIsRuntimeRecoveryPending] = useState(false);
   const [pendingRevisionBatch, setPendingRevisionBatch] = useState<{ conversationId: string; plan: RevisionBatchPlan } | null>(null);
   const [revisionTaskCount, setRevisionTaskCount] = useState(0);
   const [revisionTaskRefreshKey, setRevisionTaskRefreshKey] = useState(0);
   const [pendingAgentStatus, setPendingAgentStatus] = useState<AgentPendingStatus | null>(null);
+  const [liveChatActivities, setLiveChatActivities] = useState<{ conversationId: string; events: AgentChatActivityEvent[] } | null>(null);
   const [activeChatRequestId, setActiveChatRequestId] = useState<string | null>(null);
+  const [stoppingChatRequestId, setStoppingChatRequestId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<AgentAttachmentRecord[]>([]);
   const [isAddingAttachment, setIsAddingAttachment] = useState(false);
   const [viewingAttachment, setViewingAttachment] = useState<AgentAttachmentContent | null>(null);
   const activeRunIdRef = useRef<string | null>(null);
+  const disconnectRecoveryRunIdsRef = useRef(new Set<string>());
   const runtimeRecoveryRequestRef = useRef<Promise<AgentHealthResult> | null>(null);
   const sendInFlightRef = useRef(false);
   const activeChatRequestRef = useRef<{ requestId: string; conversationId: string; cancelled: boolean } | null>(null);
+  const liveChatActivitiesRef = useRef<typeof liveChatActivities>(null);
   const subscribedRunIdRef = useRef<string | null>(null);
+  const backgroundSubscribedRunIdsRef = useRef(new Set<string>());
+  const runSubscriptionGenerationRef = useRef(0);
   const lastSequenceRef = useRef(0);
+  const lastSequenceByRunRef = useRef(new Map<string, number>());
+  const queuedRunEventsRef = useRef<AgentRunEvent[]>([]);
+  const runEventFlushTimerRef = useRef<number | null>(null);
   const consumedInitialGoalRef = useRef<string | null>(null);
   const conversationsLoadedRef = useRef(false);
   const loadedConversationNovelIdRef = useRef<string | null>(null);
+  const composerDraftsRef = useRef(composerDrafts);
+  const persistedComposerDraftsRef = useRef<Record<string, string>>({});
+  const lastAttentionRequestIdRef = useRef(0);
+  const wasVisibleRef = useRef(false);
+  const hydratedChapterScopeKeyRef = useRef<string | null>(null);
   const conversationsRef = useRef<AgentConversation[]>(initialConversations);
   const revisionSyncInFlightRef = useRef(new Set<string>());
   const revisionSyncCompletedRef = useRef(new Set<string>());
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
+  const conversationScrollStateRef = useRef(new Map<string, { scrollTop: number; followsLatest: boolean }>());
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
   const followsLatestRef = useRef(true);
   const [followsLatest, setFollowsLatest] = useState(true);
+  const input = composerDrafts[activeConversationId] ?? '';
+  const setInput = useCallback<Dispatch<SetStateAction<string>>>((next) => {
+    setComposerDrafts((current) => {
+      const previous = current[activeConversationId] ?? '';
+      const value = typeof next === 'function' ? next(previous) : next;
+      if (value === previous) return current;
+      const updated = { ...current, [activeConversationId]: value };
+      composerDraftsRef.current = updated;
+      return updated;
+    });
+  }, [activeConversationId]);
+  const activeAgentSkillMode = agentSkillModes[activeConversationId];
+  const agentSkillSlashQuery = useMemo(
+    () => findAgentSkillSlashQuery(input),
+    [activeConversationId, input],
+  );
+  const agentSkillMenuItems = useMemo(
+    () => buildAgentSkillMenuItems(agentSkills, agentSkillSlashQuery?.query ?? ''),
+    [agentSkillSlashQuery?.query, agentSkills],
+  );
+  const agentSkillMenuOpen = Boolean(
+    shouldOpenAgentSkillSlashMenu(agentSkillSlashQuery, dismissedSkillSlashQuery)
+    && !isWorking
+    && !isRuntimeRecoveryPending,
+  );
+
+  useEffect(() => {
+    setActiveSkillMenuIndex(0);
+  }, [activeConversationId, agentSkillSlashQuery?.query]);
+
+  const selectAgentSkillMenuItem = useCallback((item: AgentSkillMenuItem) => {
+    if (!agentSkillSlashQuery) return;
+    const withoutSlash = removeAgentSkillSlashQuery(input, agentSkillSlashQuery);
+    const shortcutSeed = item.kind === 'skill'
+      ? agentSkillShortcutSeed(item.skill.id)
+      : item.kind === 'author'
+        ? '创建一个 Skill：'
+        : '';
+    const nextInput = withoutSlash.trim() || !shortcutSeed ? withoutSlash : shortcutSeed;
+    setInput(nextInput);
+    setAgentSkillModes((current) => ({
+      ...current,
+      [activeConversationId]: item.kind === 'none'
+        ? { kind: 'skill.none' }
+        : item.kind === 'author'
+          ? { kind: 'skill.author' }
+          : { kind: 'skill.use', skill: item.skill },
+    }));
+    setDismissedSkillSlashQuery(null);
+    window.setTimeout(() => {
+      const inputNode = chatInputRef.current;
+      if (!inputNode) return;
+      inputNode.focus();
+      const cursor = shortcutSeed && !withoutSlash.trim()
+        ? nextInput.length
+        : Math.min(agentSkillSlashQuery.start, nextInput.length);
+      inputNode.setSelectionRange(cursor, cursor);
+    }, 0);
+  }, [activeConversationId, agentSkillSlashQuery, input, setInput]);
+
+  const clearActiveAgentSkillMode = useCallback(() => {
+    setAgentSkillModes((current) => ({ ...current, [activeConversationId]: undefined }));
+    chatInputRef.current?.focus();
+  }, [activeConversationId]);
 
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
 
   useEffect(() => {
-    const open = readInspectorVisibility(novelId);
+    composerDraftsRef.current = composerDrafts;
+  }, [composerDrafts]);
+
+  const flushComposerDrafts = useCallback(async (drafts = composerDraftsRef.current) => {
+    const changed = Object.entries(drafts).filter(([conversationId, draft]) => (
+      persistedComposerDraftsRef.current[conversationId] !== draft
+    ));
+    if (changed.length === 0) return;
+    await Promise.all(changed.map(async ([conversationId, composerDraft]) => {
+      await window.db.updateAgentConversationDraft({ conversationId, composerDraft });
+      if (composerDraftsRef.current[conversationId] === composerDraft) {
+        persistedComposerDraftsRef.current[conversationId] = composerDraft;
+      }
+    }));
+  }, []);
+
+  useEffect(() => {
+    const flushBeforeUnload = () => {
+      void flushComposerDrafts().catch((error) => {
+        console.warn('[AgentWorkspace] Failed to flush composer drafts:', error);
+      });
+    };
+    window.addEventListener('beforeunload', flushBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', flushBeforeUnload);
+      flushBeforeUnload();
+    };
+  }, [flushComposerDrafts, novelId]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(activeConversationStorageKey(novelId), activeConversationId);
+    } catch (error) {
+      console.warn('[AgentWorkspace] Failed to persist active conversation:', error);
+    }
+  }, [activeConversationId, novelId]);
+
+  useEffect(() => {
+    if (isVisible) return;
+    setRoleMenuOpen(false);
+    setApprovalMenuOpen(false);
+    setModelMenuOpen(false);
+    setScopeMenuOpen(false);
+    setConversationDrawerOpen(false);
+    setInspectorDrawerOpen(false);
+    setViewingAttachment(null);
+    setDraftInspectorSelection(null);
+    setInspectorExpanded(false);
+  }, [isVisible]);
+
+  useEffect(() => {
+    setDraftInspectorSelection(null);
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    const preference = readInspectorVisibilityPreference(novelId);
+    inspectorVisibilityPreferenceRef.current = preference;
+    const open = preference ?? isFullScreen;
+    const layout = readInspectorLayout(novelId);
     setInspectorOpen(open);
     setInspectorDrawerOpen(open);
+    setInspectorWidth(layout.width);
+    setInspectorManuallyResized(layout.manuallyResized);
+    setInspectorExpanded(false);
   }, [novelId]);
 
+  useEffect(() => {
+    if (inspectorVisibilityPreferenceRef.current !== null) return;
+    setInspectorOpen(isFullScreen);
+    setInspectorDrawerOpen(isFullScreen);
+    if (!isFullScreen) setInspectorExpanded(false);
+  }, [isFullScreen, novelId]);
+
+  useEffect(() => {
+    if (!isVisible) return undefined;
+    setViewportWidth(window.innerWidth);
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [isVisible]);
+
   const setInspectorVisibility = useCallback((open: boolean) => {
+    inspectorVisibilityPreferenceRef.current = open;
     setInspectorOpen(open);
     setInspectorDrawerOpen(open);
     try {
@@ -604,15 +973,120 @@ export default function AgentWorkspace({
     }
   }, [novelId]);
 
+  const closeInspector = useCallback(() => {
+    setInspectorExpanded(false);
+    setInspectorVisibility(false);
+  }, [setInspectorVisibility]);
+
   const openInspector = useCallback((tab: InspectorTab, target?: 'draft' | 'report', runId?: string) => {
+    setDraftInspectorSelection(null);
     if (target) setReviewTarget(target);
     if (tab === 'review' || tab === 'artifacts') setSelectedReviewRunId(runId ?? null);
     setInspectorTab(tab);
+    if (!inspectorManuallyResized) {
+      setInspectorWidth(tab === 'artifacts' || tab === 'review' ? INSPECTOR_ARTIFACT_WIDTH : INSPECTOR_DEFAULT_WIDTH);
+    }
     setConversationDrawerOpen(false);
     setInspectorVisibility(true);
-  }, [setInspectorVisibility]);
+  }, [inspectorManuallyResized, setInspectorVisibility]);
+
+  const openBeatSnapshot = useCallback((
+    runId: string,
+    snapshot: ChapterBeatCheckpointSnapshot,
+    historical: boolean,
+  ) => {
+    setDraftInspectorSelection({
+      kind: 'chapter_beat_snapshot',
+      runId,
+      checkpointId: snapshot.checkpointId,
+      draftBatchId: snapshot.draftBatchId,
+      outlineRevision: snapshot.outlineRevision,
+      beats: snapshot.beats,
+      historical,
+      statusLabel: snapshot.statusLabel,
+    });
+    setReviewTarget('draft');
+    setSelectedReviewRunId(runId);
+    setInspectorTab('review');
+    if (!inspectorManuallyResized) setInspectorWidth(INSPECTOR_ARTIFACT_WIDTH);
+    setConversationDrawerOpen(false);
+    setInspectorVisibility(true);
+  }, [inspectorManuallyResized, setInspectorVisibility]);
+
+  const openDraftBatchInspector = useCallback((
+    runId: string,
+    draftBatchId: string,
+    kind: Exclude<DraftInspectorSelection['kind'], 'chapter_beat_snapshot'>,
+  ) => {
+    setDraftInspectorSelection({ kind, runId, draftBatchId });
+    setReviewTarget('draft');
+    setSelectedReviewRunId(runId);
+    setInspectorTab('review');
+    if (!inspectorManuallyResized) setInspectorWidth(INSPECTOR_ARTIFACT_WIDTH);
+    setConversationDrawerOpen(false);
+    setInspectorVisibility(true);
+  }, [inspectorManuallyResized, setInspectorVisibility]);
+
+  const persistInspectorLayout = useCallback((width: number, manuallyResized: boolean) => {
+    try {
+      localStorage.setItem(inspectorLayoutStorageKey(novelId), JSON.stringify({ width, manuallyResized }));
+    } catch {
+      // Keep the in-memory preference when storage is unavailable.
+    }
+  }, [novelId]);
+
+  const beginInspectorResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (inspectorExpanded || window.innerWidth < 1040) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const startX = event.clientX;
+    const startWidth = inspectorWidth;
+    const leftRailWidth = window.innerWidth > 1180 ? 300 : 0;
+    const maxWidth = Math.max(
+      INSPECTOR_DEFAULT_WIDTH,
+      Math.min(900, Math.floor(window.innerWidth * 0.65), window.innerWidth - leftRailWidth - 420),
+    );
+    let nextWidth = startWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      nextWidth = Math.min(maxWidth, Math.max(INSPECTOR_DEFAULT_WIDTH, Math.round(startWidth + startX - moveEvent.clientX)));
+      setInspectorWidth(nextWidth);
+    };
+    const finishResize = () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', finishResize);
+      document.removeEventListener('pointercancel', finishResize);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      setInspectorManuallyResized(true);
+      persistInspectorLayout(nextWidth, true);
+    };
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', finishResize, { once: true });
+    document.addEventListener('pointercancel', finishResize, { once: true });
+  }, [inspectorExpanded, inspectorWidth, persistInspectorLayout]);
+
+  const resetInspectorWidth = useCallback(() => {
+    const width = inspectorTab === 'artifacts' || inspectorTab === 'review'
+      ? INSPECTOR_ARTIFACT_WIDTH
+      : INSPECTOR_DEFAULT_WIDTH;
+    setInspectorWidth(width);
+    setInspectorManuallyResized(false);
+    persistInspectorLayout(width, false);
+  }, [inspectorTab, persistInspectorLayout]);
+
+  const selectInspectorTab = useCallback((tab: InspectorTab) => {
+    setInspectorTab(tab);
+    if (!inspectorManuallyResized) {
+      setInspectorWidth(tab === 'artifacts' || tab === 'review' ? INSPECTOR_ARTIFACT_WIDTH : INSPECTOR_DEFAULT_WIDTH);
+    }
+  }, [inspectorManuallyResized]);
 
   useEffect(() => {
+    if (!isVisible) return undefined;
     let cancelled = false;
     void window.db.getVolumes(novelId).then((nextVolumes) => {
       if (cancelled) return;
@@ -638,13 +1112,19 @@ export default function AgentWorkspace({
 
   useEffect(() => {
     if (chapterScope.kind !== 'current_chapter') return;
-    setChapterScope((current) => ({
-      ...current,
+    const nextScope: AgentChapterScopeSelection = {
+      ...chapterScope,
       volumeId: currentChapter?.volumeId,
       chapterIds: currentChapter?.id ? [currentChapter.id] : [],
       anchorChapterId: currentChapter?.id,
-    }));
-  }, [chapterScope.kind, currentChapter?.id, currentChapter?.volumeId]);
+    };
+    setChapterScope(nextScope);
+    setConversations((current) => current.map((conversation) => (
+      conversation.id === activeConversationId
+        ? { ...conversation, chapterScope: nextScope, updatedAt: new Date().toISOString() }
+        : conversation
+    )));
+  }, [activeConversationId, chapterScope.kind, currentChapter?.id, currentChapter?.volumeId]);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0],
@@ -683,7 +1163,7 @@ export default function AgentWorkspace({
     }
     setIsAddingAttachment(true);
     try {
-      await window.db.upsertAgentConversation(activeConversation);
+      await window.db.upsertAgentConversation(conversationForPersistence(activeConversation));
       const attachment = await window.agentAttachments.select({
         novelId,
         conversationId: activeConversation.id,
@@ -734,6 +1214,13 @@ export default function AgentWorkspace({
 
   const activePlan = activeConversation?.plan ?? null;
   const activeRun = activeConversation?.run ?? null;
+  const composerAction = resolveAgentComposerAction({
+    activeChatRequestId,
+    stoppingChatRequestId,
+    runStatus: activeRun?.status,
+    draftOperationStatus: activeRun?.draftOperationStatus,
+  });
+  const composerTaskActive = composerAction.mode !== 'send';
   const conversationRuns = useMemo(() => (
     activeRun
       ? mergeAgentRunHistory(activeConversation?.runs, activeRun)
@@ -743,17 +1230,148 @@ export default function AgentWorkspace({
     ? conversationRuns.find((run) => run.runId === selectedReviewRunId) ?? activeRun
     : activeRun;
   const activeApproval = getActiveApproval(activeRun);
+  const activeUserInput = activeConversation?.pendingUserInput ?? getActiveUserInput(activeRun);
   const activeError = activeConversation?.error ?? '';
+  const recoverablePlanGoal = useMemo(() => {
+    if (activeConversation?.suggestedGoal) return activeConversation.suggestedGoal;
+    if (!activeConversation || !isChapterTargetUnresolvedError(activeError) || activePlan) return null;
+    for (let index = activeConversation.messages.length - 1; index >= 0; index -= 1) {
+      const message = activeConversation.messages[index];
+      if (message.role !== 'user' || !message.content.trim()) continue;
+      return buildAgentPlanGoal(message.content, activeConversation.messages.slice(0, index));
+    }
+    return null;
+  }, [activeConversation, activeError, activePlan]);
+  const recoverableChatMessage = useMemo(() => {
+    if (!activeConversation || !activeError || recoverablePlanGoal || activeRun) return null;
+    for (let index = activeConversation.messages.length - 1; index >= 0; index -= 1) {
+      const message = activeConversation.messages[index];
+      if (message.role !== 'user' || !message.content.trim()) continue;
+      if (message.failure) return message;
+      if (activePlan) return null;
+      const hasAssistantResponse = activeConversation.messages.slice(index + 1).some((item) => (
+        item.role === 'assistant' && item.kind !== 'role_status'
+      ));
+      return hasAssistantResponse ? null : message;
+    }
+    return null;
+  }, [activeConversation, activeError, activePlan, activeRun, recoverablePlanGoal]);
   const isAwaitingChatResponse = pendingAgentStatus?.conversationId === activeConversation?.id;
   const pendingStatusLabel = pendingAgentStatus ? pendingAgentStatusLabel(pendingAgentStatus) : '';
   const chapterScopeReady = isChapterScopeSelectionValid(chapterScope);
-  const activeTimeline = useMemo(() => buildAgentConversationTimeline({
+  const activeTimeline = useMemo(() => isVisible ? buildAgentConversationTimeline({
     messages: activeConversation?.messages ?? [],
     runs: activeConversation?.runs,
     currentRun: activeRun,
     currentPlan: activePlan,
+    resolutions: activeConversation?.userInputResolutions,
     updatedAt: activeConversation?.updatedAt ?? new Date().toISOString(),
-  }), [activeConversation?.messages, activeConversation?.runs, activeConversation?.updatedAt, activePlan, activeRun]);
+  }) : [], [activeConversation?.messages, activeConversation?.runs, activeConversation?.updatedAt, activeConversation?.userInputResolutions, activePlan, activeRun, isVisible]);
+
+  const timelineDraftBatches = useMemo(() => {
+    const byId = new Map<string, { draftBatchId: string; live: boolean; refreshKey: string }>();
+    activeTimeline.forEach((entry) => {
+      if (entry.kind !== 'task' || !entry.run) return;
+      const timelineRun = entry.run as AgentRun;
+      const chapterBeatTimeline = projectChapterBeatTimeline(timelineRun);
+      const latestCheckpoint = [...chapterBeatTimeline].reverse().find((item) => item.kind === 'checkpoint');
+      const checkpointBatchId = latestCheckpoint?.kind === 'checkpoint' ? latestCheckpoint.approval.draftBatchId : undefined;
+      const draftBatchId = timelineRun.draftBatchId || timelineRun.pendingApproval?.draftBatchId || checkpointBatchId;
+      if (!draftBatchId) return;
+      const operationLive = ['queued', 'running_generation', 'retry_wait', 'running_postprocess', 'committing', 'cancel_requested']
+        .includes(timelineRun.draftOperationStatus || '');
+      const live = operationLive || ['running', 'waiting_approval', 'waiting_user_input', 'cancelling'].includes(timelineRun.status);
+      byId.set(draftBatchId, {
+        draftBatchId,
+        live,
+        refreshKey: `${timelineRun.status}:${timelineRun.draftOperationStatus || ''}:${timelineRun.draftOperationVersion || 0}:${timelineRun.events.length}`,
+      });
+    });
+    return [...byId.values()];
+  }, [activeTimeline]);
+
+  const rememberDraftBatch = useCallback((batch: DraftBatchRecord) => {
+    draftBatchRecordsRef.current = { ...draftBatchRecordsRef.current, [batch.draftBatchId]: batch };
+    setDraftBatchRecords((current) => current[batch.draftBatchId]?.version === batch.version
+      && current[batch.draftBatchId]?.updatedAt === batch.updatedAt
+      ? current
+      : { ...current, [batch.draftBatchId]: batch });
+  }, []);
+
+  useEffect(() => {
+    if (!draftInspectorSelection || draftInspectorSelection.kind === 'chapter_beat_snapshot') return;
+    const batch = draftBatchRecords[draftInspectorSelection.draftBatchId];
+    if (!batch) return;
+    const selectedRun = conversationRuns.find((run) => run.runId === draftInspectorSelection.runId);
+    const selectedConversationState = selectedRun ? projectDraftBatchConversationState({
+      run: selectedRun,
+      batch,
+      chapterBeatTimeline: projectChapterBeatTimeline(selectedRun),
+    }) : null;
+    const nextKind: Exclude<DraftInspectorSelection['kind'], 'chapter_beat_snapshot'> = selectedConversationState?.primaryView === 'draft_batch_review'
+      || selectedConversationState?.primaryView === 'draft_batch_interrupted'
+      || selectedConversationState?.primaryView === 'draft_batch_progress'
+      ? selectedConversationState.primaryView
+      : draftInspectorSelection.kind;
+    if (draftInspectorSelection.kind !== nextKind) {
+      setDraftInspectorSelection({ ...draftInspectorSelection, kind: nextKind });
+    }
+  }, [conversationRuns, draftBatchRecords, draftInspectorSelection]);
+
+  useEffect(() => {
+    if (!isVisible || timelineDraftBatches.length === 0) return undefined;
+    let cancelled = false;
+    const load = async (draftBatchIds: string[]) => {
+      await Promise.all(draftBatchIds.map(async (draftBatchId) => {
+        try {
+          const batch = await window.automation.invoke('draft.batch.get', { draftBatchId }, 'desktop-ui') as DraftBatchRecord | null;
+          if (!cancelled && batch) rememberDraftBatch(batch);
+        } catch (error) {
+          if (!cancelled && !draftBatchRecordsRef.current[draftBatchId]) {
+            console.warn('[AgentWorkspace] Failed to load draft batch summary:', error);
+          }
+        }
+      }));
+    };
+    void load(timelineDraftBatches.map((item) => item.draftBatchId));
+    const intervalId = window.setInterval(() => {
+      const activeIds = timelineDraftBatches.flatMap((item) => {
+        const batch = draftBatchRecordsRef.current[item.draftBatchId];
+        const batchLive = batch && ['outline_draft', 'ready_to_generate', 'generating'].includes(batch.status);
+        return item.live || batchLive ? [item.draftBatchId] : [];
+      });
+      if (activeIds.length > 0) void load(activeIds);
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeConversation?.id, isVisible, rememberDraftBatch, timelineDraftBatches]);
+
+  useEffect(() => {
+    if (isConversationsLoading || !activeConversation || volumes.length === 0) return;
+    const planCandidates: Array<{ planId?: string; plan: unknown }> = [
+      { planId: activePlan?.planId, plan: activePlan },
+      { planId: activeRun?.planSnapshot?.planId, plan: activeRun?.planSnapshot },
+      ...conversationRuns.map((run) => ({ planId: run.planSnapshot?.planId ?? run.planId, plan: run.planSnapshot })),
+    ];
+    const recovered = planCandidates
+      .map((candidate) => ({ ...candidate, scope: chapterScopeSelectionFromPlan(candidate.plan) }))
+      .find((candidate) => candidate.scope);
+    const hydrationKey = `${novelId}:${activeConversation.id}:${JSON.stringify(activeConversation.chapterScope ?? null)}:${recovered?.planId ?? 'default'}`;
+    if (hydratedChapterScopeKeyRef.current === hydrationKey) return;
+    hydratedChapterScopeKeyRef.current = hydrationKey;
+    const orderedChapterIds = volumes.flatMap((volume) => volume.chapters.map((chapter) => chapter.id));
+    const selection = activeConversation.chapterScope
+      ?? recovered?.scope
+      ?? createDefaultChapterScope(currentChapter?.id, currentChapter?.volumeId);
+    setChapterScope(normalizeChapterScopeSelection(
+      selection,
+      orderedChapterIds,
+      currentChapter?.id,
+      currentChapter?.volumeId,
+    ));
+  }, [activeConversation, activePlan, activeRun, conversationRuns, currentChapter?.id, currentChapter?.volumeId, isConversationsLoading, novelId, volumes]);
   const timelineActivityKey = useMemo(() => [
     activeConversation?.id ?? '',
     activeTimeline[activeTimeline.length - 1]?.key ?? '',
@@ -761,10 +1379,12 @@ export default function AgentWorkspace({
     activeRun?.events.length ?? 0,
     activeRun?.status ?? '',
     activeRun?.pendingApproval?.checkpointId ?? '',
+    activeRun?.pendingUserInput?.requestId ?? '',
+    activeConversation?.pendingUserInput?.requestId ?? '',
     activePlan?.steps.map((step) => `${step.stepId}:${step.status}`).join('|') ?? '',
     isAwaitingChatResponse ? `awaiting-chat-response:${pendingAgentStatus?.phase}` : '',
     activeError,
-  ].join(':'), [activeConversation?.id, activeConversation?.messages.length, activeError, activePlan?.steps, activeRun?.events.length, activeRun?.pendingApproval?.checkpointId, activeRun?.status, activeTimeline, isAwaitingChatResponse, pendingAgentStatus?.phase]);
+  ].join(':'), [activeConversation?.id, activeConversation?.messages.length, activeConversation?.pendingUserInput?.requestId, activeError, activePlan?.steps, activeRun?.events.length, activeRun?.pendingApproval?.checkpointId, activeRun?.pendingUserInput?.requestId, activeRun?.status, activeTimeline, isAwaitingChatResponse, pendingAgentStatus?.phase]);
 
   const setPendingPhase = useCallback((conversationId: string, phase: AgentPendingPhase) => {
     setPendingAgentStatus({ conversationId, phase });
@@ -774,9 +1394,23 @@ export default function AgentWorkspace({
     setPendingAgentStatus((current) => current?.conversationId === conversationId ? null : current);
   }, []);
 
+  useEffect(() => {
+    liveChatActivitiesRef.current = liveChatActivities;
+  }, [liveChatActivities]);
+
   useEffect(() => window.agent.onChatProgress((progress) => {
     const active = activeChatRequestRef.current;
     if (!active || progress.requestId !== active.requestId || active.cancelled) return;
+    if (progress.type && progress.eventId && progress.stage && progress.displayName && progress.status && progress.createdAt) {
+      const event = progress as AgentChatActivityEvent & { requestId: string };
+      setLiveChatActivities((current) => ({
+        conversationId: active.conversationId,
+        events: [
+          ...(current?.conversationId === active.conversationId ? current.events : []).filter((item) => item.eventId !== event.eventId),
+          event,
+        ].sort((left, right) => left.sequence - right.sequence),
+      }));
+    }
     if (progress.phase === 'cancelled') {
       clearPendingStatus(active.conversationId);
       return;
@@ -809,9 +1443,15 @@ export default function AgentWorkspace({
     setFollowsLatest(true);
     requestAnimationFrame(() => {
       const container = conversationScrollRef.current;
-      if (container) container.scrollTop = container.scrollHeight;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+        conversationScrollStateRef.current.set(activeConversationId, {
+          scrollTop: container.scrollTop,
+          followsLatest: true,
+        });
+      }
     });
-  }, []);
+  }, [activeConversationId]);
 
   const handleConversationScroll = useCallback(() => {
     const container = conversationScrollRef.current;
@@ -819,19 +1459,61 @@ export default function AgentWorkspace({
     const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= 96;
     followsLatestRef.current = isNearBottom;
     setFollowsLatest(isNearBottom);
-  }, []);
+    conversationScrollStateRef.current.set(activeConversationId, {
+      scrollTop: container.scrollTop,
+      followsLatest: isNearBottom,
+    });
+  }, [activeConversationId]);
 
   useLayoutEffect(() => {
-    if (!followsLatestRef.current) return;
+    if (!isVisible || !followsLatestRef.current) return;
     const container = conversationScrollRef.current;
     if (container) container.scrollTop = container.scrollHeight;
-  }, [timelineActivityKey]);
+  }, [isVisible, timelineActivityKey]);
 
   useLayoutEffect(() => {
-    scrollToLatest();
-  }, [activeConversation?.id, scrollToLatest]);
+    if (!isVisible || !activeConversation?.id) return undefined;
+    const conversationId = activeConversation.id;
+    const saved = conversationScrollStateRef.current.get(conversationId);
+    const shouldFollowLatest = saved?.followsLatest ?? true;
+    followsLatestRef.current = shouldFollowLatest;
+    setFollowsLatest(shouldFollowLatest);
+    const frame = requestAnimationFrame(() => {
+      const container = conversationScrollRef.current;
+      if (!container) return;
+      container.scrollTop = shouldFollowLatest ? container.scrollHeight : saved?.scrollTop ?? 0;
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      const container = conversationScrollRef.current;
+      if (!container) return;
+      conversationScrollStateRef.current.set(conversationId, {
+        scrollTop: container.scrollTop,
+        followsLatest: followsLatestRef.current,
+      });
+    };
+  }, [activeConversation?.id, isVisible]);
 
   const explicitChapterScope = useMemo(() => chapterScopePayload(chapterScope), [chapterScope]);
+
+  const chapterCatalog = useMemo(() => [...volumes]
+    .sort((a, b) => a.order - b.order)
+    .flatMap((volume) => [...volume.chapters]
+      .sort((a, b) => a.order - b.order)
+      .map((chapter) => ({
+        chapterId: chapter.id,
+        title: chapter.title,
+        chapterOrder: chapter.order,
+        volumeId: volume.id,
+        volumeTitle: volume.title,
+        volumeOrder: volume.order,
+      }))), [volumes]);
+
+  const editorSelection = useMemo(() => ({
+    chapterId: currentChapter?.id,
+    volumeId: currentChapter?.volumeId,
+    chapterTitle: currentChapter?.title,
+  }), [currentChapter?.id, currentChapter?.title, currentChapter?.volumeId]);
 
   const contextPayload = useMemo(() => ({
     novelId,
@@ -841,13 +1523,10 @@ export default function AgentWorkspace({
     chapterTitle: currentChapter?.title,
     locale,
     origin: 'desktop-ui',
+    editorSelection,
+    chapterCatalog,
     chapterScope: explicitChapterScope,
-  }), [currentChapter?.id, currentChapter?.title, currentChapter?.volumeId, explicitChapterScope, locale, novel?.title, novelId]);
-
-  const currentContentText = useMemo(
-    () => extractReadableText(currentContent),
-    [currentContent],
-  );
+  }), [chapterCatalog, currentChapter?.id, currentChapter?.title, currentChapter?.volumeId, editorSelection, explicitChapterScope, locale, novel?.title, novelId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -855,9 +1534,18 @@ export default function AgentWorkspace({
     conversationsLoadedRef.current = false;
     if (shouldShowLoader) setIsConversationsLoading(true);
     setConversationSearch('');
+    setUserInputCardDrafts({});
+    setApprovalCardDrafts({});
+    setChapterBeatCardDrafts({});
+    const previousSubscriptions = new Set(backgroundSubscribedRunIdsRef.current);
+    if (subscribedRunIdRef.current) previousSubscriptions.add(subscribedRunIdRef.current);
+    runSubscriptionGenerationRef.current += 1;
+    previousSubscriptions.forEach((runId) => void window.agent.unsubscribeRun(runId));
     activeRunIdRef.current = null;
     subscribedRunIdRef.current = null;
+    backgroundSubscribedRunIdsRef.current.clear();
     lastSequenceRef.current = 0;
+    lastSequenceByRunRef.current.clear();
 
     void (async () => {
       try {
@@ -866,14 +1554,28 @@ export default function AgentWorkspace({
           ? stored.map((conversation) => ({ ...conversation, novelId }))
           : createSeedConversations(novelId, currentChapter);
         if (cancelled) return;
+        const nextDrafts = Object.fromEntries(nextConversations.map((conversation) => [
+          conversation.id,
+          conversation.composerDraft ?? '',
+        ]));
+        const storedActiveConversationId = readActiveConversationId(novelId);
+        const nextActiveConversationId = storedActiveConversationId
+          && nextConversations.some((conversation) => conversation.id === storedActiveConversationId)
+          ? storedActiveConversationId
+          : nextConversations[0]?.id ?? 'conv-current-chapter-review';
         setConversations(nextConversations);
-        setActiveConversationId(nextConversations[0]?.id ?? 'conv-current-chapter-review');
+        persistedComposerDraftsRef.current = nextDrafts;
+        setComposerDrafts(nextDrafts);
+        setActiveConversationId(nextActiveConversationId);
       } catch (err) {
         console.warn('[AgentWorkspace] Failed to load agent conversations:', err);
         const fallback = createSeedConversations(novelId, currentChapter);
         if (cancelled) return;
+        const fallbackDrafts = Object.fromEntries(fallback.map((conversation) => [conversation.id, '']));
         setConversations(fallback);
-        setActiveConversationId(fallback[0]?.id ?? 'conv-current-chapter-review');
+        persistedComposerDraftsRef.current = fallbackDrafts;
+        setComposerDrafts(fallbackDrafts);
+        setActiveConversationId(readActiveConversationId(novelId) ?? fallback[0]?.id ?? 'conv-current-chapter-review');
       } finally {
         if (!cancelled) {
           conversationsLoadedRef.current = true;
@@ -893,13 +1595,31 @@ export default function AgentWorkspace({
     void (async () => {
       try {
         await Promise.all(conversations.map((conversation) => (
-          window.db.upsertAgentConversation({ ...conversation, novelId: conversation.novelId || novelId })
+          window.db.upsertAgentConversation(conversationForPersistence({
+            ...conversation,
+            novelId: conversation.novelId || novelId,
+            composerDraft: composerDraftsRef.current[conversation.id] ?? conversation.composerDraft ?? '',
+          }))
         )));
       } catch (err) {
         console.warn('[AgentWorkspace] Failed to save agent conversations:', err);
       }
     })();
   }, [conversations, novelId]);
+
+  useEffect(() => {
+    if (!conversationsLoadedRef.current) return undefined;
+    const changed = Object.fromEntries(Object.entries(composerDrafts).filter(([conversationId, draft]) => (
+      persistedComposerDraftsRef.current[conversationId] !== draft
+    )));
+    if (Object.keys(changed).length === 0) return undefined;
+    const timer = window.setTimeout(() => {
+      void flushComposerDrafts(changed).catch((error) => {
+        console.warn('[AgentWorkspace] Failed to persist composer drafts:', error);
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [composerDrafts, flushComposerDrafts]);
 
   const updateConversation = useCallback((
     conversationId: string,
@@ -914,6 +1634,178 @@ export default function AgentWorkspace({
     updater: (conversation: AgentConversation) => AgentConversation,
   ) => {
     updateConversation(activeConversationId, updater);
+  }, [activeConversationId, updateConversation]);
+
+  const rebuildContextSummary = useCallback(async (conversationId: string) => {
+    if (!conversationId || contextSummaryRebuildConversationId) return;
+    const currentSummary = conversationsRef.current.find((item) => item.id === conversationId)?.contextSummary;
+    const previousGeneration = currentSummary?.version === 'agent-conversation-summary-v2'
+      ? currentSummary.generation
+      : 0;
+    const refreshFromStore = async () => {
+      const stored = await window.db.getAgentConversations(novelId);
+      const authoritative = stored.find((item) => item.id === conversationId);
+      if (!authoritative) return null;
+      updateConversation(conversationId, (conversation) => ({
+        ...conversation,
+        contextSummary: authoritative.contextSummary ?? null,
+      }));
+      return authoritative.contextSummary ?? null;
+    };
+    setContextSummaryRebuildConversationId(conversationId);
+    try {
+      const result = await window.ai.rebuildAgentContextSummary(conversationId);
+      if (!result.ok) throw new Error(result.diagnostics.failureCode || '上下文摘要重建失败');
+      if (result.status === 'completed') {
+        await refreshFromStore();
+        setContextSummaryRebuildConversationId(null);
+        toast.success(`上下文摘要已重建为 generation ${result.generation}`);
+        return;
+      }
+      toast.success('上下文摘要已进入后台质量重建');
+      void (async () => {
+        const deadline = Date.now() + 180_000;
+        try {
+          while (Date.now() < deadline) {
+            await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+            const summary = await refreshFromStore();
+            if (summary?.version === 'agent-conversation-summary-v2'
+              && summary.generation > previousGeneration) {
+              toast.success(`上下文摘要已重建为 generation ${summary.generation}`);
+              return;
+            }
+          }
+          toast.error('上下文摘要后台重建未在时限内完成');
+        } catch (error) {
+          toast.error(toErrorMessage(error));
+        } finally {
+          setContextSummaryRebuildConversationId((current) => current === conversationId ? null : current);
+        }
+      })();
+    } catch (error) {
+      setContextSummaryRebuildConversationId(null);
+      toast.error(toErrorMessage(error));
+    }
+  }, [contextSummaryRebuildConversationId, novelId, updateConversation]);
+
+  const attentionSummary = useMemo(
+    () => projectAgentWorkspaceAttention(conversations),
+    [conversations],
+  );
+
+  useEffect(() => {
+    onAttentionChange(attentionSummary);
+  }, [attentionSummary, onAttentionChange]);
+
+  useEffect(() => {
+    if (!isVisible || attentionRequestId <= lastAttentionRequestIdRef.current) return;
+    lastAttentionRequestIdRef.current = attentionRequestId;
+    const current = conversations.find((conversation) => conversation.id === activeConversationId);
+    const currentKind = current ? agentConversationAttentionKind(current) : 'idle';
+    const currentHasBlockingDecision = currentKind === 'waiting_user_input' || currentKind === 'waiting_approval';
+    const targetConversationId = currentHasBlockingDecision
+      ? current?.id
+      : attentionTargetConversationId;
+    if (!targetConversationId || targetConversationId === activeConversationId) {
+      requestAnimationFrame(scrollToLatest);
+      return;
+    }
+    const target = conversations.find((conversation) => conversation.id === targetConversationId);
+    if (!target) return;
+    setActiveConversationId(target.id);
+    setSelectedRole(target.role);
+    setInspectorTab(target.run?.draftSessionId || target.run?.draftBatchId ? 'review' : 'context');
+    setWorkspaceView('conversation');
+    requestAnimationFrame(scrollToLatest);
+  }, [activeConversationId, attentionRequestId, attentionTargetConversationId, conversations, isVisible, scrollToLatest]);
+
+  useEffect(() => {
+    if (!isVisible || !activeConversation?.run) return;
+    const run = activeConversation.run;
+    const attentionKind = agentConversationAttentionKind(activeConversation);
+    if (!['failed', 'review_ready'].includes(attentionKind)) return;
+    if (activeConversation.attentionAcknowledgedRunId === run.runId) return;
+    updateConversation(activeConversation.id, (conversation) => ({
+      ...conversation,
+      attentionAcknowledgedRunId: run.runId,
+    }));
+    void window.db.acknowledgeAgentConversationRun({
+      conversationId: activeConversation.id,
+      runId: run.runId,
+    }).catch((error) => {
+      console.warn('[AgentWorkspace] Failed to acknowledge Agent run:', error);
+    });
+  }, [activeConversation?.attentionAcknowledgedRunId, activeConversation?.id, activeConversation?.run, isVisible, updateConversation]);
+
+  useEffect(() => {
+    const enteringAgent = isVisible && !wasVisibleRef.current;
+    wasVisibleRef.current = isVisible;
+    if (!enteringAgent || !conversationsLoadedRef.current) return;
+    const liveRuns = conversationsRef.current
+      .filter((conversation) => conversation.run && (
+        ['running', 'cancelling', 'waiting_approval', 'waiting_user_input'].includes(conversation.run.status)
+        || (
+          conversation.run.status === 'failed'
+          && conversation.run.recovery?.failureKind === 'local_transform_failed'
+        )
+      ))
+      .map((conversation) => ({ conversationId: conversation.id, run: conversation.run as AgentRun }));
+    if (liveRuns.length === 0) return;
+    void Promise.all(liveRuns.map(async ({ conversationId, run }) => ({
+      conversationId,
+      run,
+      status: await window.agent.runStatus({ runId: run.runId }),
+    }))).then((results) => {
+      setConversations((current) => current.map((conversation) => {
+        const result = results.find((candidate) => candidate.conversationId === conversation.id);
+        if (!result || !conversation.run || conversation.run.runId !== result.run.runId) return conversation;
+        const { status } = result;
+        const nextRun: AgentRun = {
+          ...conversation.run,
+          status: status.status,
+          currentStepId: status.currentStepId,
+          progress: status.totalSteps > 0 ? status.completedSteps / status.totalSteps : conversation.run.progress,
+          draftSessionId: status.draftSessionId,
+          draftBatchId: status.draftBatchId,
+          draftOperationId: status.draftOperationId,
+          draftOperationKey: status.draftOperationKey,
+          draftOperationStatus: status.draftOperationStatus,
+          draftOperationVersion: status.draftOperationVersion,
+          artifacts: status.artifacts,
+          pendingApproval: status.pendingApproval
+            ?? (status.status === 'waiting_approval' ? conversation.run.pendingApproval : null),
+          pendingUserInput: status.pendingUserInput
+            ?? (status.status === 'waiting_user_input' ? conversation.run.pendingUserInput : null),
+          retryOfRunId: status.retryOfRunId,
+          retryRootRunId: status.retryRootRunId,
+          retryAttempt: status.retryAttempt,
+          failureRevision: status.failureRevision,
+          completionKind: status.completionKind,
+          recovery: status.recovery,
+        };
+        return {
+          ...withCurrentRun(conversation, nextRun),
+          pendingUserInput: status.pendingUserInput
+            ?? (status.status === 'waiting_user_input' ? conversation.pendingUserInput : null),
+        };
+      }));
+    }).catch((error) => {
+      console.warn('[AgentWorkspace] Failed to reconcile live Agent runs:', error);
+    });
+  }, [isVisible]);
+
+  const changeChapterScope = useCallback((selection: AgentChapterScopeSelection) => {
+    const snapshot: AgentChapterScopeSelection = {
+      ...selection,
+      chapterIds: [...selection.chapterIds],
+      experts: [...selection.experts],
+    };
+    setChapterScope(snapshot);
+    updateConversation(activeConversationId, (conversation) => ({
+      ...conversation,
+      chapterScope: snapshot,
+      updatedAt: new Date().toISOString(),
+    }));
   }, [activeConversationId, updateConversation]);
 
   const updateArtifactStatus = useCallback((draftSessionId: string, status: AgentArtifact['status']) => {
@@ -947,23 +1839,34 @@ export default function AgentWorkspace({
 
   const updateArtifactReview = useCallback((artifactId: string, result: ArtifactReviewSubmitResult) => {
     updateActiveConversation((conversation) => {
-      if (!conversation.run) return conversation;
-      const run: AgentRun = {
-        ...conversation.run,
-        artifacts: (conversation.run.artifacts ?? []).map((artifact) => (
-          artifact.artifactId === artifactId
-            ? {
-              ...artifact,
-              reviewStatus: result.review.reviewStatus,
-              reviewRevision: result.review.reviewRevision,
-              reviewDecisions: result.review.decisions,
-              reviewStaleChapterIds: result.review.staleChapterIds,
-              reviewedAt: result.review.reviewedAt,
-            }
-            : artifact
-        )),
+      const updateRun = (run: AgentRun | null): AgentRun | null => {
+        if (!run) return null;
+        const hasArtifact = (run.artifacts ?? []).some((artifact) => artifact.artifactId === artifactId);
+        if (!hasArtifact) return run;
+        return {
+          ...run,
+          artifacts: (run.artifacts ?? []).map((artifact) => (
+            artifact.artifactId === artifactId
+              ? {
+                ...artifact,
+                reviewStatus: result.review.reviewStatus,
+                reviewRevision: result.review.reviewRevision,
+                reviewDecisions: result.review.decisions,
+                reviewStaleChapterIds: result.review.staleChapterIds,
+                reviewedAt: result.review.reviewedAt,
+              }
+              : artifact
+          )),
+        };
       };
-      return { ...withCurrentRun(conversation, run), updatedAt: new Date().toISOString() };
+      const run = updateRun(conversation.run);
+      const runs = (conversation.runs ?? []).map((item) => updateRun(item) ?? item);
+      return {
+        ...conversation,
+        run,
+        runs: run ? mergeAgentRunHistory(runs, run) : runs,
+        updatedAt: new Date().toISOString(),
+      };
     });
     setRevisionTaskRefreshKey((current) => current + 1);
   }, [updateActiveConversation]);
@@ -1058,11 +1961,27 @@ export default function AgentWorkspace({
   const selectRoleMode = useCallback((role: AgentRoleMode) => {
     setSelectedRole(role);
     setRoleMenuOpen(false);
-    updateActiveConversation((conversation) => ({
-      ...conversation,
-      role,
-      updatedAt: new Date().toISOString(),
-    }));
+    updateActiveConversation((conversation) => {
+      const updatedAt = new Date().toISOString();
+      const roleStatusIndex = conversation.messages.findIndex((message) => (
+        inferAgentConversationMessageKind(message) === 'role_status'
+      ));
+      const roleStatus: ConversationMessage = {
+        id: roleStatusIndex >= 0 ? conversation.messages[roleStatusIndex].id : nowId('msg'),
+        role: 'assistant',
+        kind: 'role_status',
+        content: roleStatusContent(role),
+        createdAt: updatedAt,
+      };
+      return {
+        ...conversation,
+        role,
+        updatedAt,
+        messages: roleStatusIndex >= 0
+          ? conversation.messages.map((message, index) => index === roleStatusIndex ? roleStatus : message)
+          : [...conversation.messages, roleStatus],
+      };
+    });
   }, [updateActiveConversation]);
 
   const refreshHealth = useCallback(async (): Promise<AgentHealthResult> => {
@@ -1086,6 +2005,16 @@ export default function AgentWorkspace({
       setRoleOptions(ROLE_OPTIONS);
     }
   }, [contextPayload, locale]);
+
+  const refreshAgentSkills = useCallback(async () => {
+    try {
+      const skills = await window.agent.skills({ novelId, locale, context: contextPayload });
+      setAgentSkills(skills.filter((skill) => skill.enabled));
+    } catch (err) {
+      console.warn('[AgentWorkspace] Failed to load Agent Skills:', err);
+      setAgentSkills([]);
+    }
+  }, [contextPayload, locale, novelId]);
 
   const ensureRuntimeReady = useCallback(async (forceRestart = false): Promise<AgentHealthResult> => {
     if (runtimeRecoveryRequestRef.current) return runtimeRecoveryRequestRef.current;
@@ -1138,10 +2067,11 @@ export default function AgentWorkspace({
     if (result.ok) {
       toast.success('Runtime 已恢复');
       void refreshRoles();
+      void refreshAgentSkills();
       return;
     }
     toast.error(result.message || 'Runtime 恢复失败');
-  }, [ensureRuntimeReady, isRuntimeRecoveryPending, refreshRoles]);
+  }, [ensureRuntimeReady, isRuntimeRecoveryPending, refreshAgentSkills, refreshRoles]);
 
   const refreshAiSettings = useCallback(async () => {
     try {
@@ -1155,6 +2085,7 @@ export default function AgentWorkspace({
   }, []);
 
   useEffect(() => {
+    if (!isVisible) return undefined;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
@@ -1173,12 +2104,14 @@ export default function AgentWorkspace({
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [refreshHealth]);
+  }, [isVisible, refreshHealth]);
 
   useEffect(() => {
+    if (!isVisible) return;
     void refreshRoles();
+    void refreshAgentSkills();
     void refreshAiSettings();
-  }, [refreshAiSettings, refreshRoles]);
+  }, [isVisible, refreshAgentSkills, refreshAiSettings, refreshRoles]);
 
   const usePresetTask = useCallback((role: AgentRoleMode, preset: AgentPresetTask) => {
     selectRoleMode(role);
@@ -1199,7 +2132,7 @@ export default function AgentWorkspace({
     setModelError('');
     try {
       const saved = await window.ai.updateSettings({
-        http: { ...aiSettings.http, model },
+        http: { ...aiSettings.http, model, contextWindowTokens: 0 },
       });
       setAiSettings(saved);
       setModelDraft(saved.http.model);
@@ -1214,10 +2147,45 @@ export default function AgentWorkspace({
     }
   }, [aiSettings, modelDraft]);
 
-  const applyRunEvent = useCallback((event: AgentRunEvent) => {
-    if (activeRunIdRef.current && event.runId !== activeRunIdRef.current) return;
-    if (!shouldApplyRunSequence(event.sequence, lastSequenceRef.current)) return;
-    lastSequenceRef.current = event.sequence;
+  const subscribeRun = useCallback(async (runId: string, afterSequence = 0) => {
+    if (subscribedRunIdRef.current === runId) return;
+    if (backgroundSubscribedRunIdsRef.current.has(runId)) {
+      if (activeRunIdRef.current === runId) {
+        const previous = subscribedRunIdRef.current;
+        if (previous && previous !== runId) backgroundSubscribedRunIdsRef.current.add(previous);
+        subscribedRunIdRef.current = runId;
+        backgroundSubscribedRunIdsRef.current.delete(runId);
+      }
+      return;
+    }
+    const generation = runSubscriptionGenerationRef.current;
+    if (activeRunIdRef.current === runId) {
+      const previous = subscribedRunIdRef.current;
+      if (previous && previous !== runId) backgroundSubscribedRunIdsRef.current.add(previous);
+      subscribedRunIdRef.current = runId;
+      backgroundSubscribedRunIdsRef.current.delete(runId);
+    } else {
+      backgroundSubscribedRunIdsRef.current.add(runId);
+    }
+    try {
+      await window.agent.subscribeRun(runId, { afterSequence });
+      if (generation !== runSubscriptionGenerationRef.current) {
+        void window.agent.unsubscribeRun(runId);
+      }
+    } catch (error) {
+      if (generation !== runSubscriptionGenerationRef.current) return;
+      if (subscribedRunIdRef.current === runId) subscribedRunIdRef.current = null;
+      backgroundSubscribedRunIdsRef.current.delete(runId);
+      throw error;
+    }
+  }, []);
+
+  const applyRunEventImmediately = useCallback((event: AgentRunEvent) => {
+    const previousSequence = lastSequenceByRunRef.current.get(event.runId) ?? 0;
+    if (!shouldApplyRunSequence(event.sequence, previousSequence)) return;
+    lastSequenceByRunRef.current.set(event.runId, event.sequence);
+    const affectsActiveRun = event.runId === activeRunIdRef.current;
+    if (affectsActiveRun) lastSequenceRef.current = event.sequence;
     setConversations((current) => current.map((conversation) => {
       if (!conversation.run || conversation.run.runId !== event.runId) return conversation;
 
@@ -1246,87 +2214,193 @@ export default function AgentWorkspace({
       };
     }));
 
-    if (event.type === 'draft_created') {
+    if (affectsActiveRun && event.type === 'draft_created') {
       setReviewTarget('draft');
       setInspectorTab('review');
     }
 
-    if (event.type === 'approval_required') {
+    if (affectsActiveRun && (event.type === 'approval_required' || event.type === 'user_input_required')) {
       setIsWorking(false);
     }
 
     if (event.type === 'run_completed' || event.type === 'run_failed' || event.type === 'run_cancelled') {
-      setIsWorking(false);
+      if (affectsActiveRun) setIsWorking(false);
       if (subscribedRunIdRef.current === event.runId) {
         subscribedRunIdRef.current = null;
       }
+      backgroundSubscribedRunIdsRef.current.delete(event.runId);
       void window.agent.unsubscribeRun(event.runId);
     }
+  }, []);
+
+  const flushQueuedRunEvents = useCallback(() => {
+    if (runEventFlushTimerRef.current !== null) {
+      window.clearTimeout(runEventFlushTimerRef.current);
+      runEventFlushTimerRef.current = null;
+    }
+    const queued = queuedRunEventsRef.current;
+    queuedRunEventsRef.current = [];
+    queued.forEach(applyRunEventImmediately);
+  }, [applyRunEventImmediately]);
+
+  const applyRunEvent = useCallback((event: AgentRunEvent) => {
+    const immediate = [
+      'approval_required',
+      'user_input_required',
+      'run_completed',
+      'run_failed',
+      'run_cancelled',
+    ].includes(event.type);
+    if (immediate) {
+      flushQueuedRunEvents();
+      applyRunEventImmediately(event);
+      return;
+    }
+    queuedRunEventsRef.current.push(event);
+    if (runEventFlushTimerRef.current !== null) return;
+    runEventFlushTimerRef.current = window.setTimeout(flushQueuedRunEvents, 120);
+  }, [applyRunEventImmediately, flushQueuedRunEvents]);
+
+  const finishDisconnectedRun = useCallback((runId: string, message: string) => {
+    if (subscribedRunIdRef.current === runId) subscribedRunIdRef.current = null;
+    backgroundSubscribedRunIdsRef.current.delete(runId);
+    if (activeRunIdRef.current === runId) setIsWorking(false);
+    setConversations((current) => current.map((conversation) => {
+      if (!conversation.run || conversation.run.runId !== runId || isTerminalRun(conversation.run)) return conversation;
+      const failedStepId = conversation.run.currentStepId;
+      const failCurrentStep = <T extends AgentPlan | null | undefined,>(plan: T): T => {
+        if (!plan || !failedStepId) return plan;
+        return {
+          ...plan,
+          steps: plan.steps.map((step) => step.stepId === failedStepId ? { ...step, status: 'failed' as const } : step),
+        } as T;
+      };
+      const plan = failCurrentStep(conversation.plan);
+      const run: AgentRun = {
+        ...conversation.run,
+        status: 'failed',
+        cancelRequested: false,
+        pendingApproval: null,
+        pendingUserInput: null,
+        planSnapshot: failCurrentStep(conversation.run.planSnapshot),
+      };
+      return {
+        ...withCurrentRun({
+          ...conversation,
+          plan,
+          pendingUserInput: conversation.pendingUserInput?.runId === runId ? null : conversation.pendingUserInput,
+        }, run),
+        updatedAt: new Date().toISOString(),
+        error: message,
+      };
+    }));
   }, []);
 
   useEffect(() => {
     const unsubscribeEvent = window.agent.onRunEvent(applyRunEvent);
     const unsubscribeDisconnected = window.agent.onRunDisconnected((payload) => {
-      if (payload.runId !== activeRunIdRef.current) return;
-      updateConversation(activeConversationId, (conversation) => ({
+      const interruptedConversation = conversationsRef.current.find((conversation) => conversation.run?.runId === payload.runId);
+      if (!interruptedConversation) return;
+      if (subscribedRunIdRef.current === payload.runId) subscribedRunIdRef.current = null;
+      backgroundSubscribedRunIdsRef.current.delete(payload.runId);
+      disconnectRecoveryRunIdsRef.current.add(payload.runId);
+      updateConversation(interruptedConversation.id, (conversation) => ({
         ...conversation,
         error: `事件流已断开：${payload.message}`,
       }));
       void (async () => {
         try {
-          const afterSequence = lastSequenceRef.current;
+          const afterSequence = lastSequenceByRunRef.current.get(payload.runId) ?? 0;
           const status = await window.agent.runStatus({ runId: payload.runId });
-          setConversations((current) => current.map((conversation) => (
-            conversation.run?.runId === payload.runId
-              ? withCurrentRun(conversation, {
+          setConversations((current) => current.map((conversation) => {
+            if (conversation.run?.runId !== payload.runId) return conversation;
+            return {
+              ...withCurrentRun(conversation, {
                   ...conversation.run,
                   status: status.status,
                   currentStepId: status.currentStepId,
                   draftSessionId: status.draftSessionId,
                   draftBatchId: status.draftBatchId,
+                  draftOperationId: status.draftOperationId,
+                  draftOperationKey: status.draftOperationKey,
+                  draftOperationStatus: status.draftOperationStatus,
+                  draftOperationVersion: status.draftOperationVersion,
                   artifacts: status.artifacts,
-                })
-              : conversation
-          )));
+                  pendingApproval: status.pendingApproval
+                    ?? (status.status === 'waiting_approval' ? conversation.run.pendingApproval : null),
+                  pendingUserInput: status.pendingUserInput
+                    ?? (status.status === 'waiting_user_input' ? conversation.run.pendingUserInput : null),
+                  retryOfRunId: status.retryOfRunId,
+                  retryRootRunId: status.retryRootRunId,
+                  retryAttempt: status.retryAttempt,
+                  failureRevision: status.failureRevision,
+                  completionKind: status.completionKind,
+                  recovery: status.recovery,
+              }),
+              pendingUserInput: status.pendingUserInput
+                ?? (status.status === 'waiting_user_input' ? conversation.pendingUserInput : null),
+            };
+          }));
           if (shouldResubscribeRun(status.status, afterSequence, status.lastSequence)) {
-            await window.agent.subscribeRun(payload.runId, { afterSequence });
-            subscribedRunIdRef.current = payload.runId;
+            await subscribeRun(payload.runId, afterSequence);
+            updateConversation(interruptedConversation.id, (conversation) => ({ ...conversation, error: '' }));
           } else {
             if (subscribedRunIdRef.current === payload.runId) {
               subscribedRunIdRef.current = null;
             }
-            setIsWorking(false);
+            backgroundSubscribedRunIdsRef.current.delete(payload.runId);
+            if (activeRunIdRef.current === payload.runId) setIsWorking(false);
           }
         } catch (err) {
-          setIsWorking(false);
-          const interruptedConversation = conversationsRef.current.find((conversation) => conversation.run?.runId === payload.runId);
           const interruptedPlan = interruptedConversation?.run?.planSnapshot ?? interruptedConversation?.plan;
           if (interruptedConversation && interruptedPlan && isRevisionBatchPlan(interruptedPlan) && hasRevisionBatchSource(interruptedPlan)) {
             void syncRevisionPlanOutcome(interruptedConversation.id, interruptedPlan, 'interrupted', payload.runId)
               .catch((syncError) => console.warn('[AgentWorkspace] Failed to recover interrupted revision tasks:', syncError));
           }
-          updateConversation(activeConversationId, (conversation) => ({
-            ...conversation,
-            error: toErrorMessage(err),
-          }));
+          finishDisconnectedRun(payload.runId, `事件流已断开：${payload.message || toErrorMessage(err)}`);
+        } finally {
+          disconnectRecoveryRunIdsRef.current.delete(payload.runId);
         }
       })();
     });
     return () => {
+      runSubscriptionGenerationRef.current += 1;
       unsubscribeEvent();
       unsubscribeDisconnected();
-      const runId = activeRunIdRef.current;
-      if (runId) void window.agent.unsubscribeRun(runId);
+      if (runEventFlushTimerRef.current !== null) {
+        window.clearTimeout(runEventFlushTimerRef.current);
+        runEventFlushTimerRef.current = null;
+      }
+      queuedRunEventsRef.current = [];
+      const runIds = new Set(backgroundSubscribedRunIdsRef.current);
+      if (subscribedRunIdRef.current) runIds.add(subscribedRunIdRef.current);
+      runIds.forEach((runId) => void window.agent.unsubscribeRun(runId));
+      backgroundSubscribedRunIdsRef.current.clear();
       subscribedRunIdRef.current = null;
     };
-  }, [activeConversationId, applyRunEvent, syncRevisionPlanOutcome, updateConversation]);
+  }, [applyRunEvent, finishDisconnectedRun, subscribeRun, syncRevisionPlanOutcome, updateConversation]);
+
+  useEffect(() => {
+    if (
+      !activeRun
+      || isTerminalRun(activeRun)
+      || disconnectRecoveryRunIdsRef.current.has(activeRun.runId)
+      || (!activeError.startsWith('事件流已断开：') && !activeError.startsWith('恢复事件流失败：'))
+    ) return;
+    finishDisconnectedRun(activeRun.runId, activeError);
+  }, [activeError, activeRun, finishDisconnectedRun]);
 
   useEffect(() => {
     const run = activeConversation?.run;
     const runId = run?.runId ?? null;
     if (!run || !runId) {
       const previous = subscribedRunIdRef.current;
-      if (previous) void window.agent.unsubscribeRun(previous);
+      const previousRun = conversationsRef.current.find((conversation) => conversation.run?.runId === previous)?.run;
+      if (previous && previousRun && getRunRecoverySnapshot(previousRun).isLive) {
+        backgroundSubscribedRunIdsRef.current.add(previous);
+      } else if (previous) {
+        void window.agent.unsubscribeRun(previous);
+      }
       activeRunIdRef.current = null;
       subscribedRunIdRef.current = null;
       lastSequenceRef.current = 0;
@@ -1337,10 +2411,14 @@ export default function AgentWorkspace({
     activeRunIdRef.current = runId;
     const recovery = getRunRecoverySnapshot(run);
     lastSequenceRef.current = recovery.lastSequence;
+    lastSequenceByRunRef.current.set(runId, recovery.lastSequence);
     if (!recovery.isLive) {
       if (subscribedRunIdRef.current === runId) {
         void window.agent.unsubscribeRun(runId);
         subscribedRunIdRef.current = null;
+      }
+      if (backgroundSubscribedRunIdsRef.current.delete(runId)) {
+        void window.agent.unsubscribeRun(runId);
       }
       setIsWorking(false);
       return;
@@ -1349,21 +2427,54 @@ export default function AgentWorkspace({
     setIsWorking(run.status === 'running' || run.status === 'cancelling');
     if (subscribedRunIdRef.current === runId) return;
     const previous = subscribedRunIdRef.current;
-    if (previous) void window.agent.unsubscribeRun(previous);
-    subscribedRunIdRef.current = runId;
-    const afterSequence = lastSequenceRef.current;
-    void window.agent.subscribeRun(runId, { afterSequence }).catch((err) => {
-      if (subscribedRunIdRef.current === runId) {
-        subscribedRunIdRef.current = null;
+    if (previous) {
+      const previousRun = conversationsRef.current.find((conversation) => conversation.run?.runId === previous)?.run;
+      if (previousRun && getRunRecoverySnapshot(previousRun).isLive) {
+        backgroundSubscribedRunIdsRef.current.add(previous);
+      } else {
+        void window.agent.unsubscribeRun(previous);
       }
-      updateConversation(activeConversation.id, (conversation) => ({
-        ...conversation,
-        error: `恢复事件流失败：${toErrorMessage(err)}`,
-      }));
+    }
+    const afterSequence = lastSequenceRef.current;
+    void subscribeRun(runId, afterSequence).catch((err) => {
+      finishDisconnectedRun(runId, `恢复事件流失败：${toErrorMessage(err)}`);
     });
-  }, [activeConversation?.id, activeConversation?.run?.runId, activeConversation?.run?.status, updateConversation]);
+  }, [activeConversation?.id, activeConversation?.run?.runId, activeConversation?.run?.status, finishDisconnectedRun, subscribeRun]);
+
+  const liveRunSubscriptionKey = useMemo(() => conversations
+    .map((conversation) => {
+      const run = conversation.run;
+      if (!run || !getRunRecoverySnapshot(run).isLive) return '';
+      return `${run.runId}:${run.status}:${getRunRecoverySnapshot(run).lastSequence}`;
+    })
+    .filter(Boolean)
+    .sort()
+    .join('|'), [conversations]);
+
+  useEffect(() => {
+    const liveRuns = conversationsRef.current
+      .map((conversation) => conversation.run)
+      .filter((run): run is AgentRun => Boolean(run && getRunRecoverySnapshot(run).isLive));
+    const liveRunIds = new Set(liveRuns.map((run) => run.runId));
+
+    for (const subscribedRunId of [...backgroundSubscribedRunIdsRef.current]) {
+      if (liveRunIds.has(subscribedRunId)) continue;
+      backgroundSubscribedRunIdsRef.current.delete(subscribedRunId);
+      void window.agent.unsubscribeRun(subscribedRunId);
+    }
+
+    for (const run of liveRuns) {
+      if (run.runId === subscribedRunIdRef.current || backgroundSubscribedRunIdsRef.current.has(run.runId)) continue;
+      const recovery = getRunRecoverySnapshot(run);
+      lastSequenceByRunRef.current.set(run.runId, recovery.lastSequence);
+      void subscribeRun(run.runId, recovery.lastSequence).catch((error) => {
+        finishDisconnectedRun(run.runId, `恢复事件流失败：${toErrorMessage(error)}`);
+      });
+    }
+  }, [finishDisconnectedRun, liveRunSubscriptionKey, subscribeRun]);
 
   const createConversation = () => {
+    const initialChapterScope = createDefaultChapterScope(currentChapter?.id, currentChapter?.volumeId);
     const conversation: AgentConversation = {
       id: nowId('conv'),
       novelId,
@@ -1372,20 +2483,24 @@ export default function AgentWorkspace({
       role: selectedRole,
       runtimeConversationId: null,
       updatedAt: new Date().toISOString(),
+      chapterScope: initialChapterScope,
       messages: [
         {
           id: nowId('msg'),
           role: 'assistant',
-          content: `已切换到${roleLabel(selectedRole)}模式。当前工作模式决定是否形成计划草稿和调用工具。`,
+          kind: 'role_status',
+          content: roleStatusContent(selectedRole),
           createdAt: new Date().toISOString(),
         },
       ],
       suggestedGoal: null,
       plan: null,
       run: null,
+      composerDraft: '',
       error: '',
     };
     setConversations((current) => [conversation, ...current]);
+    setComposerDrafts((current) => ({ ...current, [conversation.id]: '' }));
     setActiveConversationId(conversation.id);
     setInspectorTab('context');
     setWorkspaceView('conversation');
@@ -1404,14 +2519,20 @@ export default function AgentWorkspace({
     if (targetIds.length > 0) {
       const anchorChapterId = targetIds[0];
       const targetVolume = volumes.find((volume) => volume.chapters.some((chapter) => chapter.id === anchorChapterId));
-      setChapterScope({
+      const restoredScope: AgentChapterScopeSelection = {
         kind: targetIds.length === 1 ? 'current_chapter' : 'selected_chapters',
         ...(targetVolume ? { volumeId: targetVolume.id } : {}),
         chapterIds: targetIds,
         anchorChapterId,
         processingMode: 'detailed',
         experts: ['editor'],
-      });
+      };
+      setChapterScope(restoredScope);
+      setConversations((current) => current.map((candidate) => (
+        candidate.id === conversation.id
+          ? { ...candidate, chapterScope: restoredScope, updatedAt: new Date().toISOString() }
+          : candidate
+      )));
     }
     setSelectedRole(conversation.role);
     setActiveConversationId(conversation.id);
@@ -1422,26 +2543,43 @@ export default function AgentWorkspace({
 
   const deleteConversation = async (conversationId: string) => {
     if (conversations.length <= 1) return;
+    const deletedConversation = conversations.find((conversation) => conversation.id === conversationId);
     const nextConversations = conversations.filter((conversation) => conversation.id !== conversationId);
     setConversations(nextConversations);
+    setComposerDrafts((current) => {
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    delete persistedComposerDraftsRef.current[conversationId];
     if (activeConversationId === conversationId) {
       setActiveConversationId(nextConversations[0]?.id ?? '');
       setInspectorTab(nextConversations[0]?.run?.draftSessionId || nextConversations[0]?.run?.draftBatchId ? 'review' : 'context');
     }
     try {
       await window.db.deleteAgentConversation(conversationId);
+      if (deletedConversation) {
+        await window.agent.deleteChatContext({
+          conversationId: deletedConversation.runtimeConversationId || deletedConversation.id,
+          storageConversationId: deletedConversation.id,
+        });
+      }
     } catch (err) {
       console.warn('[AgentWorkspace] Failed to delete agent conversation:', err);
     }
   };
 
-  const createPlan = useCallback(async (goal: string, intentDecision?: AgentIntentDecision) => {
-    if (!goal.trim() || !activeConversation) return;
+  const createPlan = useCallback(async (
+    goal: string,
+    intentDecision?: AgentIntentDecision,
+    initialization?: { bootstrapArtifactId: string; bootstrapDraft: Record<string, unknown> },
+  ): Promise<boolean> => {
+    if (!goal.trim() || !activeConversation) return false;
     const conversationId = activeConversation.id;
     if (!chapterScopeReady) {
       clearPendingStatus(conversationId);
       updateConversation(conversationId, (conversation) => ({ ...conversation, error: '请先完成章节范围选择。' }));
-      return;
+      return false;
     }
     if (approvalMode === 'chat_only') {
       clearPendingStatus(conversationId);
@@ -1449,14 +2587,16 @@ export default function AgentWorkspace({
         ...conversation,
         error: '当前权限为“只讨论不执行”。请切换为“需要用户审核”后再生成计划。',
       }));
-      return;
+      return false;
     }
     setPendingPhase(conversationId, 'planning');
     setIsWorking(true);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '', suggestedGoal: null }));
+    const currentContent = getCurrentContentSnapshot().content;
     try {
       const nextPlan = await window.agent.plan({
         novelId,
+        conversationId: activeConversation.runtimeConversationId ?? undefined,
         chapterId: currentChapter?.id,
         goal,
         currentContent,
@@ -1464,8 +2604,11 @@ export default function AgentWorkspace({
         role: activeConversation.role,
         approvalMode,
         chapterScope: explicitChapterScope,
+        editorSelection,
+        chapterCatalog,
         context: contextPayload,
         intentDecision,
+        ...(initialization ? initialization : {}),
       });
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
@@ -1477,21 +2620,26 @@ export default function AgentWorkspace({
           {
             id: nowId('msg'),
             role: 'assistant',
+            kind: 'workflow_notice',
             content: `已生成计划草稿：${nextPlan.title}。你可以忽略、提交修改意见，或选择“实施此计划”。`,
             createdAt: new Date().toISOString(),
           },
         ],
       }));
+      return false;
     } catch (err) {
+      setIsWorking(false);
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
         error: toErrorMessage(err),
+        suggestedGoal: goal,
       }));
+      return false;
     } finally {
       clearPendingStatus(conversationId);
       setIsWorking(false);
     }
-  }, [activeConversation, approvalMode, chapterScopeReady, clearPendingStatus, contextPayload, currentChapter?.id, currentContent, explicitChapterScope, locale, novelId, setPendingPhase, updateConversation]);
+  }, [activeConversation, approvalMode, chapterCatalog, chapterScopeReady, clearPendingStatus, contextPayload, currentChapter?.id, editorSelection, explicitChapterScope, getCurrentContentSnapshot, locale, novelId, setPendingPhase, updateConversation]);
 
   const beginRetryRun = useCallback(async (
     conversationId: string,
@@ -1502,10 +2650,14 @@ export default function AgentWorkspace({
       failedRunId: recovery?.failedRunId ?? failedRun.runId,
       expectedFailureRevision: recovery?.expectedFailureRevision ?? failedRun.failureRevision,
       mode: recovery?.mode ?? 'failed_node',
+      ...(failedRun.recovery?.retryStrategy && failedRun.recovery.retryStrategy !== 'none'
+        ? { strategy: failedRun.recovery.retryStrategy }
+        : {}),
       context: contextPayload,
     });
     activeRunIdRef.current = nextRun.runId;
     lastSequenceRef.current = 0;
+    lastSequenceByRunRef.current.set(nextRun.runId, 0);
     updateConversation(conversationId, (conversation) => {
       const planSnapshot = failedRun.planSnapshot ?? conversation.plan ?? undefined;
       const updated = withCurrentRun(conversation, {
@@ -1515,22 +2667,48 @@ export default function AgentWorkspace({
       });
       return { ...updated, updatedAt: new Date().toISOString(), error: '' };
     });
-    await window.agent.subscribeRun(nextRun.runId);
-    subscribedRunIdRef.current = nextRun.runId;
+    await subscribeRun(nextRun.runId);
     scrollToLatest();
-  }, [contextPayload, scrollToLatest, updateConversation]);
+  }, [contextPayload, scrollToLatest, subscribeRun, updateConversation]);
 
   const retryFailedRun = useCallback(async (failedRun: AgentRun) => {
-    if (!activeConversation || isWorking || failedRun.status !== 'failed' || !failedRun.failureRevision) return;
+    if (
+      !activeConversation
+      || isWorking
+      || failedRun.status !== 'failed'
+      || !failedRun.failureRevision
+      || (failedRun.recovery && !failedRun.recovery.canRecover)
+    ) return;
     const conversationId = activeConversation.id;
     setIsWorking(true);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
     try {
       await beginRetryRun(conversationId, failedRun);
     } catch (error) {
-      subscribedRunIdRef.current = null;
       setIsWorking(false);
-      updateConversation(conversationId, (conversation) => ({ ...conversation, error: toErrorMessage(error) }));
+      let latestStatus: AgentRunStatusResult | null = null;
+      try {
+        latestStatus = await window.agent.runStatus({ runId: failedRun.runId });
+      } catch {
+        // Keep the existing failed run when status refresh is unavailable.
+      }
+      updateConversation(conversationId, (conversation) => {
+        const currentRun = conversation.run;
+        const refreshedRun = latestStatus && currentRun?.runId === failedRun.runId
+          ? {
+              ...currentRun,
+              status: latestStatus.status,
+              failureRevision: latestStatus.failureRevision,
+              completionKind: latestStatus.completionKind,
+              recovery: latestStatus.recovery,
+              artifacts: latestStatus.artifacts,
+            }
+          : currentRun;
+        return {
+          ...(refreshedRun ? withCurrentRun(conversation, refreshedRun) : conversation),
+          error: toErrorMessage(error),
+        };
+      });
     }
   }, [activeConversation, beginRetryRun, isWorking, updateConversation]);
 
@@ -1556,6 +2734,7 @@ export default function AgentWorkspace({
         {
           id: nowId('msg'),
           role: 'assistant',
+          kind: 'workflow_notice',
           content: '已忽略当前计划草稿，回到普通会话。',
           createdAt: new Date().toISOString(),
         },
@@ -1577,22 +2756,22 @@ export default function AgentWorkspace({
         revision: trimmed,
         role: activeConversation.role,
         locale,
+        approvalMode,
         chapterScope: explicitChapterScope,
         context: contextPayload,
       });
+      const revisionNotice: ConversationMessage = {
+        id: nowId('msg'),
+        role: 'assistant',
+        kind: 'workflow_notice',
+        content: `计划已按意见修订：${trimmed}`,
+        createdAt: new Date().toISOString(),
+      };
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
         updatedAt: new Date().toISOString(),
         plan: revisedPlan,
-        messages: [
-          ...conversation.messages,
-          {
-            id: nowId('msg'),
-            role: 'assistant',
-            content: `计划已按意见修订：${trimmed}`,
-            createdAt: new Date().toISOString(),
-          },
-        ],
+        messages: [...conversation.messages, revisionNotice],
       }));
     } catch (err) {
       updateConversation(conversationId, (conversation) => ({
@@ -1603,7 +2782,7 @@ export default function AgentWorkspace({
       clearPendingStatus(conversationId);
       setIsWorking(false);
     }
-  }, [activeConversation, activePlan, activeRun, clearPendingStatus, contextPayload, explicitChapterScope, isWorking, locale, setPendingPhase, updateConversation]);
+  }, [activeConversation, activePlan, activeRun, approvalMode, clearPendingStatus, contextPayload, explicitChapterScope, isWorking, locale, setPendingPhase, updateConversation]);
 
   useEffect(() => {
     if (!initialGoal) return;
@@ -1621,21 +2800,53 @@ export default function AgentWorkspace({
         onInitialGoalConsumed();
         return;
       }
-      appendMessage(conversationId, { role: 'user', content: initialGoal });
+      appendMessage(conversationId, { role: 'user', kind: 'chat', content: initialGoal });
       setPendingPhase(conversationId, 'thinking');
       void createPlan(initialGoal);
       onInitialGoalConsumed();
     })();
   }, [activeConversationId, appendMessage, createPlan, ensureRuntimeReady, initialGoal, onInitialGoalConsumed, setPendingPhase, updateConversation]);
 
-  const sendChat = async (messageOverride?: string) => {
+  const sendChat = async (
+    messageOverride?: string,
+    recoveryOptions?: { sourceMessage: ConversationMessage; repair?: AgentChatRecoveryDescriptor },
+    activation?: {
+      entryHint: Record<string, unknown>;
+      initialization?: { bootstrapArtifactId: string; bootstrapDraft: Record<string, unknown> };
+    },
+  ) => {
     if (!activeConversation) return;
+    if (activeUserInput) {
+      updateConversation(activeConversation.id, (conversation) => ({ ...conversation, error: '请先完成当前问答卡。' }));
+      return;
+    }
+    const recoveryMessage = recoveryOptions?.sourceMessage;
     const rawMessage = (messageOverride ?? input).trim();
     if ((!rawMessage && pendingAttachments.length === 0) || isWorking || isRuntimeRecoveryPending || sendInFlightRef.current) return;
     const message = rawMessage || '请读取并分析附件。';
     const conversationId = activeConversation.id;
-    if (!chapterScopeReady) {
+    const selectedSkillMode = !activation && !recoveryMessage && messageOverride === undefined
+      ? agentSkillModes[conversationId]
+      : undefined;
+    const entryHint = activation?.entryHint ?? agentSkillEntryHint(selectedSkillMode);
+    const sourceScope = recoveryMessage?.chapterScopeSnapshot ?? chapterScope;
+    const chapterScopeSnapshot: AgentChapterScopeSelection = {
+      ...sourceScope,
+      chapterIds: [...sourceScope.chapterIds],
+      experts: [...sourceScope.experts],
+    };
+    const chapterScopeRequestPayload = chapterScopePayload(chapterScopeSnapshot);
+    if (!isChapterScopeSelectionValid(chapterScopeSnapshot)) {
       updateConversation(conversationId, (conversation) => ({ ...conversation, error: '请先完成章节范围选择。' }));
+      setScopeMenuOpen(true);
+      return;
+    }
+    const declaredChapterCount = requestedChapterCount(message);
+    if (declaredChapterCount !== null && chapterScopeSnapshot.chapterIds.length !== declaredChapterCount) {
+      updateConversation(conversationId, (conversation) => ({
+        ...conversation,
+        error: `SCOPE_CONFLICT：请求提到 ${declaredChapterCount} 章，但当前范围包含 ${chapterScopeSnapshot.chapterIds.length} 章。请重新选择章节范围。`,
+      }));
       setScopeMenuOpen(true);
       return;
     }
@@ -1650,10 +2861,12 @@ export default function AgentWorkspace({
       return;
     }
     const runtimeConversationId = activeConversation.runtimeConversationId;
-    const userMessageId = nowId('msg');
-    const userCreatedAt = new Date().toISOString();
-    let sentAttachments: AgentAttachmentRecord[] = [];
-    if (pendingAttachments.length) {
+    const userMessageId = recoveryMessage?.id ?? nowId('msg');
+    const userCreatedAt = recoveryMessage?.createdAt ?? new Date().toISOString();
+    let sentAttachments: AgentAttachmentRecord[] = recoveryMessage
+      ? attachments.filter((attachment) => recoveryMessage.attachmentIds?.includes(attachment.id))
+      : [];
+    if (!recoveryMessage && pendingAttachments.length) {
       try {
         sentAttachments = await window.agentAttachments.bind({
           novelId,
@@ -1670,38 +2883,95 @@ export default function AgentWorkspace({
         return;
       }
     }
-    if (messageOverride === undefined) setInput('');
     scrollToLatest();
-    appendMessage(conversationId, {
-      role: 'user',
-      content: message,
-      attachmentIds: sentAttachments.map((attachment) => attachment.id),
-    }, {
-      startNewTurnAfterTerminal: true,
-      messageId: userMessageId,
-      createdAt: userCreatedAt,
-    });
+    if (!recoveryMessage) {
+      appendMessage(conversationId, {
+        role: 'user',
+        kind: 'chat',
+        content: message,
+        attachmentIds: sentAttachments.map((attachment) => attachment.id),
+        chapterScopeSnapshot,
+      }, {
+        startNewTurnAfterTerminal: true,
+        messageId: userMessageId,
+        createdAt: userCreatedAt,
+      });
+    }
+    if (!recoveryMessage && messageOverride === undefined) {
+      setComposerDrafts((current) => {
+        const updated = { ...current, [conversationId]: '' };
+        composerDraftsRef.current = updated;
+        return updated;
+      });
+      setAgentSkillModes((current) => ({ ...current, [conversationId]: undefined }));
+    }
     setIsWorking(true);
     setPendingPhase(conversationId, 'thinking');
     const chatRequestId = nowId('chat_request');
+    const deadlineAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
     activeChatRequestRef.current = { requestId: chatRequestId, conversationId, cancelled: false };
     setActiveChatRequestId(chatRequestId);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
-    let startedRetryRun = false;
+    let startedRun = false;
+    const currentContent = getCurrentContentSnapshot().content;
+    const currentContentText = extractReadableText(currentContent);
     try {
       const availableAttachments = [
         ...attachments.filter((attachment) => Boolean(attachment.messageId)),
         ...sentAttachments,
       ].filter((attachment, index, items) => items.findIndex((item) => item.id === attachment.id) === index);
-      const response = await window.agent.chat({
+      if (!recoveryMessage) {
+        await window.db.upsertAgentConversation(conversationForPersistence({
+          ...activeConversation,
+          composerDraft: messageOverride === undefined
+            ? ''
+            : composerDraftsRef.current[conversationId] ?? activeConversation.composerDraft ?? '',
+          updatedAt: userCreatedAt,
+          messages: [
+            ...activeConversation.messages,
+            {
+              id: userMessageId,
+              role: 'user' as const,
+              kind: 'chat' as const,
+              content: message,
+              attachmentIds: sentAttachments.map((attachment) => attachment.id),
+              chapterScopeSnapshot,
+              createdAt: userCreatedAt,
+            },
+          ],
+        }));
+        if (messageOverride === undefined) persistedComposerDraftsRef.current[conversationId] = '';
+      }
+      if (selectedSkillMode?.kind === 'skill.author') {
+        const novelScoped = /(?:本小说|当前小说|本项目|novel[- ]?scoped)/iu.test(message);
+        const authored = await window.agent.authorSkill({
+          goal: message.replace(/^创建一个\s*Skill\s*[：:]?\s*/iu, '').trim() || message,
+          scope: novelScoped ? 'novel' : 'user',
+          ...(novelScoped ? { novelId } : {}),
+          locale,
+          context: contextPayload,
+        }) as { draft?: { id?: string; version?: number }; proposal?: { definition?: { title?: string; stableId?: string } } };
+        const title = authored.proposal?.definition?.title || '未命名 Skill';
+        const stableId = authored.proposal?.definition?.stableId;
+        appendMessage(conversationId, {
+          role: 'assistant',
+          kind: 'workflow_notice',
+          content: `已生成“${title}”的可审核草稿${stableId ? `（\`${stableId}\`）` : ''}。当前尚未发布，也不会参与任务；确认后才会创建不可变 Revision。草稿 ID：\`${authored.draft?.id || 'unknown'}\`。`,
+        });
+        clearPendingStatus(conversationId);
+        return;
+      }
+      const chatPayload = {
         novelId,
         novelTitle: novel?.title,
         volumeId: currentChapter?.volumeId,
         chapterId: currentChapter?.id,
         chapterTitle: currentChapter?.title,
         message,
+        deadlineAt,
         conversationId: runtimeConversationId,
         agentConversationId: conversationId,
+        storageConversationId: conversationId,
         attachments: availableAttachments.map((attachment) => ({
           attachmentId: attachment.id,
           fileName: attachment.originalFileName,
@@ -1712,23 +2982,32 @@ export default function AgentWorkspace({
         locale,
         role: activeConversation.role,
         approvalMode,
-        chapterScope: explicitChapterScope,
+        source: entryHint ? 'shortcut' : 'chat',
+        ...(entryHint ? { entryHint } : {}),
+        chapterScope: chapterScopeRequestPayload,
+        editorSelection,
+        chapterCatalog,
         messageId: userMessageId,
-        history: activeConversation.messages.flatMap(({ id, role, content, createdAt }) => (
-          role === 'system' ? [] : [{ role, content, createdAt, messageId: id }]
-        )),
-        persistentSummary: activeConversation.contextSummary,
         conversationContext: {
           currentPlan: activeConversation.plan,
+          pendingUserInput: activeConversation.pendingUserInput ?? null,
+          userInputResolutions: activeConversation.userInputResolutions ?? [],
           activeRun: activeConversation.run ? {
             runId: activeConversation.run.runId,
+            planId: activeConversation.run.planId,
             status: activeConversation.run.status,
             progress: activeConversation.run.progress,
             currentStepId: activeConversation.run.currentStepId,
             pendingApproval: activeConversation.run.pendingApproval,
             approvalResponses: activeConversation.run.approvalResponses,
+            pendingUserInput: activeConversation.run.pendingUserInput,
+            userInputResponses: activeConversation.run.userInputResponses,
             draftSessionId: activeConversation.run.draftSessionId,
             draftBatchId: activeConversation.run.draftBatchId,
+            draftOperationId: activeConversation.run.draftOperationId,
+            draftOperationKey: activeConversation.run.draftOperationKey,
+            draftOperationStatus: activeConversation.run.draftOperationStatus,
+            draftOperationVersion: activeConversation.run.draftOperationVersion,
             artifacts: activeConversation.run.artifacts,
           } : null,
           priorRuns: (activeConversation.runs ?? []).map((run) => ({
@@ -1742,7 +3021,12 @@ export default function AgentWorkspace({
           })),
         },
         context: contextPayload,
-      }, { requestId: chatRequestId });
+        ...(recoveryOptions?.repair ? { recovery: recoveryOptions.repair } : {}),
+      };
+      const response = recoveryOptions?.repair
+        ? await window.agent.recoverChat(chatPayload, { requestId: chatRequestId })
+        : await window.agent.chat(chatPayload, { requestId: chatRequestId });
+      setLiveChatActivities((current) => current?.conversationId === conversationId ? null : current);
       const shouldDraftPlan = !response.awaitingUserInput
         && (response.suggestedActions?.some((action) => action.method === 'agent.plan') ?? false);
       const recovery = response.intentDecision?.route === 'retry_failed_run'
@@ -1755,72 +3039,202 @@ export default function AgentWorkspace({
       const compressionMessage: ConversationMessage | null = response.contextCompression ? {
         id: nowId('msg'),
         role: 'system',
+        kind: 'context_compression',
         content: serializeContextCompression(response.contextCompression),
         createdAt: compressionCreatedAt,
       } : null;
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
         runtimeConversationId: response.conversationId,
-        contextSummary: response.conversationSummary ?? conversation.contextSummary,
+        pendingUserInput: response.pendingUserInput ?? null,
         suggestedGoal: null,
         messages: [
-          ...conversation.messages,
+          ...conversation.messages.map((item) => item.id === userMessageId
+            ? { ...item, failure: undefined }
+            : item),
           ...(compressionMessage ? [compressionMessage] : []),
-          ...(!recovery ? [{
+          ...(!recovery && !response.pendingUserInput ? [{
             id: response.assistantMessage.messageId || nowId('msg'),
             role: 'assistant' as const,
+            kind: 'chat' as const,
             content: response.assistantMessage.content,
             createdAt: response.assistantMessage.createdAt,
             contextReads: response.contextReads,
             contextDiagnostics: response.contextDiagnostics,
+            activities: response.activities,
+            failure: response.failure,
+            evidenceSnapshotId: response.evidenceSnapshotId,
           }] : []),
         ],
       }));
       if (recovery && activeConversation.run) {
         await beginRetryRun(conversationId, activeConversation.run, recovery);
-        startedRetryRun = true;
+        startedRun = true;
         clearPendingStatus(conversationId);
       } else if (shouldDraftPlan) {
-        const conversationHistory = activeConversation.messages.flatMap(({ role, content }) => (
-          role === 'system' ? [] : [{ role, content }]
-        ));
         const planGoal = activeConversation.plan && !activeConversation.run
           ? `${activeConversation.plan.goal}\n\n用户修改意见：${message}`
-          : buildAgentPlanGoal(message, conversationHistory);
-        await createPlan(planGoal, response.intentDecision);
+          : buildAgentPlanGoal(message, activeConversation.messages);
+        startedRun = await createPlan(planGoal, response.intentDecision, activation?.initialization);
       } else {
         clearPendingStatus(conversationId);
       }
     } catch (err) {
       clearPendingStatus(conversationId);
+      setLiveChatActivities((current) => current?.conversationId === conversationId ? null : current);
       if (!activeChatRequestRef.current?.cancelled && !isCancelledError(err)) {
+        const failure = chatFailureFromError(err);
+        const exhaustedManualRepair = Boolean(recoveryOptions?.repair);
+        const errorCode = err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
+        const errorDetails = err && typeof err === 'object' && 'details' in err
+          && (err as { details?: unknown }).details
+          && typeof (err as { details?: unknown }).details === 'object'
+          ? (err as { details: Record<string, unknown> }).details
+          : {};
+        const mustRetryOriginalRequest = errorDetails.recoveryAction === 'retry_request'
+          || errorCode === 'MODEL_REPAIR_ATTEMPT_EXHAUSTED';
+        const isNewRecovery = Boolean(
+          failure.recovery
+          && failure.recovery.recoveryRef !== recoveryOptions?.repair?.recoveryRef,
+        );
+        const retainedRecovery = mustRetryOriginalRequest
+          ? undefined
+          : isNewRecovery
+            ? failure.recovery
+            : recoveryOptions?.repair;
         updateConversation(conversationId, (conversation) => ({
           ...conversation,
           error: toErrorMessage(err),
+          messages: conversation.messages.map((item) => item.id === userMessageId
+            ? {
+              ...item,
+              failure: exhaustedManualRepair
+                ? { ...failure, recovery: retainedRecovery }
+                : failure,
+            }
+            : item),
         }));
       }
     } finally {
       clearPendingStatus(conversationId);
-      if (!startedRetryRun) setIsWorking(false);
+      if (!startedRun) setIsWorking(false);
       sendInFlightRef.current = false;
       if (activeChatRequestRef.current?.requestId === chatRequestId) activeChatRequestRef.current = null;
       setActiveChatRequestId((current) => current === chatRequestId ? null : current);
+      setStoppingChatRequestId((current) => current === chatRequestId ? null : current);
     }
+  };
+
+  const initializeNovelProject = (artifact: AgentArtifact) => {
+    const rawDraft = artifact.metadata?.draft;
+    if (!rawDraft || typeof rawDraft !== 'object' || Array.isArray(rawDraft)) {
+      toast.error('当前小说项目蓝图缺少可初始化的数据。');
+      return;
+    }
+    void sendChat(
+      '基于已确认的小说项目蓝图，为当前项目生成故事线、情节点、角色、物品、技能、世界设定和地图的可审核初始化草稿。',
+      undefined,
+      {
+        entryHint: {
+          actionId: 'novel.project_initialize',
+          kind: 'operation',
+          operationIds: ['novel.project_initialize'],
+          deliverable: 'creative_assets_draft',
+          suggestedToolchainId: 'novel.project_initialize',
+        },
+        initialization: {
+          bootstrapArtifactId: artifact.artifactId,
+          bootstrapDraft: rawDraft as Record<string, unknown>,
+        },
+      },
+    );
   };
 
   const cancelActiveChat = useCallback(async () => {
     const active = activeChatRequestRef.current;
     if (!active || active.cancelled) return;
     active.cancelled = true;
+    setStoppingChatRequestId(active.requestId);
     clearPendingStatus(active.conversationId);
     try {
       await window.agent.cancelChat({ requestId: active.requestId });
+      const existing = liveChatActivitiesRef.current?.conversationId === active.conversationId
+        ? liveChatActivitiesRef.current.events
+        : [];
+      const activities = existing.some((event) => event.type === 'request_cancelled') ? existing : [...existing, {
+        eventId: nowId('activity'),
+        sequence: (existing.at(-1)?.sequence ?? 0) + 1,
+        requestId: active.requestId,
+        type: 'request_cancelled' as const,
+        stage: 'finalization' as const,
+        displayName: '请求已取消',
+        status: 'cancelled' as const,
+        createdAt: new Date().toISOString(),
+      }];
+      appendMessage(active.conversationId, {
+        role: 'assistant',
+        kind: 'workflow_notice',
+        content: '请求已取消。',
+        activities,
+      });
+      setLiveChatActivities((current) => current?.conversationId === active.conversationId ? null : current);
     } catch (error) {
       if (!isCancelledError(error)) toast.error(toErrorMessage(error));
     }
-  }, [clearPendingStatus]);
+  }, [appendMessage, clearPendingStatus]);
 
-  const submitApproval = async (approval: AgentApprovalRequest, selectedOptionIds: string[], freeText: string) => {
+  const retryChatSummary = useCallback(async (message: ConversationMessage) => {
+    if (!activeConversation || !message.evidenceSnapshotId || isWorking || sendInFlightRef.current) return;
+    const conversationId = activeConversation.id;
+    const requestId = nowId('chat_summary_retry');
+    const deadlineAt = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+    sendInFlightRef.current = true;
+    activeChatRequestRef.current = { requestId, conversationId, cancelled: false };
+    setActiveChatRequestId(requestId);
+    setIsWorking(true);
+    setPendingPhase(conversationId, 'finalizing');
+    setLiveChatActivities({ conversationId, events: [] });
+    try {
+      const response = await window.agent.retryChatSummary({
+        evidenceSnapshotId: message.evidenceSnapshotId,
+        storageConversationId: conversationId,
+        deadlineAt,
+        context: contextPayload,
+      }, { requestId });
+      updateConversation(conversationId, (conversation) => ({
+        ...conversation,
+        updatedAt: new Date().toISOString(),
+        messages: [...conversation.messages, {
+          id: response.assistantMessage.messageId || nowId('msg'),
+          role: 'assistant',
+          kind: 'chat',
+          content: response.assistantMessage.content,
+          createdAt: response.assistantMessage.createdAt,
+          contextReads: response.contextReads,
+          contextDiagnostics: response.contextDiagnostics,
+          activities: response.activities,
+          failure: response.failure,
+          evidenceSnapshotId: response.evidenceSnapshotId,
+        }],
+      }));
+    } catch (error) {
+      if (!activeChatRequestRef.current?.cancelled) {
+        updateConversation(conversationId, (conversation) => ({ ...conversation, error: toErrorMessage(error) }));
+      }
+    } finally {
+      clearPendingStatus(conversationId);
+      setLiveChatActivities((current) => current?.conversationId === conversationId ? null : current);
+      setIsWorking(false);
+      sendInFlightRef.current = false;
+      if (activeChatRequestRef.current?.requestId === requestId) activeChatRequestRef.current = null;
+      setActiveChatRequestId((current) => current === requestId ? null : current);
+      setStoppingChatRequestId((current) => current === requestId ? null : current);
+    }
+  }, [activeConversation, clearPendingStatus, contextPayload, isWorking, setPendingPhase, updateConversation]);
+
+  const submitApproval = async (approval: { checkpointId: string }, selectedOptionIds: string[], freeText: string) => {
     if (!activeConversation || !activeRun) return;
     const conversationId = activeConversation.id;
     setIsWorking(true);
@@ -1843,12 +3257,144 @@ export default function AgentWorkspace({
           })
           : conversation
       ));
+      const draftKey = `${activeRun.runId}:${approval.checkpointId}`;
+      setApprovalCardDrafts((current) => {
+        if (!(draftKey in current)) return current;
+        const next = { ...current };
+        delete next[draftKey];
+        return next;
+      });
+      setChapterBeatCardDrafts((current) => {
+        if (!(draftKey in current)) return current;
+        const next = { ...current };
+        delete next[draftKey];
+        return next;
+      });
     } catch (err) {
       setIsWorking(false);
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
         error: toErrorMessage(err),
       }));
+    }
+  };
+
+  const submitUserInput = async (request: AgentUserInputRequest, answers: AgentUserInputAnswer[]) => {
+    if (!activeConversation) return;
+    const conversationId = activeConversation.id;
+    setIsWorking(true);
+    updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
+    try {
+      const resolution = await window.agent.submitUserInput({
+        requestId: request.requestId,
+        conversationId: request.conversationId,
+        runId: request.runId,
+        answers,
+        context: contextPayload,
+      });
+      updateConversation(conversationId, (conversation) => {
+        const resolutions = conversation.userInputResolutions ?? [];
+        const nextResolutions = resolutions.some((item) => item.requestId === resolution.requestId)
+          ? resolutions
+          : [...resolutions, resolution];
+        let next: AgentConversation = {
+          ...conversation,
+          pendingUserInput: resolution.pendingUserInput
+            ?? (conversation.pendingUserInput?.requestId === request.requestId
+              ? null
+              : conversation.pendingUserInput),
+          userInputResolutions: nextResolutions,
+          updatedAt: new Date().toISOString(),
+        };
+        if (resolution.plan) {
+          next = {
+            ...next,
+            plan: resolution.plan,
+            run: null,
+            messages: [
+              ...next.messages,
+              {
+                id: nowId('msg'),
+                role: 'assistant',
+                kind: 'workflow_notice',
+                content: `已根据你的回答生成计划草稿：${resolution.plan.title}。`,
+                createdAt: new Date().toISOString(),
+              },
+            ],
+          };
+        } else if (resolution.run && conversation.run?.runId === resolution.run.runId) {
+          next = withCurrentRun(next, {
+            ...conversation.run,
+            ...resolution.run,
+            events: conversation.run.events,
+            pendingUserInput: null,
+          });
+        }
+        return next;
+      });
+      setUserInputCardDrafts((current) => {
+        const keys = Object.keys(current).filter((key) => key.endsWith(`:${request.requestId}`));
+        if (keys.length === 0) return current;
+        const next = { ...current };
+        keys.forEach((key) => delete next[key]);
+        return next;
+      });
+      setIsWorking(resolution.nextAction === 'run_resumed');
+    } catch (err) {
+      setIsWorking(false);
+      updateConversation(conversationId, (conversation) => ({
+        ...conversation,
+        error: toErrorMessage(err),
+      }));
+    }
+  };
+
+  const dismissUserInput = async (request: AgentUserInputRequest) => {
+    if (!activeConversation || isWorking) return;
+    const conversationId = activeConversation.id;
+    setIsWorking(true);
+    updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
+    try {
+      const resolution = await window.agent.dismissUserInput({
+        requestId: request.requestId,
+        conversationId: request.conversationId,
+        runId: request.runId,
+        context: contextPayload,
+      });
+      updateConversation(conversationId, (conversation) => {
+        const resolutions = conversation.userInputResolutions ?? [];
+        const nextResolutions = resolutions.some((item) => item.requestId === resolution.requestId)
+          ? resolutions
+          : [...resolutions, resolution];
+        let next: AgentConversation = {
+          ...conversation,
+          pendingUserInput: conversation.pendingUserInput?.requestId === request.requestId
+            ? null
+            : conversation.pendingUserInput,
+          userInputResolutions: nextResolutions,
+          updatedAt: new Date().toISOString(),
+        };
+        if (resolution.run && conversation.run?.runId === resolution.run.runId) {
+          next = withCurrentRun(next, {
+            ...conversation.run,
+            ...resolution.run,
+            events: conversation.run.events,
+            pendingUserInput: null,
+          });
+        }
+        return next;
+      });
+      setUserInputCardDrafts((current) => {
+        const keys = Object.keys(current).filter((key) => key.endsWith(`:${request.requestId}`));
+        if (keys.length === 0) return current;
+        const next = { ...current };
+        keys.forEach((key) => delete next[key]);
+        return next;
+      });
+      setIsWorking(false);
+    } catch (err) {
+      setIsWorking(false);
+      updateConversation(conversationId, (conversation) => ({ ...conversation, error: toErrorMessage(err) }));
     }
   };
 
@@ -1927,6 +3473,7 @@ export default function AgentWorkspace({
     setChapterScope(nextScope);
     setSelectedRole('writer');
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
+    const currentContent = getCurrentContentSnapshot().content;
     try {
       const generatedPlan = await window.agent.plan({
         novelId,
@@ -1972,16 +3519,15 @@ export default function AgentWorkspace({
       });
       activeRunIdRef.current = nextRun.runId;
       lastSequenceRef.current = 0;
+      lastSequenceByRunRef.current.set(nextRun.runId, 0);
       updateConversation(conversationId, (conversation) => withCurrentRun(conversation, {
         ...nextRun,
         events: [],
         planSnapshot: revisionPlan,
       }));
-      await window.agent.subscribeRun(nextRun.runId);
-      subscribedRunIdRef.current = nextRun.runId;
+      await subscribeRun(nextRun.runId);
       scrollToLatest();
     } catch (error) {
-      subscribedRunIdRef.current = null;
       const message = toErrorMessage(error);
       setPendingRevisionBatch(null);
       updateConversation(conversationId, (conversation) => ({ ...conversation, error: message }));
@@ -2010,6 +3556,7 @@ export default function AgentWorkspace({
     const conversationId = activeConversation.id;
     setIsWorking(true);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
+    const currentContent = getCurrentContentSnapshot().content;
     try {
       const nextRun = await window.agent.executePlan({
         planId: activePlan.planId,
@@ -2025,15 +3572,14 @@ export default function AgentWorkspace({
       });
       activeRunIdRef.current = nextRun.runId;
       lastSequenceRef.current = 0;
+      lastSequenceByRunRef.current.set(nextRun.runId, 0);
       updateConversation(conversationId, (conversation) => withCurrentRun(conversation, {
         ...nextRun,
         events: [],
         planSnapshot: activePlan,
       }));
-      await window.agent.subscribeRun(nextRun.runId);
-      subscribedRunIdRef.current = nextRun.runId;
+      await subscribeRun(nextRun.runId);
     } catch (err) {
-      subscribedRunIdRef.current = null;
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
         error: toErrorMessage(err),
@@ -2051,6 +3597,8 @@ export default function AgentWorkspace({
     const conversationId = activeConversation.id;
     setIsWorking(true);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
+    const currentContent = getCurrentContentSnapshot().content;
+    const regenerationChapterLabel = resolveDraftBatchChapterDisplay(batch, fromChildIndex, volumes).shortLabel;
     try {
       const nextRun = await window.agent.regenerateBatch({
         draftBatchId: batch.draftBatchId,
@@ -2062,7 +3610,7 @@ export default function AgentWorkspace({
         locale,
         ...(reviewComments.length ? {
           goal: [
-            `从第 ${fromChildIndex + 1} 章开始重新生成，并保留此前已审核草稿。`,
+            `从${regenerationChapterLabel}开始重新生成，并保留此前已审核草稿。`,
             '必须逐条落实以下审批意见；未被指出的内容尽量保持：',
             formatReviewCommentsForConversation(reviewComments),
           ].join('\n'),
@@ -2080,17 +3628,17 @@ export default function AgentWorkspace({
       const regenerationPlan: AgentPlan = {
         planId: nextRun.planId,
         threadId: nextRun.threadId,
-        title: `重新生成${regenerationLabel}（从第 ${fromChildIndex + 1} 章）`,
+        title: `重新生成${regenerationLabel}（从${regenerationChapterLabel}）`,
         goal: reviewComments.length
-          ? `根据 ${reviewComments.length} 条审批意见，从第 ${fromChildIndex + 1} 章开始重新生成。`
-          : `从第 ${fromChildIndex + 1} 章开始重新生成，并保留此前已审核草稿。`,
+          ? `根据 ${reviewComments.length} 条审批意见，从${regenerationChapterLabel}开始重新生成。`
+          : `从${regenerationChapterLabel}开始重新生成，并保留此前已审核草稿。`,
         requiresApproval: true,
         preferredRole: 'writer',
         deliverable: 'chapter_draft_batch',
         steps: [{
           stepId,
           agent: 'writer',
-          title: `从第 ${fromChildIndex + 1} 章重新生成${isRewriteBatch ? '改写' : '批次'}草稿`,
+          title: `从${regenerationChapterLabel}重新生成${isRewriteBatch ? '改写' : '批次'}草稿`,
           tools: [],
           toolchain: {
             id: isRewriteBatch ? 'chapter.batch_rewrite' : 'chapter.sequence_continuation',
@@ -2112,6 +3660,7 @@ export default function AgentWorkspace({
       };
       activeRunIdRef.current = nextRun.runId;
       lastSequenceRef.current = 0;
+      lastSequenceByRunRef.current.set(nextRun.runId, 0);
       updateConversation(conversationId, (conversation) => {
         const previousHistory = conversation.run
           ? mergeAgentRunHistory(conversation.runs, {
@@ -2131,10 +3680,8 @@ export default function AgentWorkspace({
           planSnapshot: regenerationPlan,
         });
       });
-      await window.agent.subscribeRun(nextRun.runId);
-      subscribedRunIdRef.current = nextRun.runId;
+      await subscribeRun(nextRun.runId);
     } catch (err) {
-      subscribedRunIdRef.current = null;
       setIsWorking(false);
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
@@ -2197,6 +3744,7 @@ export default function AgentWorkspace({
       };
       activeRunIdRef.current = nextRun.runId;
       lastSequenceRef.current = 0;
+      lastSequenceByRunRef.current.set(nextRun.runId, 0);
       updateConversation(conversationId, (conversation) => {
         const previousHistory = conversation.run
           ? mergeAgentRunHistory(conversation.runs, {
@@ -2216,10 +3764,8 @@ export default function AgentWorkspace({
         });
       });
       setSelectedReviewRunId(null);
-      await window.agent.subscribeRun(nextRun.runId);
-      subscribedRunIdRef.current = nextRun.runId;
+      await subscribeRun(nextRun.runId);
     } catch (error) {
-      subscribedRunIdRef.current = null;
       setIsWorking(false);
       updateConversation(conversationId, (conversation) => ({
         ...conversation,
@@ -2229,10 +3775,17 @@ export default function AgentWorkspace({
     }
   };
 
-  const cancelRun = async () => {
+  const cancelRun = async (): Promise<boolean> => {
     const runId = activeRunIdRef.current;
-    if (!runId || !activeConversation || !activeRun || activeRun.status !== 'running') return;
+    if (
+      !runId
+      || !activeConversation
+      || !activeRun
+      || !['running', 'waiting_approval', 'waiting_user_input'].includes(activeRun.status)
+      || activeRun.draftOperationStatus === 'committing'
+    ) return false;
     const conversationId = activeConversation.id;
+    const previousStatus = activeRun.status;
     updateConversation(conversationId, (conversation) => (
       conversation.run?.runId === runId
         ? withCurrentRun(conversation, { ...conversation.run, status: 'cancelling', cancelRequested: true })
@@ -2242,17 +3795,32 @@ export default function AgentWorkspace({
       const nextRun = await window.agent.cancel({ runId });
       updateConversation(conversationId, (conversation) => (
         conversation.run?.runId === runId
-          ? withCurrentRun(conversation, { ...conversation.run, status: nextRun.status, cancelRequested: true })
+          ? withCurrentRun(conversation, {
+            ...conversation.run,
+            status: nextRun.status,
+            cancelRequested: nextRun.status === 'cancelling' || nextRun.status === 'cancelled',
+          })
           : conversation
       ));
+      return true;
     } catch (err) {
       updateConversation(conversationId, (conversation) => {
         const restored = conversation.run?.runId === runId
-          ? withCurrentRun(conversation, { ...conversation.run, status: 'running', cancelRequested: false })
+          ? withCurrentRun(conversation, { ...conversation.run, status: previousStatus, cancelRequested: false })
           : conversation;
         return { ...restored, error: `无法取消，请稍后重试：${toErrorMessage(err)}` };
       });
+      return false;
     }
+  };
+
+  const stopActiveTask = () => {
+    if (composerAction.disabled) return;
+    if (composerAction.target === 'run') {
+      void cancelRun();
+      return;
+    }
+    if (composerAction.target === 'chat') void cancelActiveChat();
   };
 
   const renderStepStatus = (status: AgentStepStatus) => {
@@ -2280,16 +3848,38 @@ export default function AgentWorkspace({
   const runtimeHealth = isRuntimeRecoveryPending
     ? { text: '正在恢复 Runtime', tone: 'loading' as const }
     : runtimeHealthPresentation(health);
+  const selectedReportReviewAvailability = resolveReportReviewAvailability({
+    runStatus: selectedReviewRun?.status,
+    workspaceBusy: isWorking,
+    runtimeRecoveryPending: isRuntimeRecoveryPending,
+    planPending: Boolean(activePlan && !activeRun),
+  });
   const inspectorVisible = inspectorOpen && workspaceView === 'conversation';
+  const draftReviewInspectorVisible = inspectorVisible
+    && inspectorTab === 'review'
+    && reviewTarget === 'draft'
+    && Boolean(selectedReviewRun?.draftSessionId || selectedReviewRun?.draftBatchId);
+  const inspectorLeftRailWidth = viewportWidth > 1180 ? 300 : 0;
+  const effectiveInspectorWidth = Math.max(
+    INSPECTOR_DEFAULT_WIDTH,
+    Math.min(inspectorWidth, 900, Math.floor(viewportWidth * 0.65), viewportWidth - inspectorLeftRailWidth - 420),
+  );
+
+  if (!isVisible) return null;
 
   return (
-    <div className={clsx(
+    <div
+      style={{ '--agent-inspector-width': `${effectiveInspectorWidth}px` } as React.CSSProperties}
+      className={clsx(
       'relative h-full min-h-0 grid overflow-hidden max-[1040px]:grid-cols-1',
       inspectorVisible
-        ? 'grid-cols-[300px_minmax(0,1fr)_360px] max-[1180px]:grid-cols-[minmax(0,1fr)_360px]'
+        ? inspectorExpanded
+          ? 'grid-cols-[300px_0_minmax(0,1fr)] max-[1180px]:grid-cols-[0_minmax(0,1fr)]'
+          : 'grid-cols-[300px_minmax(0,1fr)_var(--agent-inspector-width)] max-[1180px]:grid-cols-[minmax(0,1fr)_var(--agent-inspector-width)]'
         : 'grid-cols-[300px_minmax(0,1fr)] max-[1180px]:grid-cols-1',
       isDark ? 'bg-[#0a0a0f] text-neutral-100' : 'bg-[var(--ui-canvas)] text-[var(--ui-text-primary)]',
-    )}>
+      )}
+    >
       {conversationDrawerOpen && (
         <button
           type="button"
@@ -2494,18 +4084,17 @@ export default function AgentWorkspace({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {isWorking && <Loader2 className="h-4 w-4 animate-spin text-[#2f80ed]" />}
-            <button
-              type="button"
-              onClick={() => {
-                setInspectorVisibility(!inspectorOpen);
-              }}
-              className={clsx('grid h-8 w-8 place-items-center rounded-md', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-white')}
-              title={inspectorOpen ? '收起 Inspector' : '打开 Inspector'}
-              aria-label={inspectorOpen ? '收起 Inspector' : '打开 Inspector'}
-              aria-pressed={inspectorOpen}
-            >
-              {inspectorOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
-            </button>
+            {!inspectorVisible && (
+              <button
+                type="button"
+                onClick={() => setInspectorVisibility(true)}
+                className={clsx('grid h-8 w-8 place-items-center rounded-md', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-white')}
+                title={t('agentWorkspace.inspector.open')}
+                aria-label={t('agentWorkspace.inspector.open')}
+              >
+                <PanelRightOpen className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -2517,34 +4106,89 @@ export default function AgentWorkspace({
           >
             <div className="mx-auto w-full max-w-[880px] space-y-4">
             {activeTimeline.map((entry) => {
-              if (entry.kind === 'message') {
+              if (entry.kind === 'resolution') {
                 return (
-                  <MessageBubble
+                  <UserInputResolutionCard
                     key={entry.key}
-                    message={entry.message}
-                    attachments={attachments.filter((attachment) => entry.message.attachmentIds?.includes(attachment.id))}
+                    resolution={entry.resolution as AgentUserInputResolution}
                     isDark={isDark}
-                    onOpenAttachment={openAttachment}
                   />
+                );
+              }
+              if (entry.kind === 'message') {
+                const message = entry.message as ConversationMessage;
+                return (
+                  <Fragment key={entry.key}>
+                    <MessageBubble
+                      message={message}
+                      attachments={attachments.filter((attachment) => message.attachmentIds?.includes(attachment.id))}
+                      isDark={isDark}
+                      onOpenAttachment={openAttachment}
+                      onRetrySummary={(targetMessage) => void retryChatSummary(targetMessage)}
+                      onReread={(targetMessage) => {
+                        const messages = activeConversation?.messages ?? [];
+                        const messageIndex = messages.findIndex((candidate) => candidate.id === targetMessage.id);
+                        const source = [...messages.slice(0, messageIndex)].reverse().find((candidate) => candidate.role === 'user');
+                        if (source) void sendChat(source.content);
+                      }}
+                    />
+                    {message.role === 'assistant' && message.activities && message.activities.length > 0 && (
+                      <ChatActivityCard activities={message.activities} isDark={isDark} />
+                    )}
+                  </Fragment>
                 );
               }
               const timelineRun = entry.run as AgentRun | null;
               const timelinePlan = entry.plan as AgentPlan;
               const supportingArtifacts = (timelineRun?.artifacts ?? []).filter((artifact) => !getExpertReport(artifact));
+              const consolidatedReportArtifact = timelineRun?.artifacts
+                ? selectConsolidatedReportArtifact(timelineRun.artifacts)
+                : null;
               const isRevisionBatch = isRevisionBatchPlan(timelinePlan);
+              const chapterBeatTimeline = timelineRun ? projectChapterBeatTimeline(timelineRun) : [];
+              const latestChapterBeatCheckpoint = [...chapterBeatTimeline].reverse().find((item) => item.kind === 'checkpoint');
+              const effectiveDraftBatchId = timelineRun?.draftBatchId
+                || timelineRun?.pendingApproval?.draftBatchId
+                || (latestChapterBeatCheckpoint?.kind === 'checkpoint' ? latestChapterBeatCheckpoint.approval.draftBatchId : undefined);
+              const draftBatchRecord = effectiveDraftBatchId ? draftBatchRecords[effectiveDraftBatchId] ?? null : null;
+              const draftBatchConversationState = timelineRun ? projectDraftBatchConversationState({
+                run: timelineRun,
+                batch: draftBatchRecord,
+                chapterBeatTimeline,
+              }) : null;
+              const batchActivity = timelineRun ? projectAgentActivity(timelineRun) : null;
               const isActiveTask = timelineRun
                 ? activeRun?.runId === timelineRun.runId
                 : activePlan?.planId === timelinePlan.planId && !activeRun;
+              const reportReviewAvailability = resolveReportReviewAvailability({
+                runStatus: timelineRun?.status,
+                workspaceBusy: isWorking,
+                runtimeRecoveryPending: isRuntimeRecoveryPending,
+                planPending: Boolean(activePlan && !activeRun),
+              });
+              const timelineResolutions = entry.resolutions as AgentUserInputResolution[];
+              const prePlanResolutions = timelineResolutions.filter((resolution) => resolution.phase === 'pre_plan');
+              const executionResolutions = timelineResolutions.filter((resolution) => resolution.phase === 'execution');
               return (
                 <Fragment key={entry.key}>
-                  {isRevisionBatch ? (
-                    <RevisionProgressCard
-                      plan={timelinePlan}
-                      run={timelineRun}
+                  {prePlanResolutions.map((resolution) => (
+                    <UserInputResolutionCard
+                      key={resolution.requestId}
+                      resolution={resolution}
                       isDark={isDark}
-                      interactive={isActiveTask}
-                      onCancel={() => void cancelRun()}
                     />
+                  ))}
+                  {isRevisionBatch ? (
+                    !draftBatchConversationState ? (
+                      <RevisionProgressCard
+                        plan={timelinePlan}
+                        run={timelineRun}
+                        isDark={isDark}
+                        interactive={isActiveTask}
+                        isWorking={isWorking}
+                        onRetry={() => { if (timelineRun) void retryFailedRun(timelineRun); }}
+                      />
+                    ) : null
                   ) : (
                     <PlanCard
                       plan={timelinePlan}
@@ -2554,12 +4198,46 @@ export default function AgentWorkspace({
                       isWorking={isWorking}
                       renderStepStatus={renderStepStatus}
                       onExecute={() => void executePlan()}
-                      onCancel={() => void cancelRun()}
                       onIgnore={ignorePlan}
                       onSubmitRevision={(revision) => void submitPlanRevision(revision)}
                     />
                   )}
-                  {timelineRun && !isRevisionBatch && (
+                  {executionResolutions.map((resolution) => (
+                    <UserInputResolutionCard
+                      key={resolution.requestId}
+                      resolution={resolution}
+                      isDark={isDark}
+                    />
+                  ))}
+                  {timelineRun && draftBatchConversationState ? (
+                    <DraftBatchProgressCard
+                      key={draftBatchConversationState.stableKey}
+                      state={draftBatchConversationState}
+                      batch={draftBatchRecord}
+                      volumes={volumes}
+                      runStatus={timelineRun.status}
+                      isDark={isDark}
+                      interactive={isActiveTask}
+                      isWorking={isWorking}
+                      draft={chapterBeatCardDrafts[draftBatchConversationState.stableKey]}
+                      revisionItems={isRevisionBatch ? timelinePlan.revisionItems.map((item) => ({ id: item.findingId, title: item.title })) : undefined}
+                      activitySummary={batchActivity?.summary}
+                      activityDetails={batchActivity?.details}
+                      onDraftChange={(draft) => setChapterBeatCardDrafts((current) => ({
+                        ...current,
+                        [draftBatchConversationState.stableKey]: draft,
+                      }))}
+                      onSubmit={(approval, selectedOptionIds, freeText) => void submitApproval(approval, selectedOptionIds, freeText)}
+                      onDismiss={() => void cancelRun()}
+                      onOpenSnapshot={(snapshot, historical) => openBeatSnapshot(timelineRun.runId, snapshot, historical)}
+                      onOpenCurrent={(view) => {
+                        if (draftBatchConversationState.draftBatchId) {
+                          openDraftBatchInspector(timelineRun.runId, draftBatchConversationState.draftBatchId, view);
+                        }
+                      }}
+                      onRetry={() => void retryFailedRun(timelineRun)}
+                    />
+                  ) : timelineRun && !isRevisionBatch ? (
                     <AgentActivityStream
                       run={timelineRun}
                       plan={timelinePlan}
@@ -2569,12 +4247,12 @@ export default function AgentWorkspace({
                       onRetry={() => void retryFailedRun(timelineRun)}
                       onReplan={() => prepareFailedRunReplan(timelinePlan)}
                     />
-                  )}
-                  {timelineRun?.artifacts && timelineRun.artifacts.some((artifact) => getExpertReport(artifact)) && (
+                  ) : null}
+                  {timelineRun?.artifacts && consolidatedReportArtifact && (
                     <ConsolidatedReportCard
                       artifacts={timelineRun.artifacts}
                       isDark={isDark}
-                      interactive={isActiveTask && !isWorking}
+                      reviewAvailability={reportReviewAvailability}
                       onOpenDetails={() => openInspector('review', 'report', timelineRun.runId)}
                       onModifySelected={startRevisionBatch}
                       onReviewSubmitted={updateArtifactReview}
@@ -2587,19 +4265,32 @@ export default function AgentWorkspace({
                       onOpen={() => openInspector('artifacts', undefined, timelineRun.runId)}
                     />
                   )}
-                  {isActiveTask && activeApproval && (
+                  {isActiveTask && activeApproval && activeApproval.checkpointType !== 'chapter_beats' && (
                     <ApprovalRequiredCard
                       approval={activeApproval}
                       isDark={isDark}
                       isWorking={isWorking}
+                      draft={approvalCardDrafts[`${timelineRun?.runId ?? 'plan'}:${activeApproval.checkpointId}`]}
+                      onDraftChange={(draft) => setApprovalCardDrafts((current) => ({
+                        ...current,
+                        [`${timelineRun?.runId ?? 'plan'}:${activeApproval.checkpointId}`]: draft,
+                      }))}
                       onSubmit={(selectedOptionIds, freeText) => void submitApproval(activeApproval, selectedOptionIds, freeText)}
+                      onDismiss={() => void cancelRun()}
                     />
                   )}
-                  {timelineRun?.draftBatchId && (
-                    <DraftBatchCard
-                      draftBatchId={timelineRun.draftBatchId}
+                  {isActiveTask && activeUserInput?.phase === 'execution' && activeUserInput.runId === timelineRun?.runId && (
+                    <UserInputRequiredCard
+                      request={activeUserInput}
                       isDark={isDark}
-                      onOpenReview={() => openInspector('review', 'draft', timelineRun.runId)}
+                      isWorking={isWorking}
+                      draft={userInputCardDrafts[`${timelineRun?.runId ?? activeConversation.id}:${activeUserInput.requestId}`]}
+                      onDraftChange={(draft) => setUserInputCardDrafts((current) => ({
+                        ...current,
+                        [`${timelineRun?.runId ?? activeConversation.id}:${activeUserInput.requestId}`]: draft,
+                      }))}
+                      onSubmit={(answers) => void submitUserInput(activeUserInput, answers)}
+                      onDismiss={() => void dismissUserInput(activeUserInput)}
                     />
                   )}
                   {!timelineRun?.draftBatchId && timelineRun?.draftSessionId && (
@@ -2617,25 +4308,64 @@ export default function AgentWorkspace({
               );
             })}
 
+            {activeUserInput?.phase === 'pre_plan' && (
+              <UserInputRequiredCard
+                request={activeUserInput}
+                isDark={isDark}
+                isWorking={isWorking}
+                draft={userInputCardDrafts[`${activeConversation?.id ?? 'conversation'}:${activeUserInput.requestId}`]}
+                onDraftChange={(draft) => setUserInputCardDrafts((current) => ({
+                  ...current,
+                  [`${activeConversation?.id ?? 'conversation'}:${activeUserInput.requestId}`]: draft,
+                }))}
+                onSubmit={(answers) => void submitUserInput(activeUserInput, answers)}
+                onDismiss={() => void dismissUserInput(activeUserInput)}
+              />
+            )}
+
             {pendingRevisionBatch?.conversationId === activeConversation?.id && (
               <RevisionProgressCard
                 plan={pendingRevisionBatch.plan}
                 run={null}
                 isDark={isDark}
                 interactive={false}
-                onCancel={() => undefined}
+                isWorking={isWorking}
+                onRetry={() => undefined}
               />
             )}
 
-            {isAwaitingChatResponse && <ThinkingIndicator isDark={isDark} label={pendingStatusLabel} />}
+            {isAwaitingChatResponse && !(liveChatActivities?.conversationId === activeConversation?.id && liveChatActivities.events.length > 0) && (
+              <ThinkingIndicator isDark={isDark} label={pendingStatusLabel} />
+            )}
+            {isAwaitingChatResponse && liveChatActivities?.conversationId === activeConversation?.id && liveChatActivities.events.length > 0 && (
+              <ChatActivityCard activities={liveChatActivities.events} isDark={isDark} live />
+            )}
 
-            {activeConversation?.suggestedGoal && !activePlan && (
+            {recoverablePlanGoal && !activePlan && (
               <ActionCard
                 isDark={isDark}
-                title="需要形成计划草稿吗？"
-                description="当前回复可以使用只读项目上下文。形成计划草稿后可继续修改；确认后才会生成草稿或执行写回。"
-                actionLabel="生成计划草稿"
-                onAction={() => void createPlan(activeConversation.suggestedGoal ?? '')}
+                title={isChapterTargetUnresolvedError(activeError) ? '目标章节解析可恢复' : '需要形成计划草稿吗？'}
+                description={isChapterTargetUnresolvedError(activeError)
+                  ? '聊天阶段的回答和章节目标均已保留。点击后会刷新章节目录并继续生成计划，不会重新请求刚才的聊天回答。'
+                  : '当前回复可以使用只读项目上下文。形成计划草稿后可继续修改；确认后才会生成草稿或执行写回。'}
+                actionLabel={activeError ? '重新生成计划草稿' : '生成计划草稿'}
+                onAction={() => void createPlan(recoverablePlanGoal)}
+                disabled={isWorking}
+              />
+            )}
+
+            {recoverableChatMessage && (
+              <ActionCard
+                isDark={isDark}
+                title={recoverableChatMessage.failure?.recovery ? '模型回答可安全恢复' : '本次对话可直接重试'}
+                description={recoverableChatMessage.failure?.recovery
+                  ? '先重新校验已保存结果；若仍不合格，只让模型修复 JSON 后继续，不会重新执行原问题。'
+                  : '这条失败记录没有可用的模型结果引用。点击后会重新请求回答，但不会重复追加用户消息或要求你发送“重试”。'}
+                actionLabel={recoverableChatMessage.failure?.recovery ? '修复 JSON 并继续' : '重新生成回答'}
+                onAction={() => void sendChat(recoverableChatMessage.content, {
+                  sourceMessage: recoverableChatMessage,
+                  repair: recoverableChatMessage.failure?.recovery,
+                })}
                 disabled={isWorking}
               />
             )}
@@ -2643,12 +4373,12 @@ export default function AgentWorkspace({
               {activeError && !(activeRun?.status === 'failed' && activeRun.events.some((event) => event.type === 'run_failed')) && (
                 <div className={clsx('rounded-lg border px-3 py-2 text-sm flex gap-2', isDark ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-700')}>
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-                  <span>{activeError}</span>
+                  <span>{toErrorMessage(activeError)}</span>
                 </div>
               )}
             </div>
           </div>
-          {!followsLatest && (
+          {!followsLatest && !inspectorExpanded && !draftReviewInspectorVisible && (
             <button
               type="button"
               onClick={scrollToLatest}
@@ -2666,7 +4396,16 @@ export default function AgentWorkspace({
         </div>
 
         <div className={clsx('border-t p-4', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
-          <div className={clsx('mx-auto max-w-[880px] rounded-lg border p-2', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
+          <div className={clsx('relative mx-auto max-w-[880px] rounded-lg border p-2', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
+            {agentSkillMenuOpen && agentSkillSlashQuery && (
+              <AgentSkillSlashMenu
+                skills={agentSkills}
+                query={agentSkillSlashQuery.query}
+                activeItem={agentSkillMenuItems[activeSkillMenuIndex]}
+                isDark={isDark}
+                onSelect={selectAgentSkillMenuItem}
+              />
+            )}
             {pendingAttachments.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-1.5 px-1">
                 {pendingAttachments.map((attachment) => (
@@ -2694,19 +4433,70 @@ export default function AgentWorkspace({
                 ))}
               </div>
             )}
+            {activeAgentSkillMode && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5 px-1">
+                <div className={clsx(
+                  'inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border px-2 text-xs',
+                  activeAgentSkillMode.kind === 'skill.none'
+                    ? isDark ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800'
+                    : isDark ? 'border-[#2f80ed]/30 bg-[#2f80ed]/10 text-[#9cc8ff]' : 'border-[#b8d7ff] bg-[#eef6ff] text-[#1f6fca]',
+                )}>
+                  <Sparkles className="h-3.5 w-3.5 shrink-0" />
+                  <span className="truncate">
+                    {activeAgentSkillMode.kind === 'skill.none'
+                      ? '本次不使用 Skill'
+                      : activeAgentSkillMode.kind === 'skill.author'
+                        ? '创建 Skill · 生成审核草稿'
+                        : `${activeAgentSkillMode.skill.title} · v${activeAgentSkillMode.skill.version}`}
+                  </span>
+                  <button
+                    type="button"
+                    className="grid h-5 w-5 shrink-0 place-items-center rounded hover:bg-black/10"
+                    onClick={clearActiveAgentSkillMode}
+                    title="移除 Skill"
+                    aria-label="移除 Skill"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+            )}
             <textarea
               ref={chatInputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
+                if (agentSkillMenuOpen && agentSkillMenuItems.length > 0) {
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    setActiveSkillMenuIndex((current) => (current + 1) % agentSkillMenuItems.length);
+                    return;
+                  }
+                  if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setActiveSkillMenuIndex((current) => (current - 1 + agentSkillMenuItems.length) % agentSkillMenuItems.length);
+                    return;
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setDismissedSkillSlashQuery(agentSkillSlashQuery);
+                    return;
+                  }
+                  if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    const item = agentSkillMenuItems[activeSkillMenuIndex];
+                    if (item) selectAgentSkillMenuItem(item);
+                    return;
+                  }
+                }
                 if (event.key === 'Enter' && !event.shiftKey) {
                   event.preventDefault();
-                  void sendChat();
+                  if (!composerTaskActive) void sendChat();
                 }
               }}
               rows={3}
-              disabled={isWorking || isRuntimeRecoveryPending}
-              placeholder={approvalMode === 'chat_only' ? '只讨论不执行：保留交流和建议，不读取项目或生成计划。' : '直接描述创作任务；我会先读取所需上下文，草稿与写回仍需你确认。'}
+              disabled={composerTaskActive || isWorking || isRuntimeRecoveryPending || Boolean(activeUserInput)}
+              placeholder={activeUserInput ? '请先完成上方问答卡。' : approvalMode === 'chat_only' ? '只讨论不执行：保留交流和建议，不读取项目或生成计划。' : approvalMode === 'full_control' ? '直接描述创作任务；分析和可回退草稿会自动执行。' : '直接描述创作任务；执行前会展示计划和关键创作选择。'}
               className={clsx('block w-full resize-none bg-transparent px-2 py-1 text-sm leading-6 outline-none', isDark ? 'placeholder:text-neutral-600' : 'placeholder:text-[var(--ui-text-disabled)]')}
             />
             <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
@@ -2714,7 +4504,7 @@ export default function AgentWorkspace({
                 <button
                   type="button"
                   onClick={() => void addAttachment()}
-                  disabled={isWorking || isRuntimeRecoveryPending || isAddingAttachment}
+                  disabled={composerTaskActive || isWorking || isRuntimeRecoveryPending || Boolean(activeUserInput) || isAddingAttachment}
                   title="添加文档"
                   className={clsx(
                     'grid h-8 w-8 shrink-0 place-items-center rounded-md border disabled:opacity-40',
@@ -2731,8 +4521,8 @@ export default function AgentWorkspace({
                   currentVolumeId={currentChapter?.volumeId}
                   teamMode={(activeConversation?.role ?? selectedRole) === 'team'}
                   open={scopeMenuOpen}
-                  disabled={isWorking || isRuntimeRecoveryPending}
-                  onChange={setChapterScope}
+                  disabled={composerTaskActive || isWorking || isRuntimeRecoveryPending || Boolean(activeUserInput)}
+                  onChange={changeChapterScope}
                   onToggle={() => {
                     setScopeMenuOpen((current) => !current);
                     setModelMenuOpen(false);
@@ -2800,17 +4590,31 @@ export default function AgentWorkspace({
               </div>
               <button
                 type="button"
-                onClick={() => activeChatRequestId ? void cancelActiveChat() : void sendChat()}
-                disabled={!activeChatRequestId && (isWorking || isRuntimeRecoveryPending || (!input.trim() && pendingAttachments.length === 0) || !chapterScopeReady)}
-                title={activeChatRequestId ? '停止生成' : !chapterScopeReady ? '请先完成章节范围选择' : '发送'}
+                onClick={() => composerTaskActive ? stopActiveTask() : void sendChat()}
+                disabled={composerTaskActive
+                  ? composerAction.disabled
+                  : isWorking || isRuntimeRecoveryPending || Boolean(activeUserInput) || (!input.trim() && pendingAttachments.length === 0) || !chapterScopeReady}
+                title={composerTaskActive ? composerAction.label : !chapterScopeReady ? '请先完成章节范围选择' : '发送'}
+                aria-label={composerTaskActive ? composerAction.label : '发送'}
                 className={clsx(
-                  'h-8 min-w-[64px] shrink-0 whitespace-nowrap rounded-md px-2.5 inline-flex items-center justify-center gap-1.5 text-xs text-white disabled:opacity-40',
-                  'max-[640px]:w-8 max-[640px]:min-w-8 max-[640px]:px-0',
-                  isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600',
+                  'shrink-0 whitespace-nowrap inline-flex items-center justify-center transition-colors disabled:cursor-not-allowed disabled:opacity-55',
+                  composerTaskActive
+                    ? clsx(
+                      'h-10 w-10 rounded-full p-0',
+                      isDark ? 'bg-neutral-100 text-neutral-950 hover:bg-white' : 'bg-[#202124] text-white hover:bg-black',
+                    )
+                    : clsx(
+                      'h-8 min-w-[64px] gap-1.5 rounded-md px-2.5 text-xs text-white max-[640px]:w-8 max-[640px]:min-w-8 max-[640px]:px-0',
+                      isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600',
+                    ),
                 )}
               >
-                {activeChatRequestId ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-                <span className="max-[640px]:sr-only">{activeChatRequestId ? '停止' : '发送'}</span>
+                {composerTaskActive
+                  ? composerAction.mode === 'saving'
+                    ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+                    : <Square className="h-3.5 w-3.5 fill-current" />
+                  : <Send className="h-4 w-4" />}
+                <span className={composerTaskActive ? 'sr-only' : 'max-[640px]:sr-only'}>{composerAction.label}</span>
               </button>
             </div>
           </div>
@@ -2821,8 +4625,8 @@ export default function AgentWorkspace({
         <button
           type="button"
           className="absolute inset-0 z-30 bg-black/20 min-[1041px]:hidden"
-          onClick={() => setInspectorVisibility(false)}
-          aria-label="关闭 Inspector"
+          onClick={closeInspector}
+          aria-label={t('agentWorkspace.inspector.close')}
         />
       )}
       {viewingAttachment && (
@@ -2835,22 +4639,31 @@ export default function AgentWorkspace({
       {inspectorVisible && <InspectorPanel
         isDark={isDark}
         narrowOpen={inspectorDrawerOpen}
-        onClose={() => setInspectorVisibility(false)}
+        onClose={closeInspector}
         activeTab={inspectorTab}
-        onTabChange={setInspectorTab}
+        onTabChange={selectInspectorTab}
+        expanded={inspectorExpanded}
+        onToggleExpanded={() => setInspectorExpanded((value) => !value)}
+        onResizeStart={beginInspectorResize}
+        onResizeReset={resetInspectorWidth}
         novel={novel}
         currentChapter={currentChapter}
         novelId={novelId}
         sourceConversationId={activeConversation?.id ?? ''}
         messages={activeConversation?.messages ?? []}
         contextSummary={activeConversation?.contextSummary ?? null}
+        contextSummaryRebuilding={contextSummaryRebuildConversationId === activeConversation?.id}
         activeRun={selectedReviewRun}
+        reportReviewAvailability={selectedReportReviewAvailability}
         conversationRuns={conversationRuns}
         activeRole={activeConversation?.role ?? selectedRole}
         roleOptions={roleOptions}
         volumes={volumes}
         reviewTarget={reviewTarget}
+        draftSelection={draftInspectorSelection}
+        draftBatchRecords={draftBatchRecords}
         onReviewTargetChange={setReviewTarget}
+        onRebuildContextSummary={rebuildContextSummary}
         onUsePreset={usePresetTask}
         onArtifactStatusChange={updateArtifactStatus}
         onDraftBatchStatusChange={updateDraftBatchArtifactStatus}
@@ -2858,7 +4671,10 @@ export default function AgentWorkspace({
         onRegenerateDraftBatch={regenerateDraftBatch}
         onDiscussReviewComments={discussReviewComments}
         onRegenerateDraft={regenerateDraftFromReview}
+        onDraftBatchLoaded={rememberDraftBatch}
         onSelectReviewRun={setSelectedReviewRunId}
+        onSkillPublished={refreshAgentSkills}
+        onInitializeNovelProject={initializeNovelProject}
       />}
       </>
       )}
@@ -2866,21 +4682,29 @@ export default function AgentWorkspace({
   );
 }
 
+export default memo(AgentWorkspace);
+
 function MessageBubble({
   message,
   attachments,
   isDark,
   onOpenAttachment,
+  onRetrySummary,
+  onReread,
 }: {
   message: ConversationMessage;
   attachments: AgentAttachmentRecord[];
   isDark: boolean;
   onOpenAttachment: (attachmentId: string) => void;
+  onRetrySummary: (message: ConversationMessage) => void;
+  onReread: (message: ConversationMessage) => void;
 }) {
   if (message.role === 'system') {
     return <ContextCompressionNotice message={message} isDark={isDark} />;
   }
   const isUser = message.role === 'user';
+  const renderAsMarkdown = message.role === 'assistant'
+    && inferAgentConversationMessageKind(message) === 'chat';
   return (
     <div className={clsx('flex gap-3', isUser && 'justify-end')}>
       {!isUser && (
@@ -2888,7 +4712,7 @@ function MessageBubble({
           <Bot className="h-4 w-4" />
         </div>
       )}
-      <div className={clsx('max-w-[78%] rounded-lg border px-4 py-3 text-sm leading-6 whitespace-pre-wrap', isUser
+      <div className={clsx('max-w-[78%] rounded-lg border px-4 py-3 text-sm leading-6', isUser
         ? (isDark ? 'border-white/10 bg-white/10' : 'border-[var(--ui-border)] bg-white')
         : (isDark ? 'border-white/10 bg-[#111827]' : 'border-[var(--ui-border)] bg-[var(--ui-surface-muted)]'))}
       >
@@ -2910,7 +4734,7 @@ function MessageBubble({
             ))}
           </div>
         )}
-        {!isUser && message.contextReads && message.contextReads.length > 0 && (
+        {!isUser && (!message.activities || message.activities.length === 0) && message.contextReads && message.contextReads.length > 0 && (
           <div className="mb-2 flex flex-wrap gap-1.5">
             {message.contextReads.map((read, index) => (
               <span
@@ -2929,7 +4753,38 @@ function MessageBubble({
             ))}
           </div>
         )}
-        {message.content}
+        {renderAsMarkdown ? (
+          <AssistantMarkdown
+            content={message.content}
+            isDark={isDark}
+            variant="chat"
+            ariaLabel="助手回复"
+          />
+        ) : (
+          <div className="whitespace-pre-wrap">{message.content}</div>
+        )}
+        {!isUser && message.failure?.code === 'MODEL_SUMMARY_TIMEOUT' && message.evidenceSnapshotId && (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onRetrySummary(message)}
+              className={clsx(
+                'rounded-md px-3 py-1.5 text-xs font-medium',
+                isDark ? 'bg-white text-black hover:bg-neutral-200' : 'bg-[var(--ui-text-primary)] text-white hover:opacity-90',
+              )}
+            >
+              仅重试总结
+            </button>
+            <span className={clsx('text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>基于请求时快照，不会重新读取章节</span>
+            <button
+              type="button"
+              onClick={() => onReread(message)}
+              className={clsx('rounded-md border px-3 py-1.5 text-xs', isDark ? 'border-white/15 hover:bg-white/5' : 'border-[var(--ui-border)] hover:bg-[var(--ui-surface-subtle)]')}
+            >
+              重新读取并分析
+            </button>
+          </div>
+        )}
       </div>
       {isUser && (
         <div className={clsx('mt-1 h-8 w-8 rounded-md grid place-items-center shrink-0', isDark ? 'bg-white/10' : 'bg-[var(--ui-surface-muted)]')}>
@@ -2937,6 +4792,47 @@ function MessageBubble({
         </div>
       )}
     </div>
+  );
+}
+
+function ChatActivityCard({
+  activities,
+  isDark,
+  live = false,
+}: {
+  activities: AgentChatActivityEvent[];
+  isDark: boolean;
+  live?: boolean;
+}) {
+  const projection = useMemo(() => projectChatActivity(activities, live), [activities, live]);
+  const [expanded, setExpanded] = useState(false);
+  const latest = activities.at(-1);
+  const detailPanelId = `chat-activity-${latest?.requestId.replace(/[^a-zA-Z0-9_-]/g, '-') ?? 'pending'}`;
+  if (!latest) return null;
+  const activitySubline = expanded
+    ? '收起操作明细'
+    : `${projection.details.length} 项操作 · 查看明细`;
+  return (
+    <ActivityStreamShell
+      isDark={isDark}
+      toneClass={activityToneClass(projection.tone, isDark)}
+      statusIcon={activityStatusIcon(projection.tone)}
+      title={projection.summary}
+      subline={activitySubline}
+      expanded={expanded}
+      detailPanelId={detailPanelId}
+      onToggle={() => setExpanded((current) => !current)}
+    >
+      {expanded && (
+        <ActivityDetails
+          id={detailPanelId}
+          details={projection.details}
+          isDark={isDark}
+          ariaLabel="请求操作明细"
+          emptyLabel="等待第一条请求事件。"
+        />
+      )}
+    </ActivityStreamShell>
   );
 }
 
@@ -3002,8 +4898,16 @@ function ContextCompressionNotice({ message, isDark }: { message: ConversationMe
   const compressedHistory = compression.historyMessagesSummarized
     + compression.historyMessagesOmitted
     + compression.historyMessagesCompacted;
-  const title = compressedHistory > 0 ? '已压缩较早上下文' : '已压缩本次上下文';
-  const summary = compression.historyMessagesSummarized > 0
+  const title = compression.mode === 'degraded'
+    ? '上下文摘要暂时不可用'
+    : compression.mode === 'semantic'
+      ? '已完成语义压缩'
+      : compression.mode === 'projection'
+        ? '已使用持久摘要'
+        : compressedHistory > 0 ? '已压缩较早上下文' : '已微压缩本次上下文';
+  const summary = compression.mode === 'degraded'
+    ? `已使用受限上下文${compression.historyMessagesOmitted > 0 ? ` · 省略 ${compression.historyMessagesOmitted} 条` : ''}`
+    : compression.historyMessagesSummarized > 0
     ? `${compression.persistentSummaryRevision > 0 ? `持久摘要 v${compression.persistentSummaryRevision} · ` : ''}摘要 ${compression.historyMessagesSummarized} 条消息`
     : compression.historyMessagesCompacted > 0
       ? `精简 ${compression.historyMessagesCompacted} 条消息`
@@ -3027,8 +4931,26 @@ function ContextCompressionNotice({ message, isDark }: { message: ConversationMe
           <span>保留原文 {compression.historyMessagesKept} / {compression.historyMessagesTotal} 条</span>
           <span>摘要表示 {compression.historyMessagesSummarized} 条</span>
           {compression.persistentSummaryRevision > 0 && (
-            <span>持久摘要 v{compression.persistentSummaryRevision} · 覆盖 {compression.persistentSummaryMessageCount} 条</span>
+            <span>
+              持久摘要 v{compression.persistentSummaryRevision}
+              {compression.summaryGeneration ? ` · generation ${compression.summaryGeneration}` : ''}
+              {' · '}覆盖 {compression.persistentSummaryMessageCount} 条
+            </span>
           )}
+          {compression.rebuildReason && <span>重建原因：{compression.rebuildReason}</span>}
+          {compression.rebuildStatus && (
+            <span>
+              重建状态：{compression.rebuildStatus}
+              {compression.rebuildChunkCount
+                ? ` · ${compression.rebuildChunksCompleted ?? 0}/${compression.rebuildChunkCount} 块`
+                : ''}
+            </span>
+          )}
+          {compression.sourceHashStatus && <span>消息来源：{compression.sourceHashStatus}</span>}
+          {compression.dependencyHashStatus && <span>项目依赖：{compression.dependencyHashStatus}</span>}
+          {compression.failureCode && <span className="sm:col-span-2">降级原因：{compression.failureCode}</span>}
+          {compression.circuitOpen && <span>摘要熔断已开启</span>}
+          {compression.casConflict && <span>摘要提交发生并发冲突</span>}
           {(compression.recalledMessageCount > 0 || compression.recalledArtifactCount > 0) && (
             <span>按引用召回 {compression.recalledMessageCount} 条消息 / {compression.recalledArtifactCount} 个产物</span>
           )}
@@ -3093,31 +5015,63 @@ function RevisionProgressCard({
   run,
   isDark,
   interactive,
-  onCancel,
+  isWorking,
+  onRetry,
 }: {
   plan: RevisionBatchPlan;
   run: AgentRun | null;
   isDark: boolean;
   interactive: boolean;
-  onCancel: () => void;
+  isWorking: boolean;
+  onRetry: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const completedStepCount = plan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length;
-  const activeStepIndex = Math.max(0, plan.steps.findIndex((step) => step.stepId === run?.currentStepId));
-  const progressRatio = run?.status === 'completed'
-    ? 1
-    : plan.steps.length > 0
-      ? Math.max(completedStepCount, activeStepIndex) / plan.steps.length
-      : 0;
-  const itemIndex = Math.min(
-    plan.revisionItems.length - 1,
-    Math.max(0, Math.floor(progressRatio * plan.revisionItems.length)),
-  );
-  const currentItem = plan.revisionItems[itemIndex];
+  const currentStepIndex = plan.steps.findIndex((step) => step.stepId === run?.currentStepId);
+  const failedStepIndex = plan.steps.findIndex((step) => step.status === 'failed');
+  const pendingStepIndex = plan.steps.findIndex((step) => step.status === 'pending' || step.status === 'running');
+  const activeStepIndex = currentStepIndex >= 0
+    ? currentStepIndex
+    : failedStepIndex >= 0
+      ? failedStepIndex
+      : pendingStepIndex >= 0
+        ? pendingStepIndex
+        : Math.max(0, Math.min(plan.steps.length - 1, completedStepCount));
   const currentStep = plan.steps[activeStepIndex] ?? plan.steps[0];
   const isRunning = run?.status === 'running' || run?.status === 'cancelling';
+  const pendingApproval = getActiveApproval(run);
+  const pendingChapterBeatApproval = pendingApproval?.checkpointType === 'chapter_beats' ? pendingApproval : null;
+  const pendingChapterBeatCount = pendingChapterBeatApproval?.beats?.length ?? 0;
+  const canRetry = Boolean(
+    interactive
+    && run?.status === 'failed'
+    && run.failureRevision
+    && (!run.recovery || run.recovery.canRecover),
+  );
+  const failedEvent = run?.status === 'failed'
+    ? [...run.events].reverse().find((event) => event.type === 'tool_result' && event.status === 'failed')
+      ?? [...run.events].reverse().find((event) => event.type === 'run_failed')
+    : null;
+  const failureCode = typeof failedEvent?.payload?.code === 'string' ? failedEvent.payload.code : '';
+  const failureMessage = typeof failedEvent?.payload?.summary === 'string'
+    ? failedEvent.payload.summary
+    : typeof failedEvent?.payload?.message === 'string'
+      ? failedEvent.payload.message
+      : '本次批量修订未完成，可以从失败步骤重试。';
+  const isApplyingSuggestions = isRunning && currentStep?.toolchain?.id === 'chapter.batch_rewrite';
+  const suggestionStatus = run?.status === 'completed'
+    ? '已应用'
+    : run?.status === 'failed' || run?.status === 'cancelled'
+      ? '未完成'
+      : pendingChapterBeatApproval
+        ? '待确认'
+      : isApplyingSuggestions
+        ? '处理中'
+        : '待应用';
   const statusLabel = !run
     ? '正在准备修订'
+    : pendingChapterBeatApproval
+      ? `待确认 · ${pendingChapterBeatCount} 章节拍`
     : run.status === 'completed'
       ? '修订草稿已完成'
       : run.status === 'failed'
@@ -3134,59 +5088,73 @@ function RevisionProgressCard({
         <div className={clsx('grid h-8 w-8 shrink-0 place-items-center rounded-md', isDark ? 'bg-white/10' : 'bg-[#edf5ff]')}>
           {isRunning || !run
             ? <Loader2 className="h-4 w-4 animate-spin text-[#2f80ed] motion-reduce:animate-none" />
+            : pendingChapterBeatApproval
+              ? <ListChecks className="h-4 w-4 text-amber-600" />
             : run.status === 'completed'
               ? <CheckCircle2 className="h-4 w-4 text-emerald-600" />
               : <AlertCircle className="h-4 w-4 text-amber-600" />}
         </div>
         <div className="min-w-0 flex-1">
           <div className="text-sm font-semibold">
-            第 {run?.status === 'completed' ? plan.revisionItems.length : itemIndex + 1} / {plan.revisionItems.length} 项修订
+            {plan.revisionItems.length} 项建议批量修订
           </div>
           <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
             {currentStep ? `第 ${activeStepIndex + 1} / ${plan.steps.length} 步 · ` : ''}{statusLabel}
           </p>
-          {currentItem && run?.status !== 'completed' && (
-            <p className={clsx('mt-1 truncate text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-disabled)]')}>{currentItem.title}</p>
+          {currentStep && run?.status !== 'completed' && (
+            <p className={clsx('mt-1 truncate text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-disabled)]')}>{currentStep.title}</p>
+          )}
+          {pendingChapterBeatApproval && (
+            <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-amber-300/80' : 'text-amber-700')}>正文尚未生成，确认章节拍后开始批量修订。</p>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          {interactive && run?.status === 'running' && (
-            <button type="button" onClick={onCancel} className={clsx('grid h-8 w-8 place-items-center rounded-md', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]')} title="停止修订" aria-label="停止修订">
-              <Square className="h-3.5 w-3.5 fill-current" />
-            </button>
-          )}
           <button type="button" onClick={() => setExpanded((value) => !value)} className={clsx('grid h-8 w-8 place-items-center rounded-md', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]')} aria-expanded={expanded} title={expanded ? '收起步骤' : '展开步骤'} aria-label={expanded ? '收起修订步骤' : '展开修订步骤'}>
             <ChevronDown className={clsx('h-4 w-4 transition-transform', expanded && 'rotate-180')} />
           </button>
         </div>
       </div>
+      {run?.status === 'failed' && (
+        <div className={clsx('border-t px-4 py-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+          <div className={clsx('rounded-md border px-3 py-2.5', isDark ? 'border-red-400/20 bg-red-500/[0.06]' : 'border-red-200 bg-red-50')}>
+            <div className={clsx('text-xs font-medium', isDark ? 'text-red-300' : 'text-red-700')}>
+              失败于第 {activeStepIndex + 1} 步{failedEvent?.toolName ? ` · ${failedEvent.toolName}` : ''}{failureCode ? ` · ${failureCode}` : ''}
+            </div>
+            <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{failureMessage}</p>
+            {canRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                disabled={isWorking}
+                className={clsx('mt-2 inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs text-white disabled:opacity-50', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
+              >
+                {isWorking ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                {run.recovery?.actionLabel || '重试失败步骤'}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {expanded && (
         <div className={clsx('border-t px-4 py-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
           <div className="space-y-2">
             {plan.revisionItems.map((item, index) => {
-              const status = run?.status === 'completed' || index < itemIndex
-                ? '已完成'
-                : index === itemIndex && run?.status === 'failed'
-                  ? '失败'
-                  : index === itemIndex && isRunning
-                    ? '处理中'
-                    : index === itemIndex && !run
-                      ? '准备中'
-                      : '等待';
               return (
                 <div key={item.findingId} className="flex items-start gap-2 text-xs leading-5">
                   <span className={clsx(
                     'mt-0.5 grid h-4 w-4 shrink-0 place-items-center rounded-full text-[10px]',
-                    status === '已完成'
+                    suggestionStatus === '已应用'
                       ? 'bg-emerald-100 text-emerald-700'
-                      : status === '处理中' || status === '准备中'
+                      : suggestionStatus === '处理中'
                         ? 'bg-blue-100 text-blue-700'
-                        : status === '失败'
+                        : suggestionStatus === '待确认'
+                          ? 'bg-amber-100 text-amber-700'
+                        : suggestionStatus === '未完成'
                           ? 'bg-red-100 text-red-700'
                           : isDark ? 'bg-white/10 text-neutral-500' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-disabled)]',
-                  )}>{status === '已完成' ? '✓' : index + 1}</span>
+                  )}>{suggestionStatus === '已应用' ? '✓' : index + 1}</span>
                   <span className="min-w-0 flex-1">{item.title}</span>
-                  <span className={clsx('shrink-0', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-disabled)]')}>{status}</span>
+                  <span className={clsx('shrink-0', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-disabled)]')}>{suggestionStatus}</span>
                 </div>
               );
             })}
@@ -3202,6 +5170,161 @@ function RevisionProgressCard({
   );
 }
 
+type AgentDecisionOption = {
+  id: string;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+};
+
+function AgentDecisionCard({
+  title,
+  context,
+  options,
+  selectedOptionId,
+  isDark,
+  isWorking,
+  currentIndex,
+  total,
+  canNavigateNext = false,
+  customAllowed = true,
+  customActive,
+  customValue,
+  customLabel = '都不是，告诉我如何做',
+  customPlaceholder = '输入具体要求……',
+  customActionLabel,
+  skipLabel = '跳过',
+  onSelect,
+  onPrevious,
+  onNext,
+  onDismiss,
+  onActivateCustom,
+  onCustomChange,
+  onCustomSubmit,
+  onCustomEscape,
+  onSkip,
+}: {
+  title: string;
+  context?: string;
+  options: AgentDecisionOption[];
+  selectedOptionId?: string;
+  isDark: boolean;
+  isWorking: boolean;
+  currentIndex?: number;
+  total?: number;
+  canNavigateNext?: boolean;
+  customAllowed?: boolean;
+  customActive: boolean;
+  customValue: string;
+  customLabel?: string;
+  customPlaceholder?: string;
+  customActionLabel: string;
+  skipLabel?: string;
+  onSelect: (optionId: string) => void;
+  onPrevious?: () => void;
+  onNext?: () => void;
+  onDismiss: () => void;
+  onActivateCustom: () => void;
+  onCustomChange: (value: string) => void;
+  onCustomSubmit: () => void;
+  onCustomEscape: () => void;
+  onSkip: () => void;
+}) {
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  useLayoutEffect(() => {
+    const input = inputRef.current;
+    if (!customActive || !input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 32), 144)}px`;
+  }, [customActive, customValue]);
+  const showNavigation = typeof currentIndex === 'number' && typeof total === 'number' && total > 1;
+  return (
+    <section className={clsx('rounded-2xl border p-2.5 shadow-sm sm:p-3', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
+      <header className="flex items-start justify-between gap-2 px-1">
+        <div className="min-w-0 flex-1">
+          <h3 className="text-sm font-semibold leading-6 sm:text-base">{title}</h3>
+          {context && <p className={clsx('mt-1 whitespace-pre-wrap text-xs font-normal leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{context}</p>}
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {showNavigation && (
+            <>
+              <button type="button" aria-label="上一个问题" onClick={onPrevious} disabled={isWorking || currentIndex === 0} className={clsx('grid h-7 w-7 place-items-center rounded-full disabled:opacity-25', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}><ChevronLeft className="h-4 w-4" /></button>
+              <span className={clsx('px-0.5 text-xs tabular-nums', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>{currentIndex + 1} / {total}</span>
+              <button type="button" aria-label="下一个问题" onClick={onNext} disabled={isWorking || currentIndex >= total - 1 || !canNavigateNext} className={clsx('grid h-7 w-7 place-items-center rounded-full disabled:opacity-25', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}><ChevronRight className="h-4 w-4" /></button>
+            </>
+          )}
+          <button type="button" aria-label="关闭问题" onClick={onDismiss} disabled={isWorking} className={clsx('grid h-8 w-8 place-items-center rounded-full disabled:opacity-40', isDark ? 'text-neutral-500 hover:bg-white/5' : 'text-[var(--ui-text-disabled)] hover:bg-[var(--ui-surface-muted)]')}><X className="h-4 w-4" /></button>
+        </div>
+      </header>
+
+      <div className="mt-2 space-y-1">
+        {options.map((option, index) => (
+          <button
+            key={option.id}
+            type="button"
+            onClick={() => onSelect(option.id)}
+            disabled={isWorking}
+            className={clsx(
+              'group flex min-h-11 w-full items-start gap-2.5 rounded-xl border px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:px-3',
+              selectedOptionId === option.id
+                ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/10' : 'border-[#2f80ed] bg-[var(--ui-surface-muted)]')
+                : (isDark ? 'border-transparent hover:bg-white/[0.07]' : 'border-transparent hover:bg-[var(--ui-surface-muted)]'),
+            )}
+          >
+            <span className={clsx('mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-full border text-xs font-semibold', isDark ? 'border-white/15 bg-white/5 text-neutral-400' : 'border-[var(--ui-border-strong)] bg-[var(--ui-surface-subtle)] text-[var(--ui-text-muted)]')}>{index + 1}</span>
+            <span className="min-w-0 flex-1 sm:flex sm:items-baseline sm:gap-2">
+              <span className="inline-flex items-center gap-1.5 text-sm font-semibold">
+                {option.label}
+                {option.recommended && <span className={clsx('rounded px-1.5 py-0.5 text-[10px] font-medium', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>推荐</span>}
+              </span>
+              {option.description && <span className={clsx('mt-0.5 block text-xs leading-4 sm:mt-0', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>{option.description}</span>}
+            </span>
+            {isWorking && selectedOptionId === option.id ? <Loader2 className="mt-1.5 h-4 w-4 shrink-0 animate-spin opacity-60" /> : <ArrowRight className="mt-1.5 h-4 w-4 shrink-0 opacity-0 transition-opacity group-hover:opacity-60 group-focus-visible:opacity-60" />}
+          </button>
+        ))}
+
+        <div className={clsx('flex min-h-11 items-center gap-2 rounded-xl border px-2.5 py-2 transition-colors sm:px-3', customActive ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/10' : 'border-[#2f80ed] bg-[var(--ui-surface-muted)]') : (isDark ? 'border-transparent hover:bg-white/[0.07]' : 'border-transparent hover:bg-[var(--ui-surface-muted)]'))}>
+          <span className={clsx('grid h-8 w-8 shrink-0 place-items-center rounded-full border', isDark ? 'border-white/15 bg-white/5 text-neutral-400' : 'border-[var(--ui-border-strong)] bg-[var(--ui-surface-subtle)] text-[var(--ui-text-muted)]')}><Pencil className="h-3.5 w-3.5" /></span>
+          {customActive ? (
+            <textarea
+              ref={inputRef}
+              autoFocus
+              value={customValue}
+              onChange={(event) => onCustomChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault();
+                  onCustomEscape();
+                } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+                  event.preventDefault();
+                  onCustomSubmit();
+                }
+              }}
+              rows={1}
+              maxLength={4000}
+              disabled={isWorking}
+              placeholder={customPlaceholder}
+              aria-label="自定义回答"
+              className={clsx('max-h-32 min-h-7 min-w-0 flex-1 resize-none overflow-y-auto border-0 bg-transparent py-0.5 text-sm leading-5 outline-none disabled:opacity-50', isDark ? 'placeholder:text-neutral-600' : 'placeholder:text-[var(--ui-text-disabled)]')}
+            />
+          ) : (
+            <button type="button" onClick={customAllowed ? onActivateCustom : onSkip} disabled={isWorking} className={clsx('min-w-0 flex-1 py-0.5 text-left text-sm disabled:opacity-50', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{customAllowed ? customLabel : '按推荐方案继续'}</button>
+          )}
+          <button
+            type="button"
+            onClick={(event) => { event.stopPropagation(); customActive ? onCustomSubmit() : onSkip(); }}
+            disabled={isWorking || (customActive && !customValue.trim())}
+            className={clsx('inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-full border px-3 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 sm:text-sm', isDark ? 'border-white/15 bg-white/5 text-neutral-200 hover:bg-white/10' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}
+          >
+            {isWorking && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {customActive ? customActionLabel : skipLabel}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function PlanCard({
   plan,
   run,
@@ -3210,7 +5333,6 @@ function PlanCard({
   isWorking,
   renderStepStatus,
   onExecute,
-  onCancel,
   onIgnore,
   onSubmitRevision,
 }: {
@@ -3221,14 +5343,35 @@ function PlanCard({
   isWorking: boolean;
   renderStepStatus: (status: AgentStepStatus) => JSX.Element;
   onExecute: () => void;
-  onCancel: () => void;
   onIgnore: () => void;
   onSubmitRevision: (revision: string) => void;
 }) {
-  const canCancel = interactive && run?.status === 'running';
   const canRetry = interactive && run?.status === 'cancelled';
   const hasStarted = Boolean(run);
+  const [isRevising, setIsRevising] = useState(false);
   const [revision, setRevision] = useState('');
+  const [isContextExpanded, setIsContextExpanded] = useState(false);
+  const { currentGoal, conversationContext } = splitAgentPlanGoal(plan.goal);
+  useEffect(() => {
+    setIsRevising(false);
+    setRevision('');
+    setIsContextExpanded(false);
+  }, [plan.planId, plan.goal]);
+  const executePlan = () => {
+    if (isWorking) return;
+    setIsRevising(false);
+    setRevision('');
+    onExecute();
+  };
+  const ignorePlan = () => {
+    if (isWorking) return;
+    onIgnore();
+  };
+  const submitRevision = () => {
+    const nextRevision = revision.trim();
+    if (isWorking || !nextRevision) return;
+    onSubmitRevision(nextRevision);
+  };
   const scopedInput = plan.steps.find((step) => step.toolchain && typeof step.toolchain.input?.kind === 'string')?.toolchain?.input;
   const scopeKind = typeof scopedInput?.kind === 'string' ? scopedInput.kind : '';
   const scopeChapterIds = Array.isArray(scopedInput?.chapterIds) ? scopedInput.chapterIds.filter((id): id is string => typeof id === 'string') : [];
@@ -3251,10 +5394,33 @@ function PlanCard({
             </span>
             {plan.title}
           </div>
-          <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{plan.goal}</p>
+          {currentGoal && <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{currentGoal}</p>}
+          {conversationContext && (
+            <div className="mt-1.5">
+              <button
+                type="button"
+                aria-expanded={isContextExpanded}
+                aria-controls={`plan-context-${plan.planId}`}
+                onClick={() => setIsContextExpanded((expanded) => !expanded)}
+                className={clsx('inline-flex items-center gap-1 text-xs transition-colors', isDark ? 'text-neutral-500 hover:text-neutral-300' : 'text-[var(--ui-text-muted)] hover:text-[var(--ui-text-secondary)]')}
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                {isContextExpanded ? '收起会话背景' : '查看会话背景'}
+                <ChevronDown className={clsx('h-3.5 w-3.5 transition-transform', isContextExpanded && 'rotate-180')} />
+              </button>
+              {isContextExpanded && (
+                <div
+                  id={`plan-context-${plan.planId}`}
+                  className={clsx('mt-2 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-md border px-3 py-2 text-xs leading-5', isDark ? 'border-white/10 bg-black/20 text-neutral-500' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)] text-[var(--ui-text-muted)]')}
+                >
+                  {conversationContext}
+                </div>
+              )}
+            </div>
+          )}
           {scopeLabel && (
             <div className="mt-2 flex flex-wrap gap-1.5">
-              <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'bg-[#eef6ff] text-[#1f6fca]')}>{scopeLabel}</span>
+              <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'bg-[#eef6ff] text-[#1f6fca]')}>初始上下文：{scopeLabel}</span>
               <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>{scopedInput?.processingMode === 'batched' ? '分批处理' : '详细处理'}</span>
               {scopeExperts.map((expert) => <span key={expert} className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>{expert}</span>)}
             </div>
@@ -3267,8 +5433,17 @@ function PlanCard({
         )}
       </div>
       <div className="mt-4 space-y-2">
-        {plan.steps.map((step, index) => (
-          <div key={step.stepId} className={clsx('rounded-md border p-3 flex gap-3', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
+        {plan.steps.map((step, index) => {
+          const resolvedTarget = step.toolchain?.input?._resolvedTarget;
+          const targetRecord = resolvedTarget && typeof resolvedTarget === 'object' && !Array.isArray(resolvedTarget)
+            ? resolvedTarget as Record<string, unknown>
+            : null;
+          const targetLabel = typeof targetRecord?.label === 'string'
+            ? targetRecord.label
+            : typeof targetRecord?.title === 'string'
+              ? targetRecord.title
+              : null;
+          return <div key={step.stepId} className={clsx('rounded-md border p-3 flex gap-3', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
             <div className={clsx('h-7 w-7 rounded-md grid place-items-center text-xs font-mono shrink-0', isDark ? 'bg-white/10' : 'bg-white border border-[var(--ui-border)]')}>{index + 1}</div>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
@@ -3285,75 +5460,54 @@ function PlanCard({
                     {step.toolchain.id}@{step.toolchain.version}
                   </span>
                 )}
+                {step.skills?.map((skill) => (
+                  <span
+                    key={`${skill.skillId}:${skill.revisionId}`}
+                    title={`Skill revision: ${skill.revisionId}\nHash: ${skill.contentHash}`}
+                    className={clsx(
+                      'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-mono',
+                      isDark ? 'bg-violet-400/10 text-violet-300' : 'border border-violet-200 bg-violet-50 text-violet-700',
+                    )}
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    {skill.stableId}@{skill.version}
+                    <span className="opacity-65">· {skill.selectionSource}</span>
+                  </span>
+                ))}
               </div>
+              {targetLabel && (
+                <div className={clsx('mt-2 text-xs', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>
+                  写作目标：{targetLabel}
+                </div>
+              )}
             </div>
             {step.status === 'completed' && <CheckCircle2 className="h-4 w-4 text-[#2f80ed]" />}
           </div>
-        ))}
+        })}
       </div>
       {!hasStarted && interactive && (
-        <div className={clsx('mt-4 rounded-lg border p-3', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
-          <div className="text-sm font-semibold">实施此计划？</div>
-          <div className="mt-3 grid gap-2 text-sm">
-            <label className={clsx('flex items-center gap-2 rounded-md px-2 py-2', isDark ? 'bg-white/5' : 'bg-white border border-[var(--ui-border)]')}>
-              <span className={clsx('grid h-6 w-6 place-items-center rounded-full text-xs font-semibold', isDark ? 'bg-white text-black' : 'bg-indigo-600 text-white')}>1</span>
-              是，实施此计划
-            </label>
-            <label className={clsx('flex items-center gap-2 rounded-md px-2 py-2', isDark ? 'bg-white/5 text-neutral-300' : 'bg-white border border-[var(--ui-border)] text-[var(--ui-text-muted)]')}>
-              <span className={clsx('grid h-6 w-6 place-items-center rounded-full border text-xs', isDark ? 'border-white/20' : 'border-[var(--ui-border-strong)]')}>2</span>
-              否，请告知如何调整
-            </label>
-          </div>
-          <textarea
-            value={revision}
-            onChange={(event) => setRevision(event.target.value)}
-            rows={2}
-            placeholder="例如：不要生成改写稿，只输出问题清单"
-            className={clsx('mt-3 block w-full resize-none rounded-md border px-3 py-2 text-sm leading-6 outline-none', isDark ? 'border-white/10 bg-black/20 placeholder:text-neutral-600' : 'border-[var(--ui-border)] bg-white placeholder:text-[var(--ui-text-disabled)]')}
+        <div className="mt-3">
+          <AgentDecisionCard
+            title="实施此计划？"
+            options={[{ id: 'execute', label: '是，实施此计划', recommended: true }]}
+            isDark={isDark}
+            isWorking={isWorking}
+            customActive={isRevising}
+            customValue={revision}
+            customLabel="否，并告诉我如何做得不同"
+            customPlaceholder="告诉我应该如何调整计划……"
+            customActionLabel="提交"
+            onSelect={executePlan}
+            onDismiss={ignorePlan}
+            onActivateCustom={() => setIsRevising(true)}
+            onCustomChange={setRevision}
+            onCustomSubmit={submitRevision}
+            onCustomEscape={() => setIsRevising(false)}
+            onSkip={ignorePlan}
           />
-          <div className="mt-3 flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={onIgnore}
-              disabled={isWorking}
-              className={clsx('h-9 px-3 rounded-md text-sm border disabled:opacity-50', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-subtle)]')}
-            >
-              忽略
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onSubmitRevision(revision);
-                setRevision('');
-              }}
-              disabled={isWorking || !revision.trim()}
-              className={clsx('h-9 px-3 rounded-md text-sm border disabled:opacity-50', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}
-            >
-              提交
-            </button>
-            <button
-              type="button"
-              onClick={onExecute}
-              disabled={isWorking}
-              className={clsx('h-9 px-3 rounded-md inline-flex items-center gap-2 text-sm text-white disabled:opacity-50', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
-            >
-              {isWorking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-              实施此计划
-            </button>
-          </div>
         </div>
       )}
       <div className="mt-4 flex items-center gap-2">
-        {canCancel && (
-          <button
-            type="button"
-            onClick={onCancel}
-            className={clsx('h-9 px-3 rounded-md inline-flex items-center gap-2 text-sm border', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border)] text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-subtle)]')}
-          >
-            <Square className="h-4 w-4" />
-            取消
-          </button>
-        )}
         {canRetry && (
           <button
             type="button"
@@ -3370,9 +5524,129 @@ function PlanCard({
   );
 }
 
+type ActivityTone = 'running' | 'completed' | 'failed' | 'waiting' | 'cancelled' | 'idle';
+
+function activityToneClass(tone: ActivityTone, isDark: boolean): string {
+  return tone === 'failed'
+    ? (isDark ? 'text-red-300' : 'text-red-700')
+    : tone === 'waiting'
+      ? (isDark ? 'text-amber-300' : 'text-amber-700')
+      : tone === 'completed'
+        ? (isDark ? 'text-emerald-300' : 'text-emerald-700')
+        : (isDark ? 'text-neutral-300' : 'text-[var(--ui-text-muted)]');
+}
+
+function activityStatusIcon(tone: ActivityTone): ReactNode {
+  return tone === 'running'
+    ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+    : tone === 'completed'
+      ? <CheckCircle2 className="h-4 w-4" />
+      : tone === 'failed'
+        ? <AlertCircle className="h-4 w-4" />
+        : tone === 'waiting'
+          ? <MessageSquare className="h-4 w-4" />
+          : <Square className="h-4 w-4" />;
+}
+
+function ActivityStreamShell({
+  isDark,
+  toneClass,
+  statusIcon,
+  title,
+  subline,
+  expanded,
+  detailPanelId,
+  onToggle,
+  failure = false,
+  children,
+}: {
+  isDark: boolean;
+  toneClass: string;
+  statusIcon: ReactNode;
+  title: string;
+  subline: string;
+  expanded: boolean;
+  detailPanelId: string;
+  onToggle: () => void;
+  failure?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className={clsx(
+      'overflow-hidden rounded-md border',
+      failure
+        ? isDark ? 'border-red-400/25 bg-red-500/[0.04]' : 'border-[#e9c8c4] bg-white'
+        : isDark ? 'border-white/10 bg-black/15' : 'border-[var(--ui-border)] bg-white',
+    )}>
+      <div className="flex min-h-12 w-full items-center gap-3 px-3 py-2.5">
+        <span className={clsx('grid h-8 w-8 shrink-0 place-items-center rounded-md', toneClass, isDark ? 'bg-white/5' : 'bg-[var(--ui-surface-muted)]')}>
+          {statusIcon}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span aria-live="polite" className={clsx('block text-sm font-medium', toneClass)}>{title}</span>
+          <span className={clsx('mt-0.5 block text-xs leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+            {subline}
+          </span>
+        </span>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={expanded}
+          aria-controls={detailPanelId}
+          className={clsx('inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]')}
+        >
+          <span className="max-[520px]:sr-only">{expanded ? '收起详情' : '查看详情'}</span>
+          <ChevronDown className={clsx('h-4 w-4 transition-transform motion-reduce:transition-none', expanded && 'rotate-180')} />
+        </button>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function ActivityDetails({
+  id,
+  details,
+  isDark,
+  ariaLabel,
+  emptyLabel,
+  scrollRef,
+  onScroll,
+}: {
+  id: string;
+  details: ActivityDetail[];
+  isDark: boolean;
+  ariaLabel: string;
+  emptyLabel: string;
+  scrollRef?: RefObject<HTMLDivElement>;
+  onScroll?: () => void;
+}) {
+  return (
+    <div
+      id={id}
+      ref={scrollRef}
+      role="region"
+      aria-label={ariaLabel}
+      onScroll={onScroll}
+      className={clsx('max-h-80 overflow-y-auto border-t px-3 py-2', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}
+    >
+      {details.length > 0 ? (
+        <div className="space-y-0">
+          {details.map((detail, index) => (
+            <ActivityDetailRow key={detail.eventId} detail={detail} isDark={isDark} isLast={index === details.length - 1} />
+          ))}
+        </div>
+      ) : (
+        <div className={clsx('px-1 py-3 text-sm', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>{emptyLabel}</div>
+      )}
+    </div>
+  );
+}
+
 function AgentActivityStream({
   run,
   plan,
+  activityId,
   isDark,
   interactive,
   isWorking,
@@ -3381,6 +5655,7 @@ function AgentActivityStream({
 }: {
   run: AgentRun;
   plan: AgentPlan;
+  activityId?: string;
   isDark: boolean;
   interactive: boolean;
   isWorking: boolean;
@@ -3391,7 +5666,7 @@ function AgentActivityStream({
   const [expanded, setExpanded] = useState(false);
   const detailScrollRef = useRef<HTMLDivElement | null>(null);
   const followsDetailRef = useRef(true);
-  const detailPanelId = `agent-activity-${run.runId.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const detailPanelId = `agent-activity-${(activityId || run.runId).replace(/[^a-zA-Z0-9_-]/g, '-')}`;
 
   const scrollDetailsToLatest = useCallback(() => {
     const node = detailScrollRef.current;
@@ -3419,29 +5694,20 @@ function AgentActivityStream({
     });
   };
 
-  const toneClass = projection.tone === 'failed'
-    ? (isDark ? 'text-red-300' : 'text-red-700')
-    : projection.tone === 'waiting'
-      ? (isDark ? 'text-amber-300' : 'text-amber-700')
-      : projection.tone === 'completed'
-        ? (isDark ? 'text-emerald-300' : 'text-emerald-700')
-        : (isDark ? 'text-neutral-300' : 'text-[var(--ui-text-muted)]');
+  const toneClass = activityToneClass(projection.tone, isDark);
+  const statusIcon = activityStatusIcon(projection.tone);
 
-  const statusIcon = projection.tone === 'running'
-    ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-    : projection.tone === 'completed'
-      ? <CheckCircle2 className="h-4 w-4" />
-      : projection.tone === 'failed'
-        ? <AlertCircle className="h-4 w-4" />
-        : projection.tone === 'waiting'
-          ? <MessageSquare className="h-4 w-4" />
-          : <Square className="h-4 w-4" />;
-
+  const descriptorRecovery = run.status === 'failed'
+    && run.recovery?.canRecover
+    && run.recovery.retryStrategy !== 'none';
   const retryableFailure = run.status === 'failed'
-    && projection.retry?.phase === 'exhausted'
-    && projection.retry.retryable
-    && Boolean(run.failureRevision);
+    && Boolean(run.failureRevision)
+    && Boolean(
+      descriptorRecovery
+      || (projection.retry?.phase === 'exhausted' && projection.retry.retryable)
+    );
   const canRetry = retryableFailure && interactive;
+  const retryActionLabel = run.recovery?.actionLabel || '重试失败步骤';
   const completedSteps = plan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length;
   const totalActivitySteps = plan.steps.length + (projection.retry?.stage === '整理最终回答' ? 1 : 0);
   const activityTitle = retryableFailure ? '任务已暂停' : projection.summary;
@@ -3454,34 +5720,17 @@ function AgentActivityStream({
         : `${projection.details.length} 项操作 · 查看明细`;
 
   return (
-    <div className={clsx(
-      'overflow-hidden rounded-md border',
-      retryableFailure
-        ? isDark ? 'border-red-400/25 bg-red-500/[0.04]' : 'border-[#e9c8c4] bg-white'
-        : isDark ? 'border-white/10 bg-black/15' : 'border-[var(--ui-border)] bg-white',
-    )}>
-      <div className="flex min-h-12 w-full items-center gap-3 px-3 py-2.5">
-        <span className={clsx('grid h-8 w-8 shrink-0 place-items-center rounded-md', toneClass, isDark ? 'bg-white/5' : 'bg-[var(--ui-surface-muted)]')}>
-          {statusIcon}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span aria-live="polite" className={clsx('block text-sm font-medium', toneClass)}>{activityTitle}</span>
-          <span className={clsx('mt-0.5 block text-xs leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-            {activitySubline}
-          </span>
-        </span>
-        <button
-          type="button"
-          onClick={toggleExpanded}
-          aria-expanded={expanded}
-          aria-controls={detailPanelId}
-          className={clsx('inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]')}
-        >
-          <span className="max-[520px]:sr-only">{expanded ? '收起详情' : '查看详情'}</span>
-          <ChevronDown className={clsx('h-4 w-4 transition-transform motion-reduce:transition-none', expanded && 'rotate-180')} />
-        </button>
-      </div>
-
+    <ActivityStreamShell
+      isDark={isDark}
+      toneClass={toneClass}
+      statusIcon={statusIcon}
+      title={activityTitle}
+      subline={activitySubline}
+      expanded={expanded}
+      detailPanelId={detailPanelId}
+      onToggle={toggleExpanded}
+      failure={retryableFailure}
+    >
       {retryableFailure && (
         <div className={clsx('border-t px-3 pb-3 pt-2.5', isDark ? 'border-white/10' : 'border-[#f0dedb]')}>
           <p className={clsx('text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
@@ -3500,7 +5749,7 @@ function AgentActivityStream({
                 className={clsx('inline-flex min-h-9 items-center justify-center gap-2 rounded-md px-3 text-sm text-white disabled:opacity-50', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
               >
                 {isWorking ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <RotateCcw className="h-4 w-4" />}
-                重试失败步骤
+                {retryActionLabel}
               </button>
               <button
                 type="button"
@@ -3516,26 +5765,17 @@ function AgentActivityStream({
       )}
 
       {expanded && (
-        <div
+        <ActivityDetails
           id={detailPanelId}
-          ref={detailScrollRef}
-          role="region"
-          aria-label="Agent 操作明细"
+          details={projection.details}
+          isDark={isDark}
+          ariaLabel="Agent 操作明细"
+          emptyLabel="等待第一条执行事件。"
+          scrollRef={detailScrollRef}
           onScroll={handleDetailScroll}
-          className={clsx('max-h-80 overflow-y-auto border-t px-3 py-2', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}
-        >
-          {projection.details.length > 0 ? (
-            <div className="space-y-0">
-              {projection.details.map((detail, index) => (
-                <ActivityDetailRow key={detail.eventId} detail={detail} isDark={isDark} isLast={index === projection.details.length - 1} />
-              ))}
-            </div>
-          ) : (
-            <div className={clsx('px-1 py-3 text-sm', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>等待第一条执行事件。</div>
-          )}
-        </div>
+        />
       )}
-    </div>
+    </ActivityStreamShell>
   );
 }
 
@@ -3589,7 +5829,217 @@ function ActivityDetailRow({ detail, isDark, isLast }: { detail: ActivityDetail;
   );
 }
 
-function ApprovalRequiredCard({
+type LegacyUserInputDraftAnswer = {
+  answerKind: 'option' | 'custom';
+  selectedOptionId: string;
+  customText: string;
+};
+
+function legacyDefaultUserInputAnswers(request: AgentUserInputRequest): Record<string, LegacyUserInputDraftAnswer> {
+  return Object.fromEntries(request.questions.map((question) => [question.questionId, {
+    answerKind: 'option' as const,
+    selectedOptionId: question.options[0]?.optionId ?? '',
+    customText: '',
+  }]));
+}
+
+function LegacyUserInputRequiredCard({
+  request,
+  isDark,
+  isWorking,
+  onSubmit,
+}: {
+  request: AgentUserInputRequest;
+  isDark: boolean;
+  isWorking: boolean;
+  onSubmit: (answers: AgentUserInputAnswer[]) => void;
+}) {
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [answers, setAnswers] = useState<Record<string, LegacyUserInputDraftAnswer>>(() => legacyDefaultUserInputAnswers(request));
+  useEffect(() => {
+    setQuestionIndex(0);
+    setAnswers(legacyDefaultUserInputAnswers(request));
+  }, [request.requestId]);
+
+  const question = request.questions[questionIndex];
+  if (!question) return null;
+  const answer = answers[question.questionId] ?? {
+    answerKind: 'option' as const,
+    selectedOptionId: question.options[0]?.optionId ?? '',
+    customText: '',
+  };
+  const currentValid = answer.answerKind === 'custom'
+    ? Boolean(answer.customText.trim())
+    : Boolean(answer.selectedOptionId);
+  const allValid = request.questions.every((item) => {
+    const value = answers[item.questionId];
+    return value?.answerKind === 'custom' ? Boolean(value.customText.trim()) : Boolean(value?.selectedOptionId);
+  });
+  const isLast = questionIndex === request.questions.length - 1;
+  const selectOption = (optionId: string) => {
+    setAnswers((current) => ({
+      ...current,
+      [question.questionId]: { answerKind: 'option', selectedOptionId: optionId, customText: '' },
+    }));
+  };
+  const selectCustom = () => {
+    setAnswers((current) => ({
+      ...current,
+      [question.questionId]: { answerKind: 'custom', selectedOptionId: '', customText: current[question.questionId]?.customText ?? '' },
+    }));
+  };
+  const submit = () => {
+    if (!allValid || isWorking) return;
+    onSubmit(request.questions.map((item): AgentUserInputAnswer => {
+      const value = answers[item.questionId];
+      return value.answerKind === 'custom'
+        ? { questionId: item.questionId, answerKind: 'custom', customText: value.customText.trim() }
+        : { questionId: item.questionId, answerKind: 'option', selectedOptionId: value.selectedOptionId };
+    }));
+  };
+
+  return (
+    <div className={clsx('rounded-lg border p-4', isDark ? 'border-[#2f80ed]/40 bg-[#2f80ed]/10' : 'border-[#b8d7ff] bg-[#f3f8ff]')}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className={clsx('inline-flex items-center gap-2 rounded-full px-2 py-1 text-xs font-semibold text-white', isDark ? 'bg-[#1f2328]' : 'bg-indigo-600')}>
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            需要你决定
+          </div>
+          <div className="mt-3 text-base font-semibold">{request.title}</div>
+          <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{request.reason}</p>
+          {request.evidence.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {request.evidence.map((item) => (
+                <span key={item.evidenceId} className={clsx('rounded px-2 py-1 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'border border-[#d8e8ff] bg-white text-[var(--ui-text-muted)]')}>
+                  已读取：{item.title}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+        <span className={clsx('shrink-0 rounded px-2 py-1 text-xs tabular-nums', isDark ? 'bg-white/10 text-neutral-300' : 'border border-[#d8e8ff] bg-white text-[var(--ui-text-muted)]')}>
+          {questionIndex + 1} / {request.questions.length}
+        </span>
+      </div>
+
+      <div className="mt-4">
+        <div className={clsx('text-xs font-semibold', isDark ? 'text-[#76b7ff]' : 'text-indigo-600')}>{question.header}</div>
+        <p className="mt-1 text-sm font-medium leading-6">{question.prompt}</p>
+        <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+          推荐理由：{question.recommendationReason}
+        </p>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        {question.options.map((option, optionIndex) => {
+          const selected = answer.answerKind === 'option' && answer.selectedOptionId === option.optionId;
+          return (
+            <button
+              key={option.optionId}
+              type="button"
+              onClick={() => selectOption(option.optionId)}
+              className={clsx(
+                'w-full rounded-md border px-3 py-2 text-left transition-colors',
+                selected
+                  ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/20' : 'border-[#2f80ed] bg-white')
+                  : (isDark ? 'border-white/10 bg-black/20 hover:bg-white/5' : 'border-[#d8e8ff] bg-white/70 hover:bg-white'),
+              )}
+            >
+              <div className="flex items-start gap-3">
+                <span className={clsx('mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs', selected ? (isDark ? 'bg-[#2f80ed] text-white' : 'bg-indigo-600 text-white') : (isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'))}>
+                  {optionIndex + 1}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-center gap-2 text-sm font-medium">
+                    {option.label}
+                    {option.optionId === question.recommendedOptionId && (
+                      <span className={clsx('rounded px-1.5 py-0.5 text-[10px]', isDark ? 'bg-[#2f80ed]/30 text-[#9dccff]' : 'bg-indigo-50 text-indigo-700')}>推荐</span>
+                    )}
+                  </span>
+                  <span className={clsx('mt-0.5 block text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{option.description}</span>
+                </span>
+              </div>
+            </button>
+          );
+        })}
+
+        <div className={clsx('rounded-md border px-3 py-2', answer.answerKind === 'custom' ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/20' : 'border-[#2f80ed] bg-white') : (isDark ? 'border-white/10 bg-black/20' : 'border-[#d8e8ff] bg-white/70'))}>
+          <button type="button" onClick={selectCustom} className="flex w-full items-center gap-3 text-left">
+            <span className={clsx('grid h-6 w-6 place-items-center rounded-full text-xs', answer.answerKind === 'custom' ? (isDark ? 'bg-[#2f80ed] text-white' : 'bg-indigo-600 text-white') : (isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'))}>○</span>
+            <span className="text-sm font-medium">都不是，告诉我如何做</span>
+          </button>
+          {answer.answerKind === 'custom' && (
+            <textarea
+              autoFocus
+              value={answer.customText}
+              onChange={(event) => setAnswers((current) => ({
+                ...current,
+                [question.questionId]: { answerKind: 'custom', selectedOptionId: '', customText: event.target.value },
+              }))}
+              rows={3}
+              maxLength={4000}
+              placeholder="输入具体要求……"
+              className={clsx('mt-2 block w-full resize-none rounded-md border px-3 py-2 text-sm leading-6 outline-none', isDark ? 'border-white/10 bg-black/20 placeholder:text-neutral-600' : 'border-[#d8e8ff] bg-white placeholder:text-[var(--ui-text-disabled)]')}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setQuestionIndex((current) => Math.max(0, current - 1))}
+          disabled={isWorking || questionIndex === 0}
+          className={clsx('h-9 rounded-md border px-3 text-sm disabled:opacity-40', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[#d8e8ff] bg-white text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-subtle)]')}
+        >
+          上一个问题
+        </button>
+        <button
+          type="button"
+          onClick={() => isLast ? submit() : setQuestionIndex((current) => Math.min(request.questions.length - 1, current + 1))}
+          disabled={isWorking || !currentValid || (isLast && !allValid)}
+          className={clsx('inline-flex h-9 items-center gap-2 rounded-md px-4 text-sm text-white disabled:opacity-50', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
+        >
+          {isWorking && isLast ? <Loader2 className="h-4 w-4 animate-spin" /> : isLast ? <Send className="h-4 w-4" /> : null}
+          {isLast ? '提交回答' : '下一个问题'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LegacyUserInputResolutionCard({ resolution, isDark }: { resolution: AgentUserInputResolution; isDark: boolean }) {
+  const request = resolution.request;
+  return (
+    <div className={clsx('rounded-lg border p-4', isDark ? 'border-white/10 bg-white/[0.03]' : 'border-[var(--ui-border)] bg-white')}>
+      <div className="flex items-center gap-2 text-sm font-semibold">
+        <CheckCircle2 className={clsx('h-4 w-4', isDark ? 'text-[#76b7ff]' : 'text-indigo-600')} />
+        已提交 {resolution.answers.length} 个决定
+      </div>
+      <div className="mt-3 space-y-2">
+        {resolution.answers.map((answer, index) => {
+          const question = request?.questions.find((item) => item.questionId === answer.questionId);
+          const selected = answer.answerKind === 'custom'
+            ? answer.customText
+            : answer.answerKind === 'skipped'
+              ? '已跳过'
+              : question?.options.find((item) => item.optionId === answer.selectedOptionId)?.label ?? answer.selectedOptionId;
+          return (
+            <div key={answer.questionId} className={clsx('text-sm leading-6', isDark ? 'text-neutral-300' : 'text-[var(--ui-text-primary)]')}>
+              {index + 1}. {question?.header ?? answer.questionId}：{selected}
+            </div>
+          );
+        })}
+      </div>
+      <div className={clsx('mt-3 rounded-md px-3 py-2 text-sm leading-6', isDark ? 'bg-black/20 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
+        AI 理解：{resolution.understandingSummary}
+      </div>
+    </div>
+  );
+}
+
+function LegacyApprovalRequiredCard({
   approval,
   isDark,
   isWorking,
@@ -3684,27 +6134,219 @@ function ApprovalRequiredCard({
   );
 }
 
-function DraftBatchCard({ draftBatchId, isDark, onOpenReview }: { draftBatchId: string; isDark: boolean; onOpenReview: () => void }) {
+// Kept as source-level read compatibility while persisted legacy cards remain
+// loadable; all live decision flows below use AgentDecisionCard.
+void LegacyUserInputRequiredCard;
+void LegacyUserInputResolutionCard;
+void LegacyApprovalRequiredCard;
+
+function UserInputRequiredCard({
+  request,
+  isDark,
+  isWorking,
+  draft,
+  onDraftChange,
+  onSubmit,
+  onDismiss,
+}: {
+  request: AgentUserInputRequest;
+  isDark: boolean;
+  isWorking: boolean;
+  draft?: UserInputCardDraft;
+  onDraftChange: (draft: UserInputCardDraft) => void;
+  onSubmit: (answers: AgentUserInputAnswer[]) => void;
+  onDismiss: () => void;
+}) {
+  const [questionIndex, setQuestionIndex] = useState(draft?.questionIndex ?? 0);
+  const [answers, setAnswers] = useState<Record<string, AgentUserInputAnswer>>(draft?.answers ?? {});
+  const [customQuestionId, setCustomQuestionId] = useState<string | null>(draft?.customQuestionId ?? null);
+  const [customDrafts, setCustomDrafts] = useState<Record<string, string>>(draft?.customDrafts ?? {});
+  const submittingRef = useRef(false);
+  useEffect(() => {
+    setQuestionIndex(draft?.questionIndex ?? 0);
+    setAnswers(draft?.answers ?? {});
+    setCustomQuestionId(draft?.customQuestionId ?? null);
+    setCustomDrafts(draft?.customDrafts ?? {});
+    submittingRef.current = false;
+  }, [request.requestId]);
+  useEffect(() => {
+    onDraftChange({ questionIndex, answers, customQuestionId, customDrafts });
+  }, [answers, customDrafts, customQuestionId, questionIndex]);
+  useEffect(() => {
+    if (!isWorking) submittingRef.current = false;
+  }, [isWorking]);
+
+  const question = request.questions[questionIndex];
+  if (!question) return null;
+  const answer = answers[question.questionId];
+  const isLast = questionIndex === request.questions.length - 1;
+  const customActive = customQuestionId === question.questionId;
+  const customValue = customDrafts[question.questionId] ?? '';
+  const submitCompleteAnswers = (nextAnswers: Record<string, AgentUserInputAnswer>) => {
+    const ordered = request.questions.map((item) => nextAnswers[item.questionId]);
+    if (isWorking || submittingRef.current || ordered.some((item) => !item)) return;
+    submittingRef.current = true;
+    onSubmit(ordered);
+  };
+  const saveAndAdvance = (nextAnswer: AgentUserInputAnswer) => {
+    const nextAnswers = { ...answers, [question.questionId]: nextAnswer };
+    setAnswers(nextAnswers);
+    if (isLast) {
+      if (nextAnswer.answerKind !== 'custom') setCustomQuestionId(null);
+      submitCompleteAnswers(nextAnswers);
+      return;
+    }
+    setCustomQuestionId(null);
+    setQuestionIndex((current) => Math.min(request.questions.length - 1, current + 1));
+  };
+  const submitCustom = () => {
+    const value = customValue.trim();
+    if (!value) return;
+    saveAndAdvance({ questionId: question.questionId, answerKind: 'custom', customText: value });
+  };
+
   return (
-    <div className={clsx('rounded-lg border p-4', isDark ? 'border-white/10 bg-white/[0.03]' : 'border-[var(--ui-border)] bg-white')}>
-      <div className="flex items-start gap-3">
-        <div className={clsx('grid h-8 w-8 shrink-0 place-items-center rounded-md', isDark ? 'bg-white/10' : 'bg-[var(--ui-surface-muted)]')}>
-          <ListChecks className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold">已生成多章节草稿</div>
-          <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
-            可以逐章检查节拍和正文，只提交连续且未过期的章节前缀。
-          </p>
-          <div className={clsx('mt-2 rounded border px-2 py-1 text-xs font-mono', isDark ? 'border-white/10 bg-black/20 text-neutral-400' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)] text-[var(--ui-text-muted)]')}>
-            {draftBatchId}
+    <AgentDecisionCard
+      title={question.prompt}
+      context={`${request.title} · 第 ${request.round ?? 1} 轮 · ${request.reason}${request.evidence.length ? ` · 已读取 ${request.evidence.length} 项上下文` : ''} · 推荐理由：${question.recommendationReason}`}
+      options={question.options.map((option) => ({
+        id: option.optionId,
+        label: option.label,
+        description: option.description,
+        recommended: option.optionId === question.recommendedOptionId,
+      }))}
+      selectedOptionId={answer?.answerKind === 'option' ? answer.selectedOptionId : undefined}
+      isDark={isDark}
+      isWorking={isWorking}
+      currentIndex={questionIndex}
+      total={request.questions.length}
+      canNavigateNext={Boolean(answer)}
+      customActive={customActive}
+      customValue={customValue}
+      customActionLabel={isLast ? (isWorking ? '提交中' : '提交') : '下一步'}
+      onSelect={(optionId) => saveAndAdvance({ questionId: question.questionId, answerKind: 'option', selectedOptionId: optionId })}
+      onPrevious={() => {
+        setCustomQuestionId(null);
+        setQuestionIndex((current) => Math.max(0, current - 1));
+      }}
+      onNext={() => {
+        if (!answer) return;
+        setCustomQuestionId(null);
+        setQuestionIndex((current) => Math.min(request.questions.length - 1, current + 1));
+      }}
+      onDismiss={onDismiss}
+      onActivateCustom={() => setCustomQuestionId(question.questionId)}
+      onCustomChange={(value) => setCustomDrafts((current) => ({ ...current, [question.questionId]: value }))}
+      onCustomSubmit={submitCustom}
+      onCustomEscape={() => setCustomQuestionId(null)}
+      onSkip={() => saveAndAdvance({ questionId: question.questionId, answerKind: 'skipped' })}
+    />
+  );
+}
+
+function UserInputResolutionCard({ resolution, isDark }: { resolution: AgentUserInputResolution; isDark: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const request = resolution.request;
+  const answerLabels = resolution.answers.map((item) => {
+    const question = request?.questions.find((candidate) => candidate.questionId === item.questionId);
+    const effective = resolution.effectiveAnswers?.find((candidate) => candidate.questionId === item.questionId);
+    if (item.answerKind === 'custom') return item.customText;
+    if (item.answerKind === 'skipped') {
+      const recommended = question?.options.find((option) => option.optionId === effective?.selectedOptionId)?.label
+        ?? effective?.selectedOptionId
+        ?? '';
+      return `已跳过；采用推荐项：${recommended}`;
+    }
+    return question?.options.find((option) => option.optionId === item.selectedOptionId)?.label ?? item.selectedOptionId;
+  });
+  const answerPreview = answerLabels.filter(Boolean).join('；');
+  const visibleAnswerPreview = answerPreview.length > 160 ? `${answerPreview.slice(0, 157)}...` : answerPreview;
+  const label = resolution.status === 'dismissed'
+    ? `已关闭问题 · 第 ${resolution.round ?? 1} 轮`
+    : `已提交 ${resolution.answers.length} 个决定 · 第 ${resolution.round ?? 1} 轮`;
+  return (
+    <section className={clsx('rounded-2xl border', isDark ? 'border-white/10 bg-white/[0.03]' : 'border-[var(--ui-border)] bg-white')}>
+      <button type="button" onClick={() => setExpanded((value) => !value)} className="flex w-full items-center gap-3 px-4 py-3 text-left">
+        <CircleHelp className={clsx('h-4 w-4 shrink-0', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')} />
+        <span className="min-w-0 flex-1">
+          <span className={clsx('block text-sm', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{label}</span>
+          {visibleAnswerPreview && (
+            <span className={clsx('mt-0.5 block break-words text-sm leading-5', isDark ? 'text-neutral-200' : 'text-[var(--ui-text-primary)]')}>
+              {visibleAnswerPreview}
+            </span>
+          )}
+        </span>
+        <ChevronDown className={clsx('h-4 w-4 transition-transform', expanded && 'rotate-180')} />
+      </button>
+      {expanded && (
+        <div className={clsx('border-t px-4 py-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+          <div className="space-y-2">
+            {resolution.answers.map((item, index) => {
+              const question = request?.questions.find((candidate) => candidate.questionId === item.questionId);
+              return <p key={item.questionId} className="text-sm leading-6">{index + 1}. {question?.header ?? item.questionId}：{answerLabels[index]}</p>;
+            })}
           </div>
-          <button type="button" onClick={onOpenReview} className={clsx('mt-3 h-9 rounded-md border px-3 text-sm', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border)] text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
-            打开批次审核
-          </button>
+          {resolution.understandingSummary && <p className={clsx('mt-3 rounded-xl px-3 py-2 text-sm leading-6', isDark ? 'bg-black/20 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>AI 理解：{resolution.understandingSummary}</p>}
         </div>
-      </div>
-    </div>
+      )}
+    </section>
+  );
+}
+
+function ApprovalRequiredCard({
+  approval,
+  isDark,
+  isWorking,
+  draft,
+  onDraftChange,
+  onSubmit,
+  onDismiss,
+}: {
+  approval: AgentApprovalRequest;
+  isDark: boolean;
+  isWorking: boolean;
+  draft?: ApprovalCardDraft;
+  onDraftChange: (draft: ApprovalCardDraft) => void;
+  onSubmit: (selectedOptionIds: string[], freeText: string) => void;
+  onDismiss: () => void;
+}) {
+  const [customActive, setCustomActive] = useState(draft?.customActive ?? false);
+  const [freeText, setFreeText] = useState(draft?.freeText ?? '');
+  useEffect(() => {
+    setCustomActive(draft?.customActive ?? false);
+    setFreeText(draft?.freeText ?? '');
+  }, [approval.checkpointId]);
+  useEffect(() => {
+    onDraftChange({ customActive, freeText });
+  }, [customActive, freeText]);
+  const submitCustom = () => {
+    const value = freeText.trim();
+    if (value) onSubmit([], value);
+  };
+  const defaultOptionId = approval.options[0]?.id;
+  const approvalContext = [
+    approval.question !== approval.title ? approval.question : '',
+    approval.reason !== approval.question && approval.reason !== approval.title ? approval.reason : '',
+  ].filter(Boolean).join('\n');
+  return (
+    <AgentDecisionCard
+      title={approval.title || '需要你确认'}
+      context={approvalContext}
+      options={approval.options.map((option, index) => ({ ...option, recommended: index === 0 }))}
+      isDark={isDark}
+      isWorking={isWorking}
+      customAllowed={approval.allowFreeText}
+      customActive={customActive}
+      customValue={freeText}
+      customActionLabel="提交"
+      onSelect={(optionId) => onSubmit([optionId], '')}
+      onDismiss={onDismiss}
+      onActivateCustom={() => setCustomActive(true)}
+      onCustomChange={setFreeText}
+      onCustomSubmit={submitCustom}
+      onCustomEscape={() => setCustomActive(false)}
+      onSkip={() => defaultOptionId && onSubmit([defaultOptionId], '')}
+    />
   );
 }
 
@@ -3720,8 +6362,8 @@ function DraftCard({ draftSessionId, kind, isDark, onOpenReview }: { draftSessio
           <div className="text-sm font-semibold">{isCreativeAssets ? '已生成创作素材审核包' : '已生成 Agent 草稿'}</div>
           <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
             {isCreativeAssets
-              ? '素材包已进入审核流程。可以在右侧 Inspector 逐条添加审批意见或整包入库。'
-              : '草稿进入审核流程。可以在右侧 Inspector 查看差异、编辑反馈并确认写回。'}
+              ? '素材包已进入审核流程。可以在右侧检查器逐条添加审批意见或整包入库。'
+              : '草稿进入审核流程。可以在右侧检查器查看差异、编辑反馈并确认写回。'}
           </p>
           <div className={clsx('mt-2 rounded border px-2 py-1 text-xs font-mono', isDark ? 'border-white/10 bg-black/20 text-neutral-400' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)] text-[var(--ui-text-muted)]')}>
             {draftSessionId}
@@ -3903,8 +6545,8 @@ function RoleSelector({
             onClick={onOpenDetail}
             className={clsx('w-full rounded-md px-2 py-2 text-left text-sm transition-colors', isDark ? 'text-neutral-300 hover:bg-white/5' : 'text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}
           >
-            角色与 Skill 设置
-            <div className={clsx('mt-0.5 text-xs leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>查看角色能力、工具权限和技能说明</div>
+            角色能力说明
+            <div className={clsx('mt-0.5 text-xs leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>查看角色职责、能力标签和工具权限</div>
           </button>
         </div>
       )}
@@ -3977,19 +6619,28 @@ function InspectorPanel({
   onClose,
   activeTab,
   onTabChange,
+  expanded,
+  onToggleExpanded,
+  onResizeStart,
+  onResizeReset,
   novel,
   currentChapter,
   novelId,
   sourceConversationId,
   messages,
   contextSummary,
+  contextSummaryRebuilding,
   activeRun,
+  reportReviewAvailability,
   conversationRuns,
   activeRole,
   roleOptions,
   volumes,
   reviewTarget,
+  draftSelection,
+  draftBatchRecords,
   onReviewTargetChange,
+  onRebuildContextSummary,
   onUsePreset,
   onArtifactStatusChange,
   onDraftBatchStatusChange,
@@ -3997,26 +6648,38 @@ function InspectorPanel({
   onRegenerateDraftBatch,
   onDiscussReviewComments,
   onRegenerateDraft,
+  onDraftBatchLoaded,
   onSelectReviewRun,
+  onSkillPublished,
+  onInitializeNovelProject,
 }: {
   isDark: boolean;
   narrowOpen: boolean;
   onClose: () => void;
   activeTab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  onResizeStart: (event: React.PointerEvent<HTMLDivElement>) => void;
+  onResizeReset: () => void;
   novel: Novel | null;
-  currentChapter: Chapter | null;
+  currentChapter: AgentChapterContext | null;
   novelId: string;
   sourceConversationId: string;
   messages: ConversationMessage[];
-  contextSummary: AgentConversationSummary | null;
+  contextSummary: AgentConversationSummary | AgentConversationSummaryV2 | null;
+  contextSummaryRebuilding: boolean;
   activeRun: AgentRun | null;
+  reportReviewAvailability: ReportReviewAvailability;
   conversationRuns: AgentRun[];
   activeRole: AgentRoleMode;
   roleOptions: RoleOption[];
   volumes: Volume[];
   reviewTarget: 'draft' | 'report';
+  draftSelection: DraftInspectorSelection | null;
+  draftBatchRecords: Record<string, DraftBatchRecord>;
   onReviewTargetChange: (target: 'draft' | 'report') => void;
+  onRebuildContextSummary: (conversationId: string) => void;
   onUsePreset: (role: AgentRoleMode, preset: AgentPresetTask) => void;
   onArtifactStatusChange: (draftSessionId: string, status: AgentArtifact['status']) => void;
   onDraftBatchStatusChange: (draftBatchId: string, status: AgentArtifact['status']) => void;
@@ -4024,8 +6687,12 @@ function InspectorPanel({
   onRegenerateDraftBatch: (batch: DraftBatchRecord, fromChildIndex: number, comments?: ReviewCommentRecord[]) => Promise<void>;
   onDiscussReviewComments: (comments: ReviewCommentRecord[]) => Promise<void>;
   onRegenerateDraft: (session: DraftSessionRecord, comments: ReviewCommentRecord[]) => Promise<void>;
+  onDraftBatchLoaded: (batch: DraftBatchRecord) => void;
   onSelectReviewRun: (runId: string | null) => void;
+  onSkillPublished: () => Promise<void>;
+  onInitializeNovelProject: (artifact: AgentArtifact) => void;
 }) {
+  const { t } = useTranslation();
   const tabs: Array<{ id: InspectorTab; label: string }> = [
     { id: 'context', label: '上下文' },
     { id: 'artifacts', label: '产物' },
@@ -4036,34 +6703,72 @@ function InspectorPanel({
   const hasExpertReport = Boolean(activeRun?.artifacts?.some((artifact) => getExpertReport(artifact)));
   const hasCreativeAssetsReview = Boolean(activeRun?.artifacts?.some((artifact) => artifact.type === 'creative_assets_draft'));
   const isReview = activeTab === 'review';
-  const hasDraftReview = Boolean(activeRun?.draftSessionId || activeRun?.draftBatchId);
+  const selectedDraftBatchId = draftSelection?.kind === 'chapter_beat_snapshot'
+    ? draftSelection.draftBatchId
+    : draftSelection?.draftBatchId || activeRun?.draftBatchId;
+  const selectedDraftBatch = selectedDraftBatchId ? draftBatchRecords[selectedDraftBatchId] : null;
+  const selectedGeneratedCount = selectedDraftBatch
+    ? new Set(selectedDraftBatch.children.flatMap((child) => child.draftSessionId && ['draft', 'stale', 'committed'].includes(child.status) ? [child.childIndex] : [])).size
+    : 0;
+  const hasDraftReview = Boolean(activeRun?.draftSessionId || selectedDraftBatchId);
   const showsReportReview = reviewTarget === 'report' && hasExpertReport;
   const isDraftReview = isReview && !showsReportReview && hasDraftReview;
   const reviewTitle = isDraftReview
-    ? (activeRun?.draftBatchId ? '多章草稿审核' : hasCreativeAssetsReview ? '创作素材审核' : '草稿审核中心')
+    ? draftSelection?.kind === 'chapter_beat_snapshot'
+      ? `章节节拍预览 · v${draftSelection.outlineRevision}`
+      : draftSelection?.kind === 'draft_batch_interrupted'
+        ? '章节生成未完成'
+        : draftSelection?.kind === 'draft_batch_progress'
+          ? selectedGeneratedCount > 0
+            ? `已生成内容 · ${selectedGeneratedCount}/${selectedDraftBatch?.children.length ?? selectedGeneratedCount}`
+            : '章节生成进度'
+          : draftSelection?.kind === 'draft_batch_review' || selectedDraftBatchId
+            ? '多章节草稿审核'
+            : hasCreativeAssetsReview ? '创作素材审核' : '草稿审核中心'
     : '报告审核';
-  const allArtifacts = conversationRuns.flatMap((run) => run.artifacts ?? []);
-
   return (
     <aside className={clsx(
-      'border-l min-h-0 min-w-0 overflow-hidden flex flex-col max-[1040px]:absolute max-[1040px]:inset-y-0 max-[1040px]:right-0 max-[1040px]:z-40 max-[1040px]:w-[min(360px,calc(100vw-16px))] max-[1040px]:shadow-[-16px_0_40px_rgba(17,24,39,0.12)]',
+      'relative border-l min-h-0 min-w-0 overflow-hidden flex flex-col max-[1040px]:absolute max-[1040px]:inset-y-0 max-[1040px]:right-0 max-[1040px]:z-40 max-[1040px]:w-[calc(100vw-16px)] max-[1040px]:shadow-[-16px_0_40px_rgba(17,24,39,0.12)]',
       !narrowOpen && 'max-[1040px]:hidden',
-      isDraftReview && 'absolute inset-y-0 right-0 z-30 w-[min(880px,calc(100vw-16px))] shadow-[-16px_0_40px_rgba(17,24,39,0.10)] max-[1040px]:z-40 max-[1040px]:w-[calc(100vw-16px)]',
       isDark ? 'border-white/10 bg-[#0f0f13]' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]',
     )}>
+      {!expanded && (
+        <div
+          role="separator"
+          aria-label={t('agentWorkspace.inspector.resize')}
+          aria-orientation="vertical"
+          onPointerDown={onResizeStart}
+          onDoubleClick={onResizeReset}
+          className="absolute inset-y-0 -left-1 z-20 hidden w-2 cursor-col-resize touch-none min-[1041px]:block"
+        >
+          <div className={clsx('mx-auto h-full w-px transition-colors', isDark ? 'bg-white/10 hover:bg-blue-400' : 'bg-[var(--ui-border)] hover:bg-[#2f80ed]')} />
+        </div>
+      )}
       <div className="p-4 border-b border-inherit">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 text-sm font-semibold">
             {isReview ? <FileText className="h-4 w-4 text-[#2f80ed]" /> : <MessageSquare className="h-4 w-4" />}
-            {isReview ? reviewTitle : 'Inspector'}
+            {isReview ? reviewTitle : t('agentWorkspace.inspector.title')}
           </div>
           <div className="flex items-center gap-1">
             <button
               type="button"
+              onClick={onToggleExpanded}
+              className={clsx('hidden h-8 w-8 place-items-center rounded-md min-[1041px]:grid', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-white')}
+              title={expanded ? '恢复侧栏' : '放大阅读'}
+              aria-label={expanded
+                ? t('agentWorkspace.inspector.restoreSidebar')
+                : t('agentWorkspace.inspector.enlarge')}
+              aria-pressed={expanded}
+            >
+              {expanded ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+            </button>
+            <button
+              type="button"
               onClick={onClose}
               className={clsx('grid h-8 w-8 place-items-center rounded-md', isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-white')}
-              title="收起 Inspector"
-              aria-label="收起 Inspector"
+              title={t('agentWorkspace.inspector.collapse')}
+              aria-label={t('agentWorkspace.inspector.collapse')}
             >
               <PanelRightClose className="h-4 w-4" />
             </button>
@@ -4092,14 +6797,22 @@ function InspectorPanel({
           </div>
         </div>
       </div>
-      <div className={clsx('flex-1 min-h-0', isDraftReview ? 'overflow-hidden' : 'overflow-y-auto p-4')}>
+      <div className={clsx(
+        'flex-1 min-h-0',
+        isDraftReview || activeTab === 'artifacts' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto p-4',
+      )}>
         {activeTab === 'context' && (
           <div className="space-y-3">
             <InspectorItem label="当前小说" value={novel?.title || '未命名小说'} isDark={isDark} />
-            <InspectorItem label="当前章" value={currentChapter?.title || '未选择'} isDark={isDark} />
-            <InspectorItem label="章节字数" value={String(currentChapter?.wordCount ?? 0)} isDark={isDark} />
+            <InspectorItem label="编辑器当前章" value={currentChapter?.title || '未选择'} isDark={isDark} />
+            <InspectorItem label="编辑器章节字数" value={String(currentChapter?.wordCount ?? 0)} isDark={isDark} />
             <InspectorItem label="当前能力" value="RAG、搜索、章节草稿、创作素材草稿" isDark={isDark} />
-            <PersistentContextSummaryCard isDark={isDark} summary={contextSummary} />
+            <PersistentContextSummaryCard
+              isDark={isDark}
+              summary={contextSummary}
+              rebuilding={contextSummaryRebuilding}
+              onRebuild={() => onRebuildContextSummary(sourceConversationId)}
+            />
             <ContextDiagnosticsPanel isDark={isDark} messages={messages} />
             <RoleMatrix isDark={isDark} roleOptions={roleOptions} />
           </div>
@@ -4110,22 +6823,42 @@ function InspectorPanel({
               isDark={isDark}
               artifacts={activeRun?.artifacts ?? []}
               volumes={volumes}
+              reviewAvailability={reportReviewAvailability}
               onReviewSubmitted={onArtifactReviewChange}
             />
-          ) : activeRun?.draftBatchId ? (
+          ) : draftSelection?.kind === 'chapter_beat_snapshot' ? (
+            <ChapterBeatPreviewPanel
+              isDark={isDark}
+              beats={draftSelection.beats as DraftBatchRecord['outline']['beats']}
+              revision={draftSelection.outlineRevision}
+              historical={draftSelection.historical}
+              statusLabel={draftSelection.statusLabel}
+              chapterLabels={draftSelection.beats.map((beat, index) => (
+                selectedDraftBatch
+                  ? resolveDraftBatchChapterDisplay(selectedDraftBatch, beat.childIndex ?? index, volumes).shortLabel
+                  : `批次第 ${index + 1} 章`
+              ))}
+            />
+          ) : selectedDraftBatchId ? (
             <DraftBatchReviewPanel
               isDark={isDark}
-              draftBatchId={activeRun.draftBatchId}
+              draftBatchId={selectedDraftBatchId}
+              mode={draftSelection?.kind === 'draft_batch_progress'
+                ? 'progress'
+                : draftSelection?.kind === 'draft_batch_interrupted'
+                  ? 'interrupted'
+                  : 'review'}
               reviewContext={{
                 novelId,
                 sourceConversationId,
-                sourceRunId: activeRun.runId,
-                sourceArtifactId: activeRun.artifacts?.find((artifact) => artifact.reference?.draftBatchId === activeRun.draftBatchId)?.artifactId,
+                sourceRunId: draftSelection?.runId || activeRun?.runId || '',
+                sourceArtifactId: activeRun?.artifacts?.find((artifact) => artifact.reference?.draftBatchId === selectedDraftBatchId)?.artifactId,
               }}
               volumes={volumes}
               onBatchStatusChange={onDraftBatchStatusChange}
               onRegenerate={onRegenerateDraftBatch}
               onDiscuss={onDiscussReviewComments}
+              onBatchLoaded={onDraftBatchLoaded}
             />
           ) : (
             <ReviewPanel
@@ -4133,7 +6866,7 @@ function InspectorPanel({
               activeRun={activeRun}
               novelId={novelId}
               sourceConversationId={sourceConversationId}
-              chapterTitle={currentChapter?.title || '当前章节'}
+              volumes={volumes}
               onArtifactStatusChange={onArtifactStatusChange}
               onDiscuss={onDiscussReviewComments}
               onRegenerate={onRegenerateDraft}
@@ -4141,15 +6874,20 @@ function InspectorPanel({
           )
         )}
         {activeTab === 'artifacts' && (
-          <ArtifactPanel
-            isDark={isDark}
-            artifacts={allArtifacts}
-            onOpenReview={(target, artifact) => {
-              onSelectReviewRun(artifact.runId);
-              onReviewTargetChange(target);
-              onTabChange('review');
-            }}
-          />
+          <ArtifactPanelErrorBoundary key={`${sourceConversationId}:${activeRun?.runId ?? 'all'}`} isDark={isDark}>
+            <ArtifactPanel
+              isDark={isDark}
+              runs={conversationRuns}
+              preferredRunId={activeRun?.runId ?? null}
+              onSkillPublished={onSkillPublished}
+              onInitializeNovelProject={onInitializeNovelProject}
+              onOpenReview={(target, artifact) => {
+                onSelectReviewRun(artifact.runId);
+                onReviewTargetChange(target);
+                onTabChange('review');
+              }}
+            />
+          </ArtifactPanelErrorBoundary>
         )}
         {activeTab === 'evidence' && (
           <EvidencePanel isDark={isDark} activeRun={activeRun} />
@@ -4183,16 +6921,30 @@ function contextSourceModeLabel(mode: AgentContextHistorySource['mode'] | AgentC
 function PersistentContextSummaryCard({
   isDark,
   summary,
+  rebuilding,
+  onRebuild,
 }: {
   isDark: boolean;
-  summary: AgentConversationSummary | null;
+  summary: AgentConversationSummary | AgentConversationSummaryV2 | null;
+  rebuilding: boolean;
+  onRebuild: () => void;
 }) {
-  if (!summary || summary.version !== 'agent-conversation-summary-v1') return null;
-  const decisions = Array.isArray(summary.userDecisions) ? summary.userDecisions : [];
-  const questions = Array.isArray(summary.unresolvedQuestions) ? summary.unresolvedQuestions : [];
-  const artifactRefs = Array.isArray(summary.artifactRefs) ? summary.artifactRefs : [];
-  const facts = Array.isArray(summary.facts) ? summary.facts : [];
-  const summaryGroups: Array<[string, AgentConversationSummaryEntry[]]> = [
+  if (!summary) return null;
+  const isV2 = summary.version === 'agent-conversation-summary-v2';
+  const decisions = isV2 ? summary.semanticProjection.confirmedDecisions : summary.userDecisions;
+  const questions = isV2 ? summary.semanticProjection.unresolvedQuestions : summary.unresolvedQuestions;
+  const artifactRefs = isV2 ? summary.semanticProjection.artifactRefs : summary.artifactRefs;
+  const facts = isV2
+    ? [...summary.semanticProjection.canonFacts, ...summary.semanticProjection.creativeContinuity]
+    : summary.facts;
+  const pending = isV2
+    ? [...summary.semanticProjection.activeIntent, ...summary.semanticProjection.pendingWork]
+    : [];
+  const summaryGroups: Array<[
+    string,
+    Array<AgentConversationSummaryEntry | AgentConversationSummaryEntryV2>,
+  ]> = [
+    ['当前意图与工作', pending],
     ['用户决策', decisions],
     ['来源事实', facts],
     ['未决问题', questions],
@@ -4207,15 +6959,31 @@ function PersistentContextSummaryCard({
               持久上下文摘要
             </div>
             <div className={clsx('mt-1 text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-              覆盖 {summary.coverage?.messageCount ?? summary.coveredMessageIds.length} 条消息 · {artifactRefs.length} 个产物引用
+              覆盖 {summary.coverage.messageCount} 条消息 · {artifactRefs.length} 个产物引用
+              {isV2 ? ` · ${summary.sourceIndex.userMessageLedger.length} 条用户来源` : ''}
             </div>
           </div>
           <span className={clsx('shrink-0 rounded px-2 py-1 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
-            v{summary.revision}
+            v{summary.revision}{isV2 ? ` · g${summary.generation}` : ''}
           </span>
         </div>
       </summary>
       <div className={clsx('border-t px-3 py-3 space-y-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={onRebuild}
+            disabled={rebuilding}
+            className={clsx(
+              'inline-flex h-8 items-center gap-1.5 rounded-md border px-2 text-xs disabled:cursor-not-allowed disabled:opacity-55',
+              isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border)] text-[var(--ui-text-secondary)] hover:bg-[var(--ui-surface-subtle)]',
+            )}
+            title="从完整权威消息重新生成上下文摘要"
+          >
+            {rebuilding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+            {rebuilding ? '重建中' : '质量重建'}
+          </button>
+        </div>
         {summaryGroups.map(([label, values]) => {
           if (!values.length) return null;
           return (
@@ -4226,7 +6994,7 @@ function PersistentContextSummaryCard({
                   <div key={entry.id} className="text-xs leading-5 break-words">
                     {entry.text}
                     <span className={clsx('ml-2 text-[10px]', isDark ? 'text-neutral-600' : 'text-[var(--ui-text-disabled)]')}>
-                      {entry.sourceMessageIds.length} 个来源
+                      {(entry.sourceMessageIds || []).length} 个来源
                     </span>
                   </div>
                 ))}
@@ -4321,7 +7089,13 @@ function ContextDiagnosticsPanel({ isDark, messages }: { isDark: boolean; messag
           <span>窗口 {diagnostics.contextWindowTokens.toLocaleString()}</span>
           <span>输出预留 {diagnostics.outputTokens.toLocaleString()}</span>
           <span>安全余量 {diagnostics.safetyTokens.toLocaleString()}</span>
-          <span>{diagnostics.contextWindowSource === 'configured' ? '手动配置' : '模型档案'}</span>
+          {diagnostics.providerReserveTokens !== undefined && <span>Provider 余量 {diagnostics.providerReserveTokens.toLocaleString()}</span>}
+          {diagnostics.fixedProviderInputTokens !== undefined && <span>固定输入 {diagnostics.fixedProviderInputTokens.toLocaleString()}</span>}
+          <span>{diagnostics.contextWindowSource === 'configured'
+            ? '手动配置'
+            : diagnostics.contextWindowSource === 'compatibility-fallback'
+              ? '兼容能力'
+              : '模型档案'}</span>
         </div>
       </div>
 
@@ -4391,6 +7165,85 @@ function ContextDiagnosticsPanel({ isDark, messages }: { isDark: boolean; messag
           </div>
         )}
 
+        {diagnostics.coordinator && (
+          <div>
+            <div className={clsx('text-[11px] font-medium', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>语义压缩</div>
+            <div className={clsx('mt-1.5 grid grid-cols-2 gap-x-3 gap-y-1 text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+              <span>模式 {diagnostics.coordinator.mode}</span>
+              <span>操作 {diagnostics.coordinator.operationKind || 'none'}</span>
+              <span>触发 {diagnostics.coordinator.triggerReason || 'none'}</span>
+              <span>generation {diagnostics.coordinator.summaryGeneration}</span>
+              <span>覆盖 {diagnostics.coordinator.coverageMessageCount} 条</span>
+              <span>近期原文 {diagnostics.coordinator.recentTailMessageCount} 条</span>
+              <span>近期尾部 {(diagnostics.coordinator.recentTailContextTokens ?? 0).toLocaleString()} Token / {diagnostics.coordinator.recentTailUnitCount ?? 0} 回合</span>
+              <span>消息来源 {diagnostics.coordinator.sourceHashStatus}</span>
+              <span>项目依赖 {diagnostics.coordinator.dependencyHashStatus}</span>
+              <span className="col-span-2">
+                当前请求 {diagnostics.coordinator.currentRequestIdentityStatus || 'not_applicable'}
+                {` · payload ${diagnostics.coordinator.currentRequestPayloadOccurrences ?? 0} 次`}
+              </span>
+              {(diagnostics.coordinator.coverageStartMessageId || diagnostics.coordinator.coverageEndMessageId) && (
+                <span className="col-span-2 break-all">
+                  边界 {diagnostics.coordinator.coverageStartMessageId || 'none'} → {diagnostics.coordinator.coverageEndMessageId || 'none'}
+                </span>
+              )}
+              {diagnostics.coordinator.blockingUnitId && (
+                <span className="col-span-2 break-all">
+                  阻断 {diagnostics.coordinator.blockingUnitId} · sequence {diagnostics.coordinator.blockingSequenceStart ?? '?'}-{diagnostics.coordinator.blockingSequenceEnd ?? '?'}
+                </span>
+              )}
+              <span>上下文 {(diagnostics.coordinator.preCompressionContextTokens ?? 0).toLocaleString()} → {(diagnostics.coordinator.postCompressionContextTokens ?? 0).toLocaleString()}</span>
+              <span>Provider {(diagnostics.coordinator.preCompressionProviderInputTokens ?? 0).toLocaleString()} → {(diagnostics.coordinator.postCompressionProviderInputTokens ?? 0).toLocaleString()}</span>
+              <span className="col-span-2 break-all">
+                计数 {diagnostics.coordinator.hardTokenCountMethod || diagnostics.hardTokenCountMethod || 'unknown'} · {diagnostics.coordinator.hardTokenCountProfileId || diagnostics.tokenCounterProfileId || 'unknown'}
+              </span>
+              {diagnostics.coordinator.rebuildStatus && diagnostics.coordinator.rebuildStatus !== 'idle' && (
+                <span className="col-span-2">
+                  重建 {diagnostics.coordinator.rebuildStatus}
+                  {` · ${diagnostics.coordinator.rebuildCompletedChunks ?? diagnostics.coordinator.rebuildChunksCompleted ?? 0}/${diagnostics.coordinator.rebuildMaxChunks ?? diagnostics.coordinator.rebuildChunkCount ?? 0} 块`}
+                  {diagnostics.coordinator.rebuildMaxDurationMs
+                    ? ` · ${Math.round((diagnostics.coordinator.rebuildElapsedMs || 0) / 1000)}/${Math.round(diagnostics.coordinator.rebuildMaxDurationMs / 1000)} 秒`
+                    : ''}
+                </span>
+              )}
+              {diagnostics.coordinator.rebuildTaskId && (
+                <span className="col-span-2 break-all">任务 {diagnostics.coordinator.rebuildTaskId}</span>
+              )}
+              {(diagnostics.coordinator.statusCodes?.length || 0) > 0 && (
+                <span className="col-span-2 break-all">状态码 {diagnostics.coordinator.statusCodes.join(', ')}</span>
+              )}
+              {!diagnostics.coordinator.statusCodes?.length && diagnostics.coordinator.failureCode && !diagnostics.coordinator.errorCode && (
+                <span className="col-span-2 break-all">状态码 {diagnostics.coordinator.failureCode}</span>
+              )}
+              {diagnostics.coordinator.errorCode && (
+                <span className="col-span-2 break-all">错误码 {diagnostics.coordinator.errorCode}</span>
+              )}
+              <span className="col-span-2">
+                ledger {diagnostics.coordinator.sourceIndexLedgerEntries ?? 0} 条 / {(diagnostics.coordinator.sourceIndexBytes ?? 0).toLocaleString()} B
+                {` · semantic ${diagnostics.coordinator.semanticLedgerEntries ?? 0}`}
+                {` · transient ${diagnostics.coordinator.transientLedgerEntries ?? 0}`}
+                {` · 可召回 ${diagnostics.coordinator.unprojectedSemanticMessageCount ?? 0}`}
+                {` · 失效来源 ${diagnostics.coordinator.invalidatedSourceCount ?? 0}`}
+              </span>
+              {diagnostics.coordinator.qualitySample && (
+                <span className="col-span-2">
+                  质量采样 {diagnostics.coordinator.qualitySample.reason}
+                  {` · revision ${diagnostics.coordinator.qualitySample.revision}`}
+                  {` · 投影 ${diagnostics.coordinator.qualitySample.projectionEntryCount}`}
+                  {` · semantic ${diagnostics.coordinator.qualitySample.directlyProjectedSemanticEntries}/${diagnostics.coordinator.qualitySample.semanticLedgerEntries}`}
+                </span>
+              )}
+              {diagnostics.coordinator.compactor && (
+                <span className="col-span-2 break-all">
+                  Compactor {diagnostics.coordinator.compactor.providerType || diagnostics.providerType}/{diagnostics.coordinator.compactor.model || diagnostics.model}
+                  {` · ${(diagnostics.coordinator.compactor.inputTokens ?? diagnostics.coordinator.compactor.inputBytes ?? 0).toLocaleString()}→${(diagnostics.coordinator.compactor.outputTokens ?? diagnostics.coordinator.compactor.outputBytes ?? 0).toLocaleString()} Token`}
+                  {` · ${diagnostics.coordinator.compactor.elapsedMs}ms · retry ${diagnostics.coordinator.compactor.retries}`}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className={clsx('text-[11px]', isDark ? 'text-neutral-600' : 'text-[var(--ui-text-disabled)]')}>
           已记录本会话最近 {records.length} 次模型上下文诊断
         </div>
@@ -4441,6 +7294,7 @@ function InspectorItem({ label, value, isDark }: { label: string; value: string;
 }
 
 function artifactTypeLabel(type: AgentArtifact['type']): string {
+  if (type === 'novel_bootstrap_draft') return '小说项目蓝图';
   if (type === 'chapter_draft') return '章节草稿';
   if (type === 'chapter_draft_batch') return '多章节草稿批次';
   if (type === 'creative_assets_draft') return '创作素材草稿';
@@ -4458,12 +7312,28 @@ function artifactTypeLabel(type: AgentArtifact['type']): string {
 }
 
 function RunArtifactsCard({ artifacts, isDark, onOpen }: { artifacts: AgentArtifact[]; isDark: boolean; onOpen?: () => void }) {
+  const novelBlueprint = artifacts.find((artifact) => artifact.type === 'novel_bootstrap_draft');
+  const blueprintDraft = novelBlueprint?.metadata?.draft && typeof novelBlueprint.metadata.draft === 'object'
+    ? novelBlueprint.metadata.draft as Record<string, unknown>
+    : null;
+  const firstTitle = Array.isArray(blueprintDraft?.titleCandidates) && typeof blueprintDraft.titleCandidates[0] === 'string'
+    ? blueprintDraft.titleCandidates[0]
+    : null;
+  const targetChapterCount = typeof blueprintDraft?.targetChapterCount === 'number'
+    ? `${blueprintDraft.targetChapterCount} 章`
+    : null;
+  const writingMode = typeof blueprintDraft?.writingModeRecommendation === 'string'
+    ? blueprintDraft.writingModeRecommendation
+    : null;
+  const artifactSummary = novelBlueprint
+    ? [firstTitle, targetChapterCount, writingMode].filter(Boolean).join(' · ')
+    : artifacts.map((artifact) => artifact.title).join(' · ');
   return (
     <button
       type="button"
       onClick={onOpen}
       disabled={!onOpen}
-      title={onOpen ? '在 Inspector 中查看产物' : '历史任务产物'}
+      title={onOpen ? '在检查器中查看产物' : '历史任务产物'}
       className={clsx(
         'w-full rounded-lg border px-4 py-3 text-left flex items-center gap-3 disabled:cursor-default',
         isDark ? 'border-white/10 bg-black/20 enabled:hover:bg-white/5' : 'border-[var(--ui-border)] bg-white enabled:hover:bg-[var(--ui-surface-subtle)]',
@@ -4471,9 +7341,9 @@ function RunArtifactsCard({ artifacts, isDark, onOpen }: { artifacts: AgentArtif
     >
       <FileText className="h-4 w-4 shrink-0 text-[#2f80ed]" />
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium">本次产物</div>
+        <div className="text-sm font-medium">{novelBlueprint ? '小说项目蓝图已就绪' : '本次产物'}</div>
         <div className={clsx('mt-1 text-xs truncate', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-          {artifacts.map((artifact) => artifact.title).join(' · ')}
+          {artifactSummary}
         </div>
       </div>
       <span className={clsx('shrink-0 rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
@@ -4483,210 +7353,419 @@ function RunArtifactsCard({ artifacts, isDark, onOpen }: { artifacts: AgentArtif
   );
 }
 
-function ArtifactPanel({ isDark, artifacts, onOpenReview }: { isDark: boolean; artifacts: AgentArtifact[]; onOpenReview: (target: 'draft' | 'report', artifact: AgentArtifact) => void }) {
-  if (artifacts.length === 0) {
+function preferredArtifact(artifacts: AgentArtifact[], runId: string | null): AgentArtifact | null {
+  const inPreferredRun = runId ? artifacts.filter((artifact) => artifact.runId === runId) : artifacts;
+  return inPreferredRun.find((artifact) => artifact.type === 'report')
+    ?? inPreferredRun[0]
+    ?? artifacts.find((artifact) => artifact.type === 'report')
+    ?? artifacts[0]
+    ?? null;
+}
+
+class ArtifactPanelErrorBoundary extends Component<{
+  children: ReactNode;
+  isDark: boolean;
+}, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[ArtifactPanel]', error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
     return (
-      <div className={clsx('rounded-lg border p-3 text-sm leading-6', isDark ? 'border-white/10 bg-black/20 text-neutral-400' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-muted)]')}>
-        当前任务还没有结构化产物。任务完成前至少会生成一份最终报告；生成型任务还必须包含对应草稿。
+      <div className="p-4">
+        <div className={clsx('rounded-lg border p-4 text-sm', this.props.isDark ? 'border-red-400/20 bg-red-500/5 text-red-200' : 'border-red-200 bg-red-50 text-red-800')}>
+          <div className="font-medium">产物查看器暂时无法显示这份内容</div>
+          <div className="mt-1 text-xs opacity-75">其他会话和任务数据没有受到影响。</div>
+          <button
+            type="button"
+            onClick={() => this.setState({ error: null })}
+            className={clsx('mt-3 h-8 rounded-md border px-3 text-xs', this.props.isDark ? 'border-white/10 hover:bg-white/5' : 'border-red-200 bg-white hover:bg-red-100')}
+          >
+            重试显示
+          </button>
+        </div>
       </div>
     );
   }
+}
+
+type SkillDraftReviewRecord = {
+  id: string;
+  version: number;
+  status: 'editing' | 'ready_for_review' | 'committed' | 'discarded';
+  action?: 'create' | 'update' | 'derive' | 'pack';
+  draft?: Record<string, unknown>;
+};
+
+function SkillDraftReviewCard({ artifact, isDark, onPublished }: { artifact: AgentArtifact; isDark: boolean; onPublished: () => Promise<void> }) {
+  const embedded = artifact.metadata?.skillDraft as SkillDraftReviewRecord | undefined;
+  const draftId = typeof artifact.reference?.skillDraftId === 'string'
+    ? artifact.reference.skillDraftId
+    : embedded?.id;
+  const [draft, setDraft] = useState<SkillDraftReviewRecord | null>(embedded ?? null);
+  const [pending, setPending] = useState<'commit' | 'discard' | null>(null);
+
+  useEffect(() => {
+    if (!draftId) return;
+    let active = true;
+    window.agent.skillDraft({ draftId })
+      .then((value) => {
+        if (active && value) setDraft(value as SkillDraftReviewRecord);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [draftId]);
+
+  if (!draftId) return null;
+  const statusLabel = draft?.status === 'committed'
+    ? '已发布'
+    : draft?.status === 'discarded'
+      ? '已放弃'
+      : draft?.status === 'editing'
+        ? '编辑中'
+        : '待审核';
+  const reviewable = Boolean(draft && (draft.status === 'ready_for_review' || draft.status === 'editing'));
+
+  const commit = async () => {
+    if (!draft || !window.confirm('确认发布这个 Skill Pack？成员 Skill、Pack Revision 与绑定会作为一个事务写入。')) return;
+    setPending('commit');
+    try {
+      const result = await window.agent.commitSkillDraft({
+        draftId: draft.id,
+        expectedVersion: draft.version,
+        confirmed: true,
+      }) as { draft?: SkillDraftReviewRecord };
+      if (result.draft) setDraft(result.draft);
+      await onPublished();
+      toast.success(draft.action === 'pack' ? 'Skill Pack 已发布' : 'Skill Revision 已发布');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Skill 草稿发布失败');
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const discard = async () => {
+    if (!draft || !window.confirm('确定放弃这个 Skill 草稿吗？已提炼内容会保留在任务产物中，但不会进入 Skill 列表。')) return;
+    setPending('discard');
+    try {
+      const result = await window.agent.discardSkillDraft({ draftId: draft.id, expectedVersion: draft.version });
+      setDraft(result as SkillDraftReviewRecord);
+      toast.success('Skill 草稿已放弃');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Skill 草稿放弃失败');
+    } finally {
+      setPending(null);
+    }
+  };
+
   return (
-    <div className="space-y-2">
-      {artifacts.map((artifact) => {
-        const isDraftArtifact = artifact.type === 'chapter_draft' || artifact.type === 'chapter_draft_batch' || artifact.type === 'creative_assets_draft';
-        const expertReport = getExpertReport(artifact);
-        const review = artifact.type === 'consistency_review' && artifact.metadata?.review && typeof artifact.metadata.review === 'object'
-          ? artifact.metadata.review as Record<string, unknown>
-          : null;
-        const dimensions = review && Array.isArray(review.dimensions) ? review.dimensions as Array<Record<string, unknown>> : [];
-        const issues = review && Array.isArray(review.issues) ? review.issues as Array<Record<string, unknown>> : [];
-        const plotlineAnalysis = artifact.type === 'plotline_analysis' && artifact.metadata?.analysis && typeof artifact.metadata.analysis === 'object'
-          ? artifact.metadata.analysis as Record<string, unknown>
-          : null;
-        const plotlineThreads = plotlineAnalysis && Array.isArray(plotlineAnalysis.threads)
-          ? plotlineAnalysis.threads as Array<Record<string, unknown>>
-          : [];
-        const plotlineIssues = plotlineAnalysis && Array.isArray(plotlineAnalysis.issues)
-          ? plotlineAnalysis.issues as Array<Record<string, unknown>>
-          : [];
-        const plotlineCoverage = plotlineAnalysis?.coverage && typeof plotlineAnalysis.coverage === 'object'
-          ? plotlineAnalysis.coverage as Record<string, unknown>
-          : null;
-        return (
-          <div key={artifact.artifactId} className={clsx('rounded-lg border p-3', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
-            <div className="flex items-start gap-2">
-              <FileText className="mt-0.5 h-4 w-4 shrink-0 text-[#2f80ed]" />
-              <div className="min-w-0 flex-1">
-                <div className="text-sm font-semibold break-words">{artifact.title}</div>
-                <div className={clsx('mt-1 text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-                  {artifactTypeLabel(artifact.type)} · {artifact.status}
-                </div>
+    <section className={clsx('mt-4 rounded-lg border p-4', isDark ? 'border-blue-400/20 bg-blue-500/5' : 'border-blue-100 bg-blue-50/50')} aria-label="Skill 草稿审核">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">Skill Pack 审核</div>
+          <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
+            检查成员 Skill、来源覆盖、污染警告与 Operation/Role 绑定。确认后原子发布，失败不会留下部分 Skill。
+          </p>
+        </div>
+        <span className={clsx('shrink-0 rounded px-2 py-1 text-[10px]', draft?.status === 'committed' ? 'bg-emerald-500/10 text-emerald-600' : draft?.status === 'discarded' ? 'bg-neutral-500/10 text-neutral-500' : 'bg-amber-500/10 text-amber-700')}>
+          {statusLabel}
+        </span>
+      </div>
+      {reviewable && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" disabled={Boolean(pending)} onClick={commit} className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#2f80ed] px-3 text-xs font-medium text-white hover:bg-[#246fce] disabled:opacity-50">
+            {pending === 'commit' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+            确认发布
+          </button>
+          <button type="button" disabled={Boolean(pending)} onClick={discard} className={clsx('h-9 rounded-md border px-3 text-xs disabled:opacity-50', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] bg-white text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
+            放弃草稿
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NovelBootstrapInitializeCard({
+  artifact,
+  isDark,
+  onInitialize,
+}: {
+  artifact: AgentArtifact;
+  isDark: boolean;
+  onInitialize: (artifact: AgentArtifact) => void;
+}) {
+  const draft = artifact.metadata?.draft;
+  const canInitialize = Boolean(draft && typeof draft === 'object' && !Array.isArray(draft));
+  return (
+    <section className={clsx('mt-4 border p-4', isDark ? 'border-blue-400/20 bg-blue-500/5' : 'border-blue-100 bg-blue-50/50')} aria-label="小说项目初始化">
+      <div className="flex items-start gap-3">
+        <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-[#2f80ed]" />
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold">生成项目初始化草稿</div>
+          <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
+            将已确认蓝图映射为故事线、情节点、角色、物品、技能、世界设定和地图；每项都会先进入审核，不会直接写入项目。
+          </p>
+        </div>
+      </div>
+      <button
+        type="button"
+        disabled={!canInitialize}
+        onClick={() => onInitialize(artifact)}
+        className={clsx(
+          'mt-3 h-9 w-full border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50',
+          isDark ? 'border-blue-400/30 text-blue-200 hover:bg-blue-400/10' : 'border-blue-200 bg-white text-blue-700 hover:bg-blue-50',
+        )}
+      >
+        生成可审核素材
+      </button>
+    </section>
+  );
+}
+
+function ArtifactPanel({
+  isDark,
+  runs,
+  preferredRunId,
+  onOpenReview,
+  onSkillPublished,
+  onInitializeNovelProject,
+}: {
+  isDark: boolean;
+  runs: AgentRun[];
+  preferredRunId: string | null;
+  onOpenReview: (target: 'draft' | 'report', artifact: AgentArtifact) => void;
+  onSkillPublished: () => Promise<void>;
+  onInitializeNovelProject: (artifact: AgentArtifact) => void;
+}) {
+  const artifacts = useMemo(() => runs
+    .flatMap((run) => run.artifacts ?? [])
+    .sort((left, right) => agentDateTimestamp(right.createdAt, 0) - agentDateTimestamp(left.createdAt, 0)), [runs]);
+  const artifactSignature = artifacts.map((artifact) => `${artifact.artifactId}:${agentDateTimestamp(artifact.createdAt, 0)}`).join('|');
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(() => preferredArtifact(artifacts, preferredRunId)?.artifactId ?? null);
+  const previousPreferredRunRef = useRef<string | null>(preferredRunId);
+  const viewerRef = useRef<HTMLDivElement | null>(null);
+  const scrollPositionsRef = useRef(new Map<string, number>());
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [compact, setCompact] = useState(false);
+
+  useEffect(() => {
+    const preferredChanged = previousPreferredRunRef.current !== preferredRunId;
+    const selectedExists = artifacts.some((artifact) => artifact.artifactId === selectedArtifactId);
+    if (preferredChanged || !selectedExists) {
+      setSelectedArtifactId(preferredArtifact(artifacts, preferredRunId)?.artifactId ?? null);
+    }
+    previousPreferredRunRef.current = preferredRunId;
+  }, [artifactSignature, artifacts, preferredRunId, selectedArtifactId]);
+
+  useLayoutEffect(() => {
+    const element = panelRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(([entry]) => setCompact(entry.contentRect.width < 520));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!viewerRef.current || !selectedArtifactId) return;
+    viewerRef.current.scrollTop = scrollPositionsRef.current.get(selectedArtifactId) ?? 0;
+  }, [selectedArtifactId]);
+
+  const selectArtifact = (artifactId: string) => {
+    if (viewerRef.current && selectedArtifactId) {
+      scrollPositionsRef.current.set(selectedArtifactId, viewerRef.current.scrollTop);
+    }
+    setSelectedArtifactId(artifactId);
+  };
+
+  if (artifacts.length === 0) {
+    return (
+      <div className="p-4">
+        <div className={clsx('rounded-lg border p-3 text-sm leading-6', isDark ? 'border-white/10 bg-black/20 text-neutral-400' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-muted)]')}>
+          当前任务还没有结构化产物。任务完成前至少会生成一份最终报告；生成型任务还必须包含对应草稿。
+        </div>
+      </div>
+    );
+  }
+
+  const selectedArtifact = artifacts.find((artifact) => artifact.artifactId === selectedArtifactId) ?? preferredArtifact(artifacts, preferredRunId);
+  const expertReport = selectedArtifact ? getExpertReport(selectedArtifact) : null;
+  const isDraftArtifact = selectedArtifact
+    ? selectedArtifact.type === 'chapter_draft' || selectedArtifact.type === 'chapter_draft_batch' || selectedArtifact.type === 'creative_assets_draft'
+    : false;
+  const groupedRuns = runs
+    .map((run) => ({
+      run,
+      artifacts: artifacts.filter((artifact) => artifact.runId === run.runId),
+    }))
+    .filter((group) => group.artifacts.length > 0)
+    .sort((left, right) => {
+      if (left.run.runId === preferredRunId) return -1;
+      if (right.run.runId === preferredRunId) return 1;
+      return agentDateTimestamp(right.artifacts[0]?.createdAt, 0) - agentDateTimestamp(left.artifacts[0]?.createdAt, 0);
+    });
+
+  return (
+    <div ref={panelRef} className={clsx('grid h-full min-h-0', compact ? 'grid-rows-[auto_minmax(0,1fr)]' : 'grid-cols-[190px_minmax(0,1fr)]')}>
+      <nav className={clsx(
+        'min-h-0 overflow-auto p-3',
+        compact ? 'border-b' : 'border-r',
+        isDark ? 'border-white/10 bg-black/10' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]',
+      )} aria-label="产物索引">
+        <div className={clsx(compact ? 'flex gap-2 overflow-x-auto' : 'space-y-4')}>
+          {groupedRuns.map(({ run, artifacts: runArtifacts }) => (
+            <div key={run.runId} className={clsx(compact && 'flex shrink-0 items-center gap-2')}>
+              <div className={clsx('mb-1.5 px-1 text-[10px] font-medium uppercase tracking-wide', compact && 'mb-0 shrink-0', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+                {run.runId === preferredRunId ? '当前任务' : run.planSnapshot?.title || '历史任务'}
+              </div>
+              <div className={clsx(compact ? 'flex gap-1.5' : 'space-y-1')}>
+                {runArtifacts.map((artifact) => (
+                  <button
+                    key={artifact.artifactId}
+                    type="button"
+                    onClick={() => selectArtifact(artifact.artifactId)}
+                    className={clsx(
+                      'min-w-0 rounded-md px-2.5 py-2 text-left transition-colors',
+                      compact ? 'w-44 shrink-0' : 'w-full',
+                      artifact.artifactId === selectedArtifact?.artifactId
+                        ? isDark ? 'bg-white/10 text-white' : 'bg-white text-[var(--ui-text-primary)] shadow-sm'
+                        : isDark ? 'text-neutral-400 hover:bg-white/5' : 'text-[var(--ui-text-secondary)] hover:bg-white/70',
+                    )}
+                    aria-current={artifact.artifactId === selectedArtifact?.artifactId ? 'true' : undefined}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <FileText className="h-3.5 w-3.5 shrink-0 text-[#2f80ed]" />
+                      <span className="truncate text-xs font-medium">{artifact.title}</span>
+                    </div>
+                    <div className={clsx('mt-1 truncate pl-5 text-[10px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+                      {artifact.type === 'report' ? '最终交付' : artifactTypeLabel(artifact.type)}
+                    </div>
+                  </button>
+                ))}
               </div>
             </div>
-            {artifact.summary && (
-              <p className={clsx('mt-3 text-sm leading-6 whitespace-pre-wrap break-words', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>
-                {artifact.summary}
-              </p>
-            )}
-            {expertReport && (
-              <div className={clsx('mt-3 rounded-md border p-3', isDark ? 'border-white/10 bg-white/5' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
-                <div className="flex items-center justify-between gap-3 text-xs">
-                  <span>{expertReport.findings.length} 个结构化问题</span>
-                  <span className={clsx('rounded px-1.5 py-0.5 text-[10px]', artifact.reviewStatus === 'reviewed' ? 'bg-emerald-50 text-emerald-700' : artifact.reviewStatus === 'stale' ? 'bg-red-50 text-red-700' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-white text-[var(--ui-text-muted)]')}>
-                    {artifact.reviewStatus === 'reviewed' ? '已审核' : artifact.reviewStatus === 'stale' ? '已过期' : artifact.reviewStatus === 'in_review' ? '审核中' : '待审核'}
-                  </span>
-                </div>
-                {expertReport.coverage && (
-                  <div className={clsx('mt-2 text-[11px] leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-                    覆盖 {expertReport.coverage.contextChapterCount}/{expertReport.coverage.totalChapterCount} 章
-                    {expertReport.coverage.omittedChapterCount > 0 ? ` · 省略 ${expertReport.coverage.omittedChapterCount} 章` : ''}
-                  </div>
-                )}
-                <button type="button" onClick={() => onOpenReview('report', artifact)} className={clsx('mt-3 h-8 w-full rounded-md border px-3 text-xs', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] bg-white text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
-                  审核报告
-                </button>
-              </div>
-            )}
-            {review && (
-              <div className={clsx('mt-3 rounded-md border p-3', isDark ? 'border-white/10 bg-white/5' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
-                <div className="flex items-end justify-between gap-3">
-                  <div>
-                    <div className={clsx('text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>一致性总分</div>
-                    <div className="mt-1 text-2xl font-semibold">{typeof review.overallScore === 'number' ? review.overallScore : '--'}<span className={clsx('ml-1 text-xs font-normal', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>/ 100</span></div>
-                  </div>
-                  <span className={clsx('text-xs', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{issues.length} 个问题</span>
-                </div>
-                {dimensions.length > 0 && (
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    {dimensions.slice(0, 8).map((dimension, index) => (
-                      <div key={`${String(dimension.id || 'dimension')}-${index}`} className={clsx('rounded border px-2 py-1.5', isDark ? 'border-white/10' : 'border-[var(--ui-border)] bg-white')}>
-                        <div className="truncate text-[11px]">{String(dimension.label || dimension.id || '未命名维度')}</div>
-                        <div className="mt-0.5 text-sm font-semibold">{typeof dimension.score === 'number' ? dimension.score : '不可检查'}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                {issues.length > 0 && (
-                  <div className="mt-3 space-y-2">
-                    {issues.slice(0, 20).map((issue, index) => (
-                      <div key={`${String(issue.issueId || 'issue')}-${index}`} className={clsx('border-t pt-2', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
-                        <div className="flex items-start gap-2">
-                          <span className={clsx('mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] uppercase', issue.severity === 'critical' || issue.severity === 'high' ? 'bg-red-500/10 text-red-600' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>{String(issue.severity || 'info')}</span>
-                          <div className="min-w-0 text-sm font-medium leading-5">{String(issue.title || '未命名问题')}</div>
-                        </div>
-                        {typeof issue.location === 'string' && issue.location && <div className={clsx('mt-1 text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>位置：{issue.location}</div>}
-                        {typeof issue.recommendation === 'string' && issue.recommendation && <div className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{issue.recommendation}</div>}
-                        {typeof issue.uncertainty === 'string' && issue.uncertainty && <div className={clsx('mt-1 text-[11px] leading-5', isDark ? 'text-amber-300/80' : 'text-amber-700')}>需确认：{issue.uncertainty}</div>}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {plotlineAnalysis && (
-              <div className={clsx('mt-3 border-t pt-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
-                <div className="flex items-end justify-between gap-3">
-                  <div>
-                    <div className={clsx('text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>情节线健康度</div>
-                    <div className="mt-1 text-2xl font-semibold">
-                      {typeof plotlineAnalysis.overallScore === 'number' ? plotlineAnalysis.overallScore : '--'}
-                      <span className={clsx('ml-1 text-xs font-normal', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>/ 100</span>
-                    </div>
-                  </div>
-                  <div className={clsx('text-right text-[11px] leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-                    <div>{String(plotlineAnalysis.scope || '未标注范围')}</div>
-                    <div>
-                      已读 {typeof plotlineCoverage?.analyzedChapterCount === 'number' ? plotlineCoverage.analyzedChapterCount : 0} 章
-                      {typeof plotlineCoverage?.omittedChapterCount === 'number' && plotlineCoverage.omittedChapterCount > 0
-                        ? ` · 省略 ${plotlineCoverage.omittedChapterCount} 章`
-                        : ''}
-                    </div>
-                  </div>
-                </div>
+          ))}
+        </div>
+      </nav>
 
-                {plotlineThreads.length > 0 && (
-                  <div className="mt-4">
-                    <div className={clsx('text-xs font-semibold', isDark ? 'text-neutral-300' : 'text-[var(--ui-text-primary)]')}>主线与支线</div>
-                    <div className={clsx('mt-2 divide-y', isDark ? 'divide-white/10' : 'divide-[var(--ui-border)]')}>
-                      {plotlineThreads.slice(0, 30).map((thread, index) => {
-                        const findings = Array.isArray(thread.findings) ? thread.findings.map(String) : [];
-                        const recommendations = Array.isArray(thread.recommendations) ? thread.recommendations.map(String) : [];
-                        return (
-                          <div key={`${String(thread.plotlineId || thread.name || 'thread')}-${index}`} className="py-2.5 first:pt-0">
-                            <div className="flex min-w-0 items-center gap-2">
-                              <span className={clsx('shrink-0 rounded px-1.5 py-0.5 text-[10px]', thread.role === 'main' ? 'bg-blue-500/10 text-blue-600' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
-                                {thread.role === 'main' ? '主线' : thread.role === 'subplot' ? '支线' : '未分类'}
-                              </span>
-                              <span className="min-w-0 flex-1 truncate text-sm font-medium">{String(thread.name || '未命名情节线')}</span>
-                              {typeof thread.progressionScore === 'number' && (
-                                <span className={clsx('shrink-0 text-xs tabular-nums', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{thread.progressionScore}/100</span>
-                              )}
-                            </div>
-                            {typeof thread.status === 'string' && thread.status && (
-                              <div className={clsx('mt-1 text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>{thread.status}</div>
-                            )}
-                            {findings[0] && <div className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-300' : 'text-[var(--ui-text-secondary)]')}>{findings[0]}</div>}
-                            {recommendations[0] && <div className={clsx('mt-1 text-xs leading-5', isDark ? 'text-blue-300/80' : 'text-[#285b91]')}>建议：{recommendations[0]}</div>}
-                            {typeof thread.uncertainty === 'string' && thread.uncertainty && (
-                              <div className={clsx('mt-1 text-[11px] leading-5', isDark ? 'text-amber-300/80' : 'text-amber-700')}>需确认：{thread.uncertainty}</div>
-                            )}
-                          </div>
-                        );
-                      })}
+      <div
+        ref={viewerRef}
+        className={clsx('min-h-0 overflow-y-auto p-5', isDark ? 'bg-[#0f0f13]' : 'bg-white')}
+        aria-label="产物阅读区"
+      >
+        {selectedArtifact && (
+          <article className="mx-auto w-full max-w-3xl pb-10">
+            <header className={clsx('border-b pb-4', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <span className={clsx('rounded px-1.5 py-0.5', selectedArtifact.type === 'report' ? 'bg-blue-500/10 text-[#2f80ed]' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
+                  {selectedArtifact.type === 'report' ? '最终交付' : '分析依据'}
+                </span>
+                <span className={isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]'}>{artifactTypeLabel(selectedArtifact.type)} · {selectedArtifact.status}</span>
+              </div>
+              <h2 className="mt-2 text-lg font-semibold leading-7">{selectedArtifact.title}</h2>
+            </header>
+
+            {selectedArtifact.type === 'report' ? (
+              <div className="mt-5">
+                <AssistantMarkdown
+                  key={selectedArtifact.artifactId}
+                  content={selectedArtifact.content || selectedArtifact.summary || '该报告没有正文。'}
+                  isDark={isDark}
+                  variant="document"
+                  ariaLabel="报告正文"
+                />
+              </div>
+            ) : (
+              <>
+                {selectedArtifact.summary && (
+                  <p className={clsx('mt-4 whitespace-pre-wrap text-sm leading-7', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>
+                    {selectedArtifact.summary}
+                  </p>
+                )}
+                {selectedArtifact.type === 'agent_skill_pack_draft' && (
+                  <SkillDraftReviewCard artifact={selectedArtifact} isDark={isDark} onPublished={onSkillPublished} />
+                )}
+                {selectedArtifact.type === 'novel_bootstrap_draft' && (
+                  <NovelBootstrapInitializeCard
+                    artifact={selectedArtifact}
+                    isDark={isDark}
+                    onInitialize={onInitializeNovelProject}
+                  />
+                )}
+                {expertReport && (
+                  <div className={clsx('mt-4 rounded-lg border p-4', isDark ? 'border-white/10 bg-white/5' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span>{expertReport.findings.length} 个结构化问题</span>
+                      <span className={clsx('rounded px-1.5 py-0.5 text-[10px]', selectedArtifact.reviewStatus === 'reviewed' ? 'bg-emerald-50 text-emerald-700' : selectedArtifact.reviewStatus === 'stale' ? 'bg-red-50 text-red-700' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-white text-[var(--ui-text-muted)]')}>
+                        {selectedArtifact.reviewStatus === 'reviewed' ? '已审核' : selectedArtifact.reviewStatus === 'stale' ? '已过期' : selectedArtifact.reviewStatus === 'in_review' ? '审核中' : '待审核'}
+                      </span>
                     </div>
+                    {expertReport.coverage && (
+                      <div className={clsx('mt-2 text-[11px] leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
+                        覆盖 {expertReport.coverage.contextChapterCount}/{expertReport.coverage.totalChapterCount} 章
+                        {expertReport.coverage.omittedChapterCount > 0 ? ` · 省略 ${expertReport.coverage.omittedChapterCount} 章` : ''}
+                      </div>
+                    )}
+                    <button type="button" onClick={() => onOpenReview('report', selectedArtifact)} className={clsx('mt-3 h-9 w-full rounded-md border px-3 text-xs', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] bg-white text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
+                      审核报告
+                    </button>
                   </div>
                 )}
 
-                {plotlineIssues.length > 0 && (
-                  <div className="mt-4">
-                    <div className={clsx('text-xs font-semibold', isDark ? 'text-neutral-300' : 'text-[var(--ui-text-primary)]')}>风险与待回收项</div>
-                    <div className={clsx('mt-2 divide-y', isDark ? 'divide-white/10' : 'divide-[var(--ui-border)]')}>
-                      {plotlineIssues.slice(0, 30).map((issue, index) => (
-                        <div key={`${String(issue.issueId || 'plotline-issue')}-${index}`} className="py-2.5 first:pt-0">
+                {expertReport && expertReport.findings.length > 0 && (
+                  <details className={clsx('mt-4 rounded-lg border', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+                    <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium">
+                      分析明细（{expertReport.findings.length}）
+                    </summary>
+                    <div className={clsx('divide-y border-t px-4', isDark ? 'divide-white/10 border-white/10' : 'divide-[var(--ui-border)] border-[var(--ui-border)]')}>
+                      {expertReport.findings.map((finding) => (
+                        <div key={finding.findingId} className="py-3">
                           <div className="flex items-start gap-2">
-                            <span className={clsx('mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] uppercase', issue.severity === 'critical' || issue.severity === 'high' ? 'bg-red-500/10 text-red-600' : issue.severity === 'medium' ? 'bg-amber-500/10 text-amber-700' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
-                              {String(issue.severity || 'info')}
+                            <span className={clsx('mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] uppercase', finding.severity === 'critical' || finding.severity === 'high' ? 'bg-red-500/10 text-red-600' : finding.severity === 'medium' ? 'bg-amber-500/10 text-amber-700' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
+                              {finding.severity}
                             </span>
-                            <div className="min-w-0 text-sm font-medium leading-5">{String(issue.title || '未命名问题')}</div>
+                            <div className="min-w-0 text-sm font-medium leading-5">{finding.title}</div>
                           </div>
-                          {typeof issue.recommendation === 'string' && issue.recommendation && (
-                            <div className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{issue.recommendation}</div>
-                          )}
-                          {typeof issue.uncertainty === 'string' && issue.uncertainty && (
-                            <div className={clsx('mt-1 text-[11px] leading-5', isDark ? 'text-amber-300/80' : 'text-amber-700')}>需确认：{issue.uncertainty}</div>
-                          )}
+                          <div className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>{finding.summary}</div>
+                          {finding.recommendation && <div className={clsx('mt-1 text-xs leading-5', isDark ? 'text-blue-300/80' : 'text-[#285b91]')}>建议：{finding.recommendation}</div>}
                         </div>
                       ))}
                     </div>
-                  </div>
+                  </details>
                 )}
-              </div>
+
+                {selectedArtifact.content && selectedArtifact.content !== selectedArtifact.summary && (
+                  <details className={clsx('mt-4 rounded-lg border', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+                    <summary className="cursor-pointer select-none px-4 py-3 text-sm font-medium">查看原始分析</summary>
+                    <div className={clsx('border-t p-4', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
+                      <AssistantMarkdown
+                        content={selectedArtifact.content}
+                        isDark={isDark}
+                        variant="document"
+                        ariaLabel="原始分析"
+                      />
+                    </div>
+                  </details>
+                )}
+              </>
             )}
-            {artifact.content && artifact.content !== artifact.summary && (
-              review || plotlineAnalysis || artifact.type === 'context_bundle' || artifact.type === 'chapter_scope_context' ? (
-                <details className={clsx('mt-3 border-t pt-3', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
-                  <summary className={clsx('cursor-pointer text-xs', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
-                    {review ? '查看完整审核正文' : plotlineAnalysis ? '查看完整分析正文' : '查看结构化上下文'}
-                  </summary>
-                  <div className={clsx('mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md p-2 text-sm leading-6', isDark ? 'bg-white/5 text-neutral-300' : 'bg-[var(--ui-surface-subtle)] text-[var(--ui-text-secondary)]')}>
-                    {artifact.content}
-                  </div>
-                </details>
-              ) : (
-                <div className={clsx('mt-3 max-h-64 overflow-y-auto whitespace-pre-wrap break-words rounded-md p-2 text-sm leading-6', isDark ? 'bg-white/5 text-neutral-300' : 'bg-[var(--ui-surface-subtle)] text-[var(--ui-text-secondary)]')}>
-                  {artifact.content}
-                </div>
-              )
-            )}
-            {isDraftArtifact && (typeof artifact.reference?.draftSessionId === 'string' || typeof artifact.reference?.draftBatchId === 'string') && (
-              <button type="button" onClick={() => onOpenReview('draft', artifact)} className={clsx('mt-3 h-8 rounded-md border px-3 text-xs', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
-                {artifact.type === 'chapter_draft_batch' ? '打开批次审核' : artifact.type === 'creative_assets_draft' ? '打开素材审核' : '打开草稿审核'}
+
+            {isDraftArtifact && (typeof selectedArtifact.reference?.draftSessionId === 'string' || typeof selectedArtifact.reference?.draftBatchId === 'string') && (
+              <button type="button" onClick={() => onOpenReview('draft', selectedArtifact)} className={clsx('mt-4 h-9 rounded-md border px-3 text-xs', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
+                {selectedArtifact.type === 'chapter_draft_batch' ? '打开批次审核' : selectedArtifact.type === 'creative_assets_draft' ? '打开素材审核' : '打开草稿审核'}
               </button>
             )}
-          </div>
-        );
-      })}
+          </article>
+        )}
+      </div>
     </div>
   );
 }
@@ -4744,7 +7823,7 @@ function RoleSkillPanel({
         </div>
       )}
       <div className={clsx('rounded-lg border p-3', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
-        <div className="text-xs font-semibold">Skill</div>
+        <div className="text-xs font-semibold">能力标签</div>
         <div className="mt-3 space-y-2">
           {currentRole.skills.map((skill) => (
             <div key={skill} className={clsx('rounded-md px-2 py-2 text-sm', isDark ? 'bg-white/5 text-neutral-300' : 'bg-[var(--ui-surface-subtle)] text-[var(--ui-text-primary)]')}>
@@ -4791,7 +7870,7 @@ function ReviewPanel({
   activeRun,
   novelId,
   sourceConversationId,
-  chapterTitle,
+  volumes,
   onArtifactStatusChange,
   onDiscuss,
   onRegenerate,
@@ -4800,7 +7879,7 @@ function ReviewPanel({
   activeRun: AgentRun | null;
   novelId: string;
   sourceConversationId: string;
-  chapterTitle: string;
+  volumes: Volume[];
   onArtifactStatusChange: (draftSessionId: string, status: AgentArtifact['status']) => void;
   onDiscuss: (comments: ReviewCommentRecord[]) => Promise<void>;
   onRegenerate: (session: DraftSessionRecord, comments: ReviewCommentRecord[]) => Promise<void>;
@@ -4811,7 +7890,7 @@ function ReviewPanel({
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState('');
-  const [reviewMode, setReviewMode] = useState<'diff' | 'review' | 'original' | 'draft'>('diff');
+  const [reviewMode, setReviewMode] = useState<'diff' | 'original' | 'draft'>('diff');
   const [showContextDetails, setShowContextDetails] = useState(false);
   const [submitDialogOpen, setSubmitDialogOpen] = useState(false);
 
@@ -4873,6 +7952,22 @@ function ReviewPanel({
   const fullContextCount = previousContextSources.filter((source) => source.contentMode === 'full' || source.contentMode === 'truncated').length;
   const summaryContextCount = previousContextSources.filter((source) => source.contentMode === 'summary').length;
   const hasEditorBuffer = contextSources.some((source) => source.source === 'editor_buffer');
+  const displayChapterLabel = useMemo(() => {
+    const targetChapterId = chapterPayload?.chapterId || session?.chapterId || '';
+    const snapshotSource = contextSources.find((source) => source.chapterId === targetChapterId);
+    const catalogMatch = volumes.flatMap((volume) => (
+      volume.chapters.map((chapter) => ({ volume, chapter }))
+    )).find(({ chapter }) => chapter.id === targetChapterId);
+    const volumeOrder = Number(snapshotSource?.volumeOrder ?? catalogMatch?.volume.order ?? 0);
+    const chapterOrder = Number(snapshotSource?.order ?? catalogMatch?.chapter.order ?? 0);
+    const title = String(snapshotSource?.title || catalogMatch?.chapter.title || '').trim();
+    const parts = [
+      volumeOrder > 0 ? `第${volumeOrder}卷` : '',
+      chapterOrder > 0 ? `第${chapterOrder}章` : '',
+      title,
+    ].filter(Boolean);
+    return parts.length ? parts.join(' · ') : '目标章节';
+  }, [chapterPayload?.chapterId, contextSources, session?.chapterId, volumes]);
 
   const saveChanges = async (): Promise<DraftSessionRecord> => {
     if (!session || !chapterPayload) throw new Error('当前草稿不可编辑');
@@ -5057,6 +8152,11 @@ function ReviewPanel({
       />
     </section>
   );
+  const reviewStats = [
+    { key: 'original', label: '原文', value: `${originalLength} 字` },
+    { key: 'draft', label: '草稿', value: `${draftLength} 字` },
+    { key: 'delta', label: '新增', value: `${Math.max(0, draftLength - originalLength)} 字` },
+  ];
 
   if (isLoading || !hasDraft || (!session && !error)) {
     return (
@@ -5099,22 +8199,44 @@ function ReviewPanel({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className={clsx('shrink-0 border-b px-5 py-4', isDark ? 'border-white/10 bg-[#0f0f13]' : 'border-[var(--ui-border)] bg-[var(--ui-surface-subtle)]')}>
-        <div className="flex items-start justify-between gap-5">
-          <div className="min-w-0">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <h2 className="truncate text-base font-semibold">{chapterTitle}</h2>
+              <h2 className="truncate text-base font-semibold">{displayChapterLabel}</h2>
               <span className={clsx('shrink-0 rounded px-2 py-0.5 text-[11px]', isDraft ? 'bg-[#e8f2ff] text-[#2f80ed]' : (isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'))}>{statusLabel}</span>
             </div>
-            <div className={clsx('mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-              <span>原文 {originalLength} 字</span>
-              <span>草稿 {draftLength} 字</span>
-              <span>新增 {Math.max(0, draftLength)} 字</span>
-              {chapterPayload?.usedContext?.length ? <span>参考 {chapterPayload.usedContext.length} 项上下文</span> : null}
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              {reviewStats.map((stat) => (
+                <span
+                  key={stat.key}
+                  className={clsx(
+                    'inline-flex items-center gap-1 rounded-md border px-2.5 py-1 whitespace-nowrap',
+                    isDark ? 'border-white/10 bg-white/[0.03] text-neutral-400' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-muted)]',
+                  )}
+                >
+                  <span className="font-medium text-current">{stat.label}</span>
+                  <span className="tabular-nums">{stat.value}</span>
+                </span>
+              ))}
+              {chapterPayload?.usedContext?.length ? (
+                <span
+                  className={clsx(
+                    'inline-flex items-center gap-1 rounded-md border px-2.5 py-1 whitespace-nowrap',
+                    isDark ? 'border-white/10 bg-white/[0.03] text-neutral-400' : 'border-[var(--ui-border)] bg-white text-[var(--ui-text-muted)]',
+                  )}
+                >
+                  <span className="font-medium text-current">参考</span>
+                  <span className="tabular-nums">{chapterPayload.usedContext.length} 项上下文</span>
+                </span>
+              ) : null}
               {chapterPayload?.contextPolicy && (
                 <button
                   type="button"
                   onClick={() => setShowContextDetails((value) => !value)}
-                  className={clsx('inline-flex items-center gap-1 hover:underline', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}
+                  className={clsx(
+                    'inline-flex items-center gap-1 rounded-md border px-2.5 py-1 whitespace-nowrap hover:bg-black/5',
+                    isDark ? 'border-white/10 text-neutral-400 hover:bg-white/[0.04]' : 'border-[var(--ui-border)] text-[var(--ui-text-muted)]',
+                  )}
                 >
                   前文 {previousContextSources.length} 章 · 正文 {fullContextCount} · 摘要 {summaryContextCount}
                   <ChevronDown className={clsx('h-3 w-3 transition-transform', showContextDetails && 'rotate-180')} />
@@ -5122,10 +8244,9 @@ function ReviewPanel({
               )}
             </div>
           </div>
-          <div className={clsx('flex shrink-0 rounded-md border p-1', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
+          <div className={clsx('flex w-full shrink-0 overflow-x-auto rounded-md border p-1 xl:w-auto', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
             {([
               { id: 'diff', label: '高亮差异', icon: FileDiff },
-              { id: 'review', label: '逐段审核', icon: MessageSquare },
               { id: 'original', label: '完整原文', icon: FileText },
               { id: 'draft', label: '完整草稿', icon: Save },
             ] as const).map((option) => {
@@ -5176,13 +8297,13 @@ function ReviewPanel({
       </div>
 
       <div className="flex min-h-0 flex-1">
-        {reviewMode === 'diff' && <DraftDiffView originalText={originalText} draftText={generatedText} isDark={isDark} />}
-        {reviewMode === 'review' && session && (
-          <ReviewableParagraphs
-            text={generatedText}
+        {reviewMode === 'diff' && session && (
+          <DraftDiffView
+            originalText={originalText}
+            draftText={generatedText}
+            isDark={isDark}
             reviewVersionId={session.draftSessionId}
             comments={reviewComments.comments}
-            isDark={isDark}
             disabled={!isDraft}
             isMutating={reviewComments.isMutating}
             onSave={reviewComments.save}

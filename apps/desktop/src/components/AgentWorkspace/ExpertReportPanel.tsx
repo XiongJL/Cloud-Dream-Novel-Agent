@@ -15,6 +15,7 @@ import {
   projectChapterFindings,
   severityCounts,
 } from '../../../shared/agentExpertReportProjection';
+import type { ReportReviewAvailability } from './reportReviewAvailability';
 
 const REVIEWABLE_TYPES = new Set([
   'writer_revision_plan', 'chapter_range_review', 'reader_journey',
@@ -27,11 +28,13 @@ export function ExpertReportPanel({
   isDark,
   artifacts,
   volumes,
+  reviewAvailability,
   onReviewSubmitted,
 }: {
   isDark: boolean;
   artifacts: AgentArtifact[];
   volumes: Volume[];
+  reviewAvailability: ReportReviewAvailability;
   onReviewSubmitted: (artifactId: string, result: ArtifactReviewSubmitResult) => void;
 }) {
   const reportArtifacts = useMemo(() => artifacts.filter((artifact) => (
@@ -57,6 +60,35 @@ export function ExpertReportPanel({
   const matrix = report ? projectChapterFindings(report) : [];
   const counts = report ? severityCounts(report.findings) : null;
   const coverage = report?.coverage;
+  const artifactIsReady = Boolean(selectedArtifact && ['ready', 'committed'].includes(selectedArtifact.status));
+  const artifactIsStale = selectedArtifact?.reviewStatus === 'stale';
+  const artifactIsIncomplete = selectedArtifact?.status === 'failed' || selectedArtifact?.status === 'discarded';
+  const isGenerating = reviewAvailability === 'generating' && !artifactIsStale && !artifactIsIncomplete;
+  const interactive = reviewAvailability === 'ready'
+    && artifactIsReady
+    && !artifactIsStale;
+  const availabilityLabel = artifactIsStale
+    ? '报告已过期'
+    : artifactIsIncomplete || reviewAvailability === 'incomplete'
+      ? '审核未完成'
+      : reviewAvailability === 'generating'
+        ? '审核生成中'
+        : reviewAvailability === 'waiting'
+          ? '审核待继续'
+          : reviewAvailability === 'blocked'
+            ? '暂不可审核'
+            : '';
+  const availabilityMessage = artifactIsStale
+    ? '源章节已经变化，当前报告仅供查看，请重新生成后再处理。'
+    : artifactIsIncomplete || reviewAvailability === 'incomplete'
+      ? '任务未完整结束，当前仅展示已经生成的内容。'
+      : reviewAvailability === 'generating'
+        ? '结果仍可能增加或调整，完成后即可处理。'
+        : reviewAvailability === 'waiting'
+          ? '任务正在等待继续，完成后即可处理审核结果。'
+          : reviewAvailability === 'blocked'
+            ? '当前工作区暂不可提交审核，请稍后再试。'
+            : '';
 
   if (!selectedArtifact || !report) {
     return (
@@ -67,12 +99,13 @@ export function ExpertReportPanel({
   }
 
   const chooseAll = (status: FindingDecisionStatus) => {
+    if (!interactive) return;
     setDecisions(Object.fromEntries(report.findings.map((finding) => [finding.findingId, { findingId: finding.findingId, status }])));
   };
 
   const submit = async () => {
     const values = Object.values(decisions);
-    if (values.length === 0) return;
+    if (!interactive || values.length === 0) return;
     setIsSubmitting(true);
     try {
       const result = await window.automation.invoke('artifact.review.submit', {
@@ -110,12 +143,32 @@ export function ExpertReportPanel({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-sm font-semibold"><ClipboardCheck className="h-4 w-4 shrink-0 text-[#2f80ed]" />{expertReportTypeLabel(report.type)}</div>
-            <div className={clsx('mt-1 text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>{report.findings.length} 个问题 · {expertRoleLabel(report.expert)}</div>
+            <div className={clsx('mt-1 text-xs', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>{isGenerating ? `已发现 ${report.findings.length} 个问题` : `${report.findings.length} 个问题`} · {expertRoleLabel(report.expert)}</div>
           </div>
-          <span className={clsx('shrink-0 rounded px-2 py-1 text-[11px]', selectedArtifact.reviewStatus === 'stale' ? 'bg-red-50 text-red-700' : selectedArtifact.reviewStatus === 'reviewed' ? 'bg-emerald-50 text-emerald-700' : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
-            {selectedArtifact.reviewStatus === 'reviewed' ? '已审核' : selectedArtifact.reviewStatus === 'stale' ? '已过期' : selectedArtifact.reviewStatus === 'in_review' ? '审核中' : '待审核'}
+          <span className={clsx(
+            'inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-[11px]',
+            !interactive
+              ? artifactIsStale || artifactIsIncomplete || reviewAvailability === 'incomplete'
+                ? 'bg-amber-50 text-amber-700'
+                : isGenerating
+                  ? isDark ? 'bg-blue-400/10 text-blue-300' : 'bg-[#eaf3ff] text-[#1d63b7]'
+                  : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'
+              : selectedArtifact.reviewStatus === 'reviewed'
+                ? 'bg-emerald-50 text-emerald-700'
+                : isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]',
+          )}>
+            {isGenerating && <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />}
+            {!interactive ? availabilityLabel : selectedArtifact.reviewStatus === 'reviewed' ? '已审核' : selectedArtifact.reviewStatus === 'in_review' ? '审核中' : '待审核'}
           </span>
         </div>
+        {!interactive && availabilityMessage && (
+          <div className={clsx('mt-3 flex items-start gap-2 rounded-md px-2.5 py-2 text-[11px] leading-5', isDark ? 'bg-white/5 text-neutral-400' : 'bg-[#f7faff] text-[var(--ui-text-muted)]')} aria-live="polite">
+            {isGenerating
+              ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-[#2f80ed] motion-reduce:animate-none" />
+              : <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+            <span>{availabilityMessage}</span>
+          </div>
+        )}
         {report.summary && <p className={clsx('mt-3 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>{report.summary}</p>}
         <div className="mt-3 grid grid-cols-4 gap-1.5">
           {(['critical', 'high', 'medium', 'low'] as const).map((severity) => (
@@ -150,8 +203,8 @@ export function ExpertReportPanel({
         <div className="flex items-center justify-between gap-2">
           <div className="text-xs font-semibold">问题清单</div>
           <div className="flex gap-1">
-            <button type="button" onClick={() => chooseAll('accepted')} className={clsx('rounded px-2 py-1 text-[11px]', isDark ? 'bg-white/10' : 'bg-[#eaf3ff] text-[#1d63b7]')}>全部接受</button>
-            <button type="button" onClick={() => chooseAll('deferred')} className={clsx('rounded px-2 py-1 text-[11px]', isDark ? 'bg-white/10' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>全部暂缓</button>
+            <button type="button" disabled={!interactive} onClick={() => chooseAll('accepted')} className={clsx('rounded px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40', isDark ? 'bg-white/10' : 'bg-[#eaf3ff] text-[#1d63b7]')}>全部接受</button>
+            <button type="button" disabled={!interactive} onClick={() => chooseAll('deferred')} className={clsx('rounded px-2 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40', isDark ? 'bg-white/10' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>全部暂缓</button>
           </div>
         </div>
         {report.findings.map((finding) => {
@@ -177,28 +230,24 @@ export function ExpertReportPanel({
                 </div>
               )}
               <div className={clsx('grid grid-cols-3 gap-1 border-t p-2', isDark ? 'border-white/10' : 'border-[var(--ui-border)]')}>
-                <DecisionButton status="accepted" active={decision === 'accepted'} isDark={isDark} onClick={() => setDecisions((current) => ({ ...current, [finding.findingId]: { findingId: finding.findingId, status: 'accepted' } }))} />
-                <DecisionButton status="deferred" active={decision === 'deferred'} isDark={isDark} onClick={() => setDecisions((current) => ({ ...current, [finding.findingId]: { findingId: finding.findingId, status: 'deferred' } }))} />
-                <DecisionButton status="rejected" active={decision === 'rejected'} isDark={isDark} onClick={() => setDecisions((current) => ({ ...current, [finding.findingId]: { findingId: finding.findingId, status: 'rejected' } }))} />
+                <DecisionButton status="accepted" active={decision === 'accepted'} disabled={!interactive} isDark={isDark} onClick={() => setDecisions((current) => ({ ...current, [finding.findingId]: { findingId: finding.findingId, status: 'accepted' } }))} />
+                <DecisionButton status="deferred" active={decision === 'deferred'} disabled={!interactive} isDark={isDark} onClick={() => setDecisions((current) => ({ ...current, [finding.findingId]: { findingId: finding.findingId, status: 'deferred' } }))} />
+                <DecisionButton status="rejected" active={decision === 'rejected'} disabled={!interactive} isDark={isDark} onClick={() => setDecisions((current) => ({ ...current, [finding.findingId]: { findingId: finding.findingId, status: 'rejected' } }))} />
               </div>
             </article>
           );
         })}
       </section>
 
-      {selectedArtifact.reviewStatus === 'stale' && (
-        <div className="flex gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-xs leading-5 text-red-700"><AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />源章节已变化。报告仍可阅读，但不能直接创建自动修订计划。</div>
-      )}
-
-      <button type="button" disabled={isSubmitting || Object.keys(decisions).length === 0} onClick={() => void submit()} className={clsx('h-9 w-full rounded-md px-3 inline-flex items-center justify-center gap-2 text-sm text-white disabled:opacity-40', isDark ? 'bg-[#1f2328]' : 'bg-indigo-600')}>
-        {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardCheck className="h-4 w-4" />}
-        保存审核决定
+      <button type="button" disabled={!interactive || isSubmitting || Object.keys(decisions).length === 0} onClick={() => void submit()} className={clsx('h-9 w-full rounded-md px-3 inline-flex items-center justify-center gap-2 text-sm text-white disabled:cursor-not-allowed disabled:opacity-40', isDark ? 'bg-[#1f2328]' : 'bg-indigo-600')}>
+        {isSubmitting || isGenerating ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <ClipboardCheck className="h-4 w-4" />}
+        {interactive ? '保存审核决定' : availabilityLabel || '暂不可审核'}
       </button>
     </div>
   );
 }
 
-function DecisionButton({ status, active, isDark, onClick }: { status: FindingDecisionStatus; active: boolean; isDark: boolean; onClick: () => void }) {
+function DecisionButton({ status, active, disabled, isDark, onClick }: { status: FindingDecisionStatus; active: boolean; disabled: boolean; isDark: boolean; onClick: () => void }) {
   const config = status === 'accepted'
     ? { label: '接受', icon: CheckCircle2 }
     : status === 'deferred'
@@ -206,7 +255,7 @@ function DecisionButton({ status, active, isDark, onClick }: { status: FindingDe
       : { label: '驳回', icon: X };
   const Icon = config.icon;
   return (
-    <button type="button" onClick={onClick} className={clsx('h-8 rounded-md inline-flex items-center justify-center gap-1 text-xs', active ? status === 'accepted' ? 'bg-emerald-50 text-emerald-700' : status === 'deferred' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700' : isDark ? 'text-neutral-500 hover:bg-white/5' : 'text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-muted)]')}>
+    <button type="button" disabled={disabled} onClick={onClick} className={clsx('h-8 rounded-md inline-flex items-center justify-center gap-1 text-xs disabled:cursor-not-allowed disabled:opacity-40', active ? status === 'accepted' ? 'bg-emerald-50 text-emerald-700' : status === 'deferred' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-700' : isDark ? 'text-neutral-500 enabled:hover:bg-white/5' : 'text-[var(--ui-text-muted)] enabled:hover:bg-[var(--ui-surface-muted)]')}>
       {active ? <Check className="h-3.5 w-3.5" /> : <Icon className="h-3.5 w-3.5" />}{config.label}
     </button>
   );

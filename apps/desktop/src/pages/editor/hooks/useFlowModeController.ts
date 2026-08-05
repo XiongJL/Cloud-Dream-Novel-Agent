@@ -16,6 +16,7 @@ export function useFlowModeController({
     const [isFlowMode, setIsFlowMode] = useState(false);
     const [isFlowEntering, setIsFlowEntering] = useState(false);
     const [isFlowSwitching, setIsFlowSwitching] = useState(false);
+    const [isFullScreen, setIsFullScreen] = useState(false);
     const isWindowFullScreenRef = useRef(false);
 
     const toggleFlowMode = useCallback(async () => {
@@ -39,8 +40,10 @@ export function useFlowModeController({
             }
 
             try {
-                if ((window as any).electron?.toggleFullScreen) {
-                    await (window as any).electron.toggleFullScreen();
+                if (window.electron?.toggleFullScreen) {
+                    const fullScreen = await window.electron.toggleFullScreen();
+                    isWindowFullScreenRef.current = fullScreen;
+                    setIsFullScreen(fullScreen);
                 }
             } catch {
                 // ignore fullscreen toggle failures
@@ -57,11 +60,12 @@ export function useFlowModeController({
     }, [editorRef, isFlowMode, setIsSidePanelOpen]);
 
     useEffect(() => {
-        if (!(window as any).electron?.onFullScreenChange) return;
+        if (!window.electron?.onFullScreenChange) return;
 
-        const unsubscribe = (window as any).electron.onFullScreenChange((isFullScreen: boolean) => {
-            isWindowFullScreenRef.current = isFullScreen;
-            if (!isFullScreen && isFlowMode) {
+        const unsubscribe = window.electron.onFullScreenChange((fullScreen: boolean) => {
+            isWindowFullScreenRef.current = fullScreen;
+            setIsFullScreen(fullScreen);
+            if (!fullScreen && isFlowMode) {
                 document.body.classList.remove('flow-mode-active');
                 setIsFlowMode(false);
                 setIsFlowEntering(false);
@@ -92,8 +96,8 @@ export function useFlowModeController({
             setIsFlowSwitching(false);
             setIsSidePanelOpen(true);
 
-            if (isWindowFullScreenRef.current && (window as any).electron?.toggleFullScreen) {
-                (window as any).electron.toggleFullScreen().catch((error: unknown) => {
+            if (isWindowFullScreenRef.current && window.electron?.toggleFullScreen) {
+                window.electron.toggleFullScreen().catch((error: unknown) => {
                     console.warn('[Editor] failed to exit fullscreen on ESC fallback:', error);
                 });
             }
@@ -105,6 +109,7 @@ export function useFlowModeController({
 
     return {
         isFlowMode,
+        isFullScreen,
         isFlowEntering,
         isFlowSwitching,
         toggleFlowMode,

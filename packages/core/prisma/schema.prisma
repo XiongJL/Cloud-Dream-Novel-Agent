@@ -35,6 +35,10 @@ model Novel {
   agentRuns          AgentRun[]
   agentArtifacts     AgentArtifact[]
   agentAttachments   AgentAttachment[]
+  agentSkills        AgentSkill[]
+  agentSkillBindings AgentSkillBinding[]
+  agentSkillDrafts   AgentSkillDraft[]
+  agentSkillPacks    AgentSkillPack[]
 }
 
 model Volume {
@@ -74,24 +78,29 @@ model Chapter {
 }
 
 model AgentConversation {
-  id                    String   @id
-  novelId               String
-  title                 String
-  description           String?
-  role                  String
-  runtimeConversationId String?
-  suggestedGoal         String?
-  planJson              String?
-  runJson               String?
-  contextSummaryJson    String?
-  error                 String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                         String   @id
+  novelId                    String
+  title                      String
+  description                String?
+  role                       String
+  runtimeConversationId      String?
+  suggestedGoal              String?
+  planJson                   String?
+  runJson                    String?
+  contextSummaryJson         String?
+  pendingUserInputJson       String?
+  userInputResolutionsJson   String?
+  chapterScopeJson           String?
+  composerDraft              String   @default("")
+  attentionAcknowledgedRunId String?
+  error                      String?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
 
-  novel    Novel          @relation(fields: [novelId], references: [id], onDelete: Cascade)
-  messages AgentMessage[]
-  runs     AgentRun[]
-  artifacts AgentArtifact[]
+  novel       Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  messages    AgentMessage[]
+  runs        AgentRun[]
+  artifacts   AgentArtifact[]
   attachments AgentAttachment[]
 
   @@index([novelId, updatedAt], map: "idx_agent_conversation_novel_updated")
@@ -103,10 +112,12 @@ model AgentMessage {
   role           String
   content        String
   metadataJson   String?
+  sequence       Int
   createdAt      DateTime @default(now())
 
   conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
+  @@unique([conversationId, sequence], map: "idx_agent_message_conversation_sequence")
   @@index([conversationId, createdAt], map: "idx_agent_message_conversation_created")
 }
 
@@ -140,21 +151,35 @@ model AgentAttachment {
 }
 
 model AgentRun {
-  runId                 String   @id
-  conversationId        String
-  novelId               String
-  threadId              String
-  planId                String
-  status                String
-  currentStepId         String?
-  progress              Float    @default(0)
-  draftSessionId        String?
-  cancelRequested       Int      @default(0)
-  pendingApprovalJson   String?
-  approvalResponsesJson String?
-  planJson              String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  runId                  String   @id
+  conversationId         String
+  novelId                String
+  threadId               String
+  planId                 String
+  status                 String
+  currentStepId          String?
+  progress               Float    @default(0)
+  draftSessionId         String?
+  draftBatchId           String?
+  draftOperationId       String?
+  draftOperationKey      String?
+  draftOperationStatus   String?
+  draftOperationVersion  Int?
+  cancelRequested        Int      @default(0)
+  pendingApprovalJson    String?
+  approvalResponsesJson  String?
+  pendingUserInputJson   String?
+  userInputResponsesJson String?
+  planJson               String?
+  retryOfRunId           String?
+  retryRootRunId         String?
+  retryAttempt           Int      @default(0)
+  failureRevision        Int      @default(0)
+  resumedFromJson        String?
+  completionKind         String   @default("complete")
+  recoveryJson           String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
 
   conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   novel        Novel             @relation(fields: [novelId], references: [id], onDelete: Cascade)
@@ -183,26 +208,53 @@ model AgentRunEvent {
   @@index([runId, sequence], map: "idx_agent_run_event_run_sequence")
 }
 
+model AgentModelResultCheckpoint {
+  requestId            String
+  revision             Int
+  sourceMethod         String
+  contractId           String
+  contractVersion      String
+  rawText              String
+  resultHash           String
+  repairAttemptId      String?  @unique(map: "uq_agent_model_result_repair_attempt")
+  repairedFromRevision Int?
+  createdAt            DateTime @default(now())
+
+  @@id([requestId, revision])
+  @@index([createdAt], map: "idx_agent_model_result_created")
+}
+
+model AgentModelRepairAttempt {
+  repairAttemptId String   @id
+  requestId       String
+  repairAttempt   Int
+  status          String
+  resultRevision  Int?
+  errorCode       String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+}
+
 model AgentArtifact {
-  artifactId    String   @id
-  conversationId String
-  runId         String
-  novelId       String
-  planId        String
-  type          String
-  title         String
-  status        String
-  summary       String?
-  content       String?
-  referenceJson String?
-  metadataJson  String?
-  reviewStatus  String   @default("unreviewed")
-  reviewRevision Int     @default(0)
-  reviewDecisionsJson String?
+  artifactId                String    @id
+  conversationId            String
+  runId                     String
+  novelId                   String
+  planId                    String
+  type                      String
+  title                     String
+  status                    String
+  summary                   String?
+  content                   String?
+  referenceJson             String?
+  metadataJson              String?
+  reviewStatus              String    @default("unreviewed")
+  reviewRevision            Int       @default(0)
+  reviewDecisionsJson       String?
   reviewStaleChapterIdsJson String?
-  reviewedAt    DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  reviewedAt                DateTime?
+  createdAt                 DateTime  @default(now())
+  updatedAt                 DateTime  @updatedAt
 
   conversation AgentConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   run          AgentRun          @relation(fields: [runId], references: [runId], onDelete: Cascade)
@@ -210,6 +262,155 @@ model AgentArtifact {
 
   @@index([conversationId, createdAt], map: "idx_agent_artifact_conversation_created")
   @@index([runId, createdAt], map: "idx_agent_artifact_run_created")
+}
+
+model DraftGenerationOperation {
+  operationId          String    @id
+  operationKey         String    @unique
+  operationType        String
+  paramsHash           String
+  requestJson          String
+  novelId              String
+  volumeId             String?
+  chapterId            String
+  draftBatchId         String?
+  childIndex           Int?
+  generationRevision   Int
+  sourceChapterVersion Int
+  sourceContentHash    String
+  status               String
+  phase                String
+  version              Int       @default(1)
+  attemptCount         Int       @default(0)
+  maxAttempts          Int       @default(4)
+  operationDeadlineAt  DateTime
+  progress             Float?
+  heartbeatAt          DateTime?
+  leaseOwner           String?
+  leaseExpiresAt       DateTime?
+  cancelRequestedAt    DateTime?
+  generatedPayloadJson String?
+  resultDraftSessionId String?
+  resultJson           String?
+  warningJson          String    @default("[]")
+  errorCode            String?
+  errorJson            String?
+  sourceConversationId String?
+  sourceRunId          String?
+  sourceStepId         String?
+  createdAt            DateTime  @default(now())
+  startedAt            DateTime?
+  completedAt          DateTime?
+  updatedAt            DateTime  @updatedAt
+
+  attempts DraftGenerationAttempt[]
+  outbox   DraftOperationOutbox[]
+
+  @@unique([draftBatchId, childIndex, generationRevision], map: "uq_draft_operation_batch_child_revision")
+  @@index([status, leaseExpiresAt], map: "idx_draft_operation_status_lease")
+  @@index([novelId, updatedAt], map: "idx_draft_operation_novel_updated")
+  @@index([sourceRunId, updatedAt], map: "idx_draft_operation_run_updated")
+}
+
+model DraftGenerationAttempt {
+  attemptId          String    @id
+  operationId        String
+  attemptNumber      Int
+  requestId          String
+  providerType       String
+  providerProfileId  String?
+  model              String
+  providerRequestId  String?
+  providerResponseId String?
+  status             String
+  startedAt          DateTime  @default(now())
+  firstByteAt        DateTime?
+  lastChunkAt        DateTime?
+  completedAt        DateTime?
+  inputTokens        Int?
+  outputTokens       Int?
+  estimatedCost      Float?
+  errorCode          String?
+  errorJson          String?
+
+  operation DraftGenerationOperation @relation(fields: [operationId], references: [operationId], onDelete: Cascade)
+
+  @@unique([operationId, attemptNumber], map: "uq_draft_attempt_operation_number")
+  @@index([operationId, status], map: "idx_draft_attempt_operation_status")
+}
+
+model DraftOperationOutbox {
+  outboxId       String    @id
+  operationId    String
+  eventType      String
+  payloadJson    String
+  deliveryStatus String    @default("pending")
+  attemptCount   Int       @default(0)
+  nextAttemptAt  DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+  deliveredAt    DateTime?
+
+  operation DraftGenerationOperation @relation(fields: [operationId], references: [operationId], onDelete: Cascade)
+
+  @@index([deliveryStatus, nextAttemptAt], map: "idx_draft_outbox_delivery_due")
+  @@index([operationId, createdAt], map: "idx_draft_outbox_operation_created")
+}
+
+model DraftSession {
+  draftSessionId     String   @id
+  workspace          String
+  type               String
+  source             String
+  origin             String
+  novelId            String
+  chapterId          String?
+  sourceOperationId  String?  @unique
+  draftBatchId       String?
+  childIndex         Int?
+  generationRevision Int?
+  status             String
+  payloadJson        String
+  version            Int
+  createdAt          DateTime
+  updatedAt          DateTime
+
+  @@index([novelId, status, updatedAt], map: "idx_draft_session_novel_status_updated")
+  @@index([draftBatchId, childIndex], map: "idx_draft_session_batch_child")
+}
+
+model DraftBatch {
+  draftBatchId    String   @id
+  novelId         String
+  volumeId        String
+  anchorChapterId String
+  mode            String
+  status          String
+  payloadJson     String
+  version         Int
+  createdAt       DateTime
+  updatedAt       DateTime
+
+  children DraftBatchChild[]
+
+  @@index([novelId, status, updatedAt], map: "idx_draft_batch_novel_status_updated")
+  @@index([volumeId, updatedAt], map: "idx_draft_batch_volume_updated")
+}
+
+model DraftBatchChild {
+  draftBatchId       String
+  childIndex         Int
+  status             String
+  generationRevision Int
+  draftSessionId     String?
+  targetChapterId    String?
+  payloadJson        String
+  updatedAt          DateTime
+
+  batch DraftBatch @relation(fields: [draftBatchId], references: [draftBatchId], onDelete: Cascade)
+
+  @@id([draftBatchId, childIndex])
+  @@index([draftSessionId], map: "idx_draft_batch_child_session")
+  @@index([status, updatedAt], map: "idx_draft_batch_child_status_updated")
 }
 
 model AgentRevisionTask {
@@ -227,13 +428,133 @@ model AgentRevisionTask {
   sourceSnapshotJson   String
   note                 String?
   planId               String?
-  planJson              String?
+  planJson             String?
+  sourceConversationId String?
+  sourceRunId          String?
+  entryReason          String   @default("legacy")
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
 
   @@unique([sourceArtifactId, sourceFindingId])
   @@index([novelId, status, updatedAt], map: "idx_agent_revision_task_novel_status")
   @@index([sourceArtifactId, sourceFindingId], map: "idx_agent_revision_task_artifact")
+}
+
+model AgentSkill {
+  id                String    @id
+  stableId          String
+  scope             String
+  ownerNovelId      String?
+  title             String
+  description       String
+  skillType         String    @default("prompt_method")
+  enabled           Boolean   @default(true)
+  archivedAt        DateTime?
+  currentRevisionId String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  ownerNovel Novel?               @relation(fields: [ownerNovelId], references: [id], onDelete: Cascade)
+  revisions  AgentSkillRevision[]
+  bindings   AgentSkillBinding[]
+  drafts     AgentSkillDraft[]
+
+  @@unique([scope, ownerNovelId, stableId], map: "uq_agent_skill_scope_owner_stable")
+  @@index([scope, ownerNovelId, enabled, updatedAt], map: "idx_agent_skill_visible")
+}
+
+model AgentSkillRevision {
+  id              String   @id
+  skillId         String
+  version         String
+  manifestJson    String
+  instructions    String
+  constraintsJson String   @default("[]")
+  examplesJson    String   @default("[]")
+  contentHash     String
+  createdAt       DateTime @default(now())
+
+  skill AgentSkill @relation(fields: [skillId], references: [id], onDelete: Restrict)
+
+  @@unique([skillId, version], map: "uq_agent_skill_revision_version")
+  @@index([skillId, createdAt], map: "idx_agent_skill_revision_created")
+}
+
+model AgentSkillBinding {
+  id          String   @id
+  skillId     String
+  novelId     String?
+  roleId      String?
+  operationId String?
+  presetId    String?
+  bindingType String
+  priority    Int      @default(0)
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  skill AgentSkill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  novel Novel?     @relation(fields: [novelId], references: [id], onDelete: Cascade)
+
+  @@index([novelId, roleId, operationId, enabled], map: "idx_agent_skill_binding_resolution")
+  @@index([skillId, enabled], map: "idx_agent_skill_binding_skill")
+}
+
+model AgentSkillDraft {
+  id                        String   @id
+  status                    String
+  action                    String
+  scope                     String
+  sourceNovelId             String?
+  targetSkillId             String?
+  draftJson                 String
+  derivationReportJson      String?
+  expectedCurrentRevisionId String?
+  committedRevisionId       String?
+  committedPackRevisionId   String?
+  version                   Int      @default(1)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  sourceNovel Novel?      @relation(fields: [sourceNovelId], references: [id], onDelete: SetNull)
+  targetSkill AgentSkill? @relation(fields: [targetSkillId], references: [id], onDelete: SetNull)
+
+  @@index([sourceNovelId, status, updatedAt], map: "idx_agent_skill_draft_novel_status")
+  @@index([targetSkillId, updatedAt], map: "idx_agent_skill_draft_target")
+}
+
+model AgentSkillPack {
+  id                String    @id
+  stableId          String
+  scope             String
+  ownerNovelId      String?
+  title             String
+  description       String
+  enabled           Boolean   @default(true)
+  archivedAt        DateTime?
+  currentRevisionId String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  ownerNovel Novel?                   @relation(fields: [ownerNovelId], references: [id], onDelete: Cascade)
+  revisions  AgentSkillPackRevision[]
+
+  @@unique([scope, ownerNovelId, stableId], map: "uq_agent_skill_pack_scope_owner_stable")
+  @@index([scope, ownerNovelId, enabled, updatedAt], map: "idx_agent_skill_pack_visible")
+}
+
+model AgentSkillPackRevision {
+  id           String   @id
+  packId       String
+  version      String
+  bindingsJson String
+  contentHash  String
+  createdAt    DateTime @default(now())
+
+  pack AgentSkillPack @relation(fields: [packId], references: [id], onDelete: Restrict)
+
+  @@unique([packId, version], map: "uq_agent_skill_pack_revision_version")
+  @@index([packId, createdAt], map: "idx_agent_skill_pack_revision_created")
 }
 
 model SyncState {

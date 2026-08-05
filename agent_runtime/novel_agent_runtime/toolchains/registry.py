@@ -25,12 +25,17 @@ from .schemas import (
     EditorRangeReviewInput,
     PlotlineAnalysisArtifact,
     PlotlineAnalysisInput,
+    NovelBootstrapDraft,
+    NovelBootstrapInput,
+    NovelProjectInitializeInput,
     ReaderJourneyArtifact,
     ReaderJourneyReviewInput,
     ResearchFactCheckArtifact,
     ResearchRangeFactCheckInput,
     ScopeAuditArtifact,
     ScopeAuditInput,
+    StyleSkillExtractionInput,
+    StyleSkillPackDraftArtifact,
     WorldbuildingConsistencyArtifact,
     WorldbuildingRangeConsistencyInput,
     WriterRangeRevisionPlanArtifact,
@@ -53,6 +58,7 @@ class ToolchainDefinition(BaseModel):
     allowedRoles: tuple[str, ...]
     requiredTools: tuple[str, ...]
     sideEffect: Literal["read_only", "draft_write"]
+    approvalPolicy: Literal["always", "auto_small_scope"] = "always"
     supportedOperations: tuple[str, ...]
     intentHints: tuple[str, ...] = ()
     enabled: bool = True
@@ -67,6 +73,7 @@ class ToolchainDefinition(BaseModel):
             "allowedRoles": list(self.allowedRoles),
             "requiredTools": list(self.requiredTools),
             "sideEffect": self.sideEffect,
+            "approvalPolicy": self.approvalPolicy,
             "supportedOperations": list(self.supportedOperations),
             "intentHints": list(self.intentHints),
             "enabled": self.enabled,
@@ -74,6 +81,13 @@ class ToolchainDefinition(BaseModel):
             "inputSchema": self.inputModel.model_json_schema(),
             "outputSchema": self.outputModel.model_json_schema(),
         }
+
+    def planning_contract(self) -> dict[str, Any]:
+        contract = self.public_contract()
+        # Planning only selects and configures a chain. The execution result
+        # schema is large and does not help the model make that decision.
+        contract.pop("outputSchema", None)
+        return contract
 
 
 class ToolchainRegistry:
@@ -101,6 +115,8 @@ class ToolchainRegistry:
             writable = [name for name in definition.requiredTools if not AGENT_TOOL_BY_NAME[name].read_only]
             if writable:
                 raise ValueError(f"Read-only Toolchain contains writable tools: {', '.join(writable)}")
+        if definition.approvalPolicy == "auto_small_scope" and definition.sideEffect != "read_only":
+            raise ValueError("auto_small_scope approval is only valid for read-only Toolchains")
         unknown_operations = [item for item in definition.supportedOperations if not INTENT_OPERATION_REGISTRY.has(item)]
         if unknown_operations:
             raise ValueError(f"Unknown Toolchain operations: {', '.join(unknown_operations)}")
@@ -114,12 +130,15 @@ class ToolchainRegistry:
             raise ToolchainError("VERSION_UNAVAILABLE", f"Toolchain version unavailable: {toolchain_id}@{version}")
         if not definition.enabled:
             raise ToolchainError("TOOLCHAIN_DISABLED", f"Toolchain is disabled: {toolchain_id}@{version}")
-        if role and role not in definition.allowedRoles:
-            raise ToolchainError("ROLE_NOT_ALLOWED", f"Role {role} cannot invoke {toolchain_id}")
+        # Roles guide planning and presentation; they are not an authorization
+        # boundary. Tool and side-effect policy remains enforced separately.
         return definition
 
     def list_public(self) -> list[dict[str, Any]]:
         return [definition.public_contract() for definition in self._definitions.values() if definition.enabled]
+
+    def list_for_planning(self) -> list[dict[str, Any]]:
+        return [definition.planning_contract() for definition in self._definitions.values() if definition.enabled]
 
     def find_for_operation(self, operation_id: str, *, include_disabled: bool = False) -> list[ToolchainDefinition]:
         return [
@@ -150,9 +169,61 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
                 "rag.ask",
             ),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("chapter.context",),
             intentHints=("章节上下文", "装配上下文", "chapter context"),
             budget=ToolchainBudget(maxToolCalls=10, maxEstimatedTokens=24000, timeoutSeconds=180),
+        ),
+        ToolchainDefinition(
+            id="novel.bootstrap",
+            version="1.0.0",
+            title="新建小说方案",
+            description="复用内置提问与推荐结果，形成可审核的故事圣经、冲突升级路径和开篇章节节拍。",
+            inputModel=NovelBootstrapInput,
+            outputModel=NovelBootstrapDraft,
+            allowedRoles=("team", "writer", "worldbuilding"),
+            requiredTools=(),
+            sideEffect="read_only",
+            supportedOperations=("novel.bootstrap",),
+            intentHints=("新建小说", "从零创建小说", "故事圣经", "novel bootstrap"),
+            budget=ToolchainBudget(maxToolCalls=1, maxModelCalls=1, maxEstimatedTokens=24000, timeoutSeconds=240),
+        ),
+        ToolchainDefinition(
+            id="novel.project_initialize",
+            version="1.0.0",
+            title="初始化小说项目素材",
+            description="以已确认的小说蓝图生成故事线、情节点、角色、物品、技能、世界设定和地图的可审核项目素材草稿。",
+            inputModel=NovelProjectInitializeInput,
+            outputModel=DraftToolchainResult,
+            allowedRoles=("team", "writer", "worldbuilding"),
+            requiredTools=(
+                "plotline.list",
+                "character.list",
+                "worldsetting.list",
+                "item.list",
+                "map.list",
+                "creative_assets.generate_draft",
+                "creative_assets.validate_draft",
+            ),
+            sideEffect="draft_write",
+            approvalPolicy="always",
+            supportedOperations=("novel.project_initialize",),
+            intentHints=("初始化小说项目", "根据蓝图创建素材", "项目初始化", "initialize novel project"),
+            budget=ToolchainBudget(maxToolCalls=7, maxModelCalls=1, maxEstimatedTokens=32000, timeoutSeconds=420),
+        ),
+        ToolchainDefinition(
+            id="agent_skill.style_extract",
+            version="1.0.0",
+            title="多维文风 Skill 提炼",
+            description="读取用户批准的章节范围，生成语言风格、悬念与信息释放、可选群像推进 Skill 草稿和 Pack 绑定。",
+            inputModel=StyleSkillExtractionInput,
+            outputModel=StyleSkillPackDraftArtifact,
+            allowedRoles=("team", "writer", "editor", "reader"),
+            requiredTools=("chapter.scope_context.build",),
+            sideEffect="read_only",
+            supportedOperations=("agent_skill.style_extract",),
+            intentHints=("提炼文风", "抽取语言风格", "悬念与信息释放", "文风技能包"),
+            budget=ToolchainBudget(maxToolCalls=1, maxModelCalls=1, maxEstimatedTokens=80000, timeoutSeconds=420),
         ),
         ToolchainDefinition(
             id="chapter.scope_context",
@@ -164,6 +235,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             allowedRoles=("team", "writer", "editor", "reader", "worldbuilding", "research_rag"),
             requiredTools=("chapter.scope_context.build", "rag.ask"),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("chapter.scope_context",),
             intentHints=("多章节上下文", "章节范围", "范围上下文", "cross chapter context"),
             budget=ToolchainBudget(maxToolCalls=2, maxEstimatedTokens=80000, timeoutSeconds=240),
@@ -187,6 +259,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
                 "rag.ask",
             ),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("chapter.consistency_review",),
             intentHints=("一致性", "前后矛盾", "设定冲突", "consistency review"),
             budget=ToolchainBudget(maxToolCalls=10, maxEstimatedTokens=28000, timeoutSeconds=240),
@@ -201,6 +274,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             allowedRoles=("team", "writer"),
             requiredTools=("chapter.scope_context.build", "rag.ask"),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("writer.range_revision_plan",),
             intentHints=("作者多章节修订计划", "多章节修订建议", "改写顺序", "续写准备度", "writer revision plan"),
             budget=ToolchainBudget(maxToolCalls=2, maxModelCalls=1, maxEstimatedTokens=80000, timeoutSeconds=360),
@@ -215,6 +289,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             allowedRoles=("team", "editor"),
             requiredTools=("chapter.scope_context.build", "rag.ask"),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("editor.range_review",),
             intentHints=("多章节编辑审核", "跨章编辑审核", "章节范围审核", "editor range review"),
             budget=ToolchainBudget(maxToolCalls=2, maxModelCalls=1, maxEstimatedTokens=80000, timeoutSeconds=360),
@@ -229,6 +304,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             allowedRoles=("team", "reader"),
             requiredTools=("chapter.scope_context.build",),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("reader.journey_review",),
             intentHints=("多章节读者盲测", "读者旅程", "跨章读者反馈", "顺序盲读", "reader journey"),
             budget=ToolchainBudget(maxToolCalls=1, maxModelCalls=20, maxEstimatedTokens=80000, timeoutSeconds=900),
@@ -243,6 +319,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             allowedRoles=("team", "worldbuilding"),
             requiredTools=("chapter.scope_context.build", "rag.ask"),
             sideEffect="read_only",
+            approvalPolicy="auto_small_scope",
             supportedOperations=("worldbuilding.range_consistency",),
             intentHints=("多章节世界观审核", "世界观一致性", "设定漂移", "规则冲突", "worldbuilding consistency"),
             budget=ToolchainBudget(maxToolCalls=2, maxModelCalls=1, maxEstimatedTokens=80000, timeoutSeconds=360),
@@ -305,6 +382,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
                 "chapter.continuation_context.build",
                 "agent.generate_chapter_beats",
                 "draft.batch.create",
+                "draft.batch.update_outline",
                 "draft.batch.approve_outline",
                 "draft.batch.get",
                 "draft.batch.prepare_regeneration",
@@ -312,9 +390,9 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
                 "chapter.generate_draft",
             ),
             sideEffect="draft_write",
-            supportedOperations=("chapter.sequence_continuation",),
+            supportedOperations=("chapter.sequence_continuation", "chapter.create"),
             intentHints=("续写多章", "连续写几章", "后续章节", "multiple chapter continuation"),
-            budget=ToolchainBudget(maxToolCalls=12, maxModelCalls=11, maxEstimatedTokens=160000, timeoutSeconds=1200),
+            budget=ToolchainBudget(maxToolCalls=32, maxModelCalls=11, maxEstimatedTokens=160000, timeoutSeconds=1200),
         ),
         ToolchainDefinition(
             id="chapter.batch_rewrite",
@@ -328,6 +406,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
                 "chapter.scope_context.build",
                 "agent.generate_chapter_beats",
                 "draft.batch.create",
+                "draft.batch.update_outline",
                 "draft.batch.approve_outline",
                 "draft.batch.get",
                 "draft.batch.prepare_regeneration",
@@ -335,9 +414,9 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
                 "chapter.generate_draft",
             ),
             sideEffect="draft_write",
-            supportedOperations=("chapter.batch_rewrite",),
+            supportedOperations=("chapter.batch_rewrite", "chapter.rewrite"),
             intentHints=("批量改写章节", "改写多章", "重写选中章节", "batch rewrite"),
-            budget=ToolchainBudget(maxToolCalls=12, maxModelCalls=11, maxEstimatedTokens=160000, timeoutSeconds=1200),
+            budget=ToolchainBudget(maxToolCalls=32, maxModelCalls=11, maxEstimatedTokens=160000, timeoutSeconds=1200),
         ),
         ToolchainDefinition(
             id="creative_asset.draft",

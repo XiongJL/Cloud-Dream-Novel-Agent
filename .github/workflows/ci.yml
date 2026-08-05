@@ -76,7 +76,7 @@ jobs:
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
       - name: Type-check Desktop
-        run: pnpm --dir apps/desktop exec tsc --noEmit
+        run: pnpm --filter novel-editor-desktop run typecheck
 
       - name: Build Renderer, Main, and Preload
         run: pnpm --dir apps/desktop exec vite build

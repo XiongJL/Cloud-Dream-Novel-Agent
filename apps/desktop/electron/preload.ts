@@ -1,5 +1,27 @@
 import { ipcRenderer, contextBridge } from 'electron'
 
+async function invokeAgentWithStructuredError(
+    method: string,
+    payload: any,
+    options?: { requestId?: string },
+): Promise<any> {
+    const response = await ipcRenderer.invoke('agent:invoke', {
+        method,
+        params: payload ?? {},
+        context: payload?.context,
+        requestId: options?.requestId,
+        preserveErrorDetails: true,
+    });
+    if (!response || response.__agentInvokeResult !== true) return response;
+    if (response.ok === true) return response.data;
+    throw Object.assign(new Error(String(response.error?.message || 'Agent request failed')), {
+        code: String(response.error?.code || 'AGENT_RUNTIME_ERROR'),
+        details: response.error?.details && typeof response.error.details === 'object'
+            ? response.error.details
+            : undefined,
+    });
+}
+
 // --------- Expose some API to the Renderer process ---------
 contextBridge.exposeInMainWorld('db', {
     getNovels: () => ipcRenderer.invoke('db:get-novels'),
@@ -19,6 +41,8 @@ contextBridge.exposeInMainWorld('db', {
     importNovelFile: () => ipcRenderer.invoke('db:import-novel-file'),
     getAgentConversations: (novelId: string) => ipcRenderer.invoke('db:get-agent-conversations', novelId),
     upsertAgentConversation: (conversation: any) => ipcRenderer.invoke('db:upsert-agent-conversation', conversation),
+    updateAgentConversationDraft: (payload: { conversationId: string; composerDraft: string }) => ipcRenderer.invoke('db:update-agent-conversation-draft', payload),
+    acknowledgeAgentConversationRun: (payload: { conversationId: string; runId: string | null }) => ipcRenderer.invoke('db:acknowledge-agent-conversation-run', payload),
     deleteAgentConversation: (conversationId: string) => ipcRenderer.invoke('db:delete-agent-conversation', conversationId),
 
     // Idea
@@ -111,6 +135,7 @@ contextBridge.exposeInMainWorld('db', {
 contextBridge.exposeInMainWorld('electron', {
     toggleFullScreen: () => ipcRenderer.invoke('app:toggle-fullscreen'),
     getUserDataPath: () => ipcRenderer.invoke('app:get-user-data-path'),
+    openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url),
     onFullScreenChange: (callback: (isFullScreen: boolean) => void) => {
         const listener = (_event: any, state: boolean) => callback(state);
         ipcRenderer.on('app:fullscreen-change', listener);
@@ -152,10 +177,13 @@ contextBridge.exposeInMainWorld('ai', {
     generateMapImage: (payload: any) => ipcRenderer.invoke('ai:generate-map-image', payload),
     previewMapPrompt: (payload: any) => ipcRenderer.invoke('ai:preview-map-prompt', payload),
     rebuildChapterSummary: (chapterId: string) => ipcRenderer.invoke('ai:rebuild-chapter-summary', { chapterId }),
+    rebuildAgentContextSummary: (storageConversationId: string) => ipcRenderer.invoke(
+        'ai:rebuild-agent-context-summary',
+        { storageConversationId },
+    ),
     executeAction: (actionId: string, payload?: unknown) => ipcRenderer.invoke('ai:execute-action', { actionId, payload }),
     openClawInvoke: (name: string, args?: unknown) => ipcRenderer.invoke('ai:openclaw-invoke', { name, arguments: args }),
     openClawMcpInvoke: (name: string, args?: unknown) => ipcRenderer.invoke('ai:openclaw-mcp-invoke', { name, arguments: args }),
-    openClawSkillInvoke: (name: string, input?: unknown) => ipcRenderer.invoke('ai:openclaw-skill-invoke', { name, input }),
 })
 
 contextBridge.exposeInMainWorld('automation', {
@@ -173,7 +201,18 @@ contextBridge.exposeInMainWorld('agent', {
     ensureReady: () => ipcRenderer.invoke('agent:ensure-ready'),
     restart: () => ipcRenderer.invoke('agent:restart'),
     roles: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.roles', params: payload ?? {}, context: payload?.context }),
-    chat: (payload: any, options?: { requestId?: string }) => ipcRenderer.invoke('agent:invoke', { method: 'agent.chat', params: payload, context: payload?.context, requestId: options?.requestId }),
+    skills: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skills', params: payload ?? {}, context: payload?.context }),
+    resolveSkill: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.resolve', params: payload ?? {}, context: payload?.context }),
+    previewSkill: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.preview', params: payload ?? {}, context: payload?.context }),
+    authorSkill: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.author', params: payload ?? {}, context: payload?.context }),
+    skillDrafts: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.drafts', params: payload ?? {}, context: payload?.context }),
+    skillDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.draft', params: payload ?? {}, context: payload?.context }),
+    commitSkillDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.commit', params: payload ?? {}, context: payload?.context }),
+    discardSkillDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.discard', params: payload ?? {}, context: payload?.context }),
+    chat: (payload: any, options?: { requestId?: string }) => invokeAgentWithStructuredError('agent.chat', payload, options),
+    recoverChat: (payload: any, options?: { requestId?: string }) => invokeAgentWithStructuredError('agent.recover_chat', payload, options),
+    retryChatSummary: (payload: any, options?: { requestId?: string }) => invokeAgentWithStructuredError('agent.retry_chat_summary', payload, options),
+    deleteChatContext: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.delete_chat_context', params: payload, context: payload?.context }),
     cancelChat: (payload: { requestId: string }) => ipcRenderer.invoke('agent:cancel-chat', payload),
     onChatProgress: (callback: (payload: any) => void) => {
         const listener = (_event: unknown, payload: any) => callback(payload);
@@ -192,6 +231,8 @@ contextBridge.exposeInMainWorld('agent', {
     runStatus: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.run_status', params: payload, context: payload?.context }),
     cancel: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.cancel', params: payload, context: payload?.context }),
     submitApproval: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.submit_approval', params: payload, context: payload?.context }),
+    submitUserInput: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.submit_user_input', params: payload, context: payload?.context }),
+    dismissUserInput: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.dismiss_user_input', params: payload, context: payload?.context }),
     subscribeRun: (runId: string, options?: { afterSequence?: number }) =>
         ipcRenderer.invoke('agent:subscribe-run', { runId, afterSequence: options?.afterSequence }),
     unsubscribeRun: (runId: string) => ipcRenderer.invoke('agent:unsubscribe-run', { runId }),

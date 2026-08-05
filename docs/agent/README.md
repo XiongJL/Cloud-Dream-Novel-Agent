@@ -30,11 +30,19 @@ CloudDream Novel Agent 的 Agent 化目标不是把现有编辑器改成聊天�
 | [python-runtime.md](./python-runtime.md) | Python Agent Runtime、已落地代码、API、开发环境 |
 | [tooling-and-mcp.md](./tooling-and-mcp.md) | Automation、RAG、AI 工作台、MCP/FastMCP、权限边界 |
 | [intent-service-requirements.md](./intent-service-requirements.md) | IntentService 分层、输入输出契约、路由优先级与权限边界 |
+| [structured-user-input-requirements.md](./structured-user-input-requirements.md) | Codex-like 结构化问答、先读取后提问、计划前澄清与执行中决策统一协议 |
+| [agent-workspace-continuity-requirements.md](./agent-workspace-continuity-requirements.md) | 写作/Agent 无损切换、后台 Run、输入与确认表单恢复、跨模式状态提醒和渲染性能约束 |
+| [context-compression-requirements.md](./context-compression-requirements.md) | 长会话压缩边界、领域语义摘要、近期原文保护、按需召回、失败熔断与验收标准 |
+| [chapter-read-scope-delegation-requirements.md](./chapter-read-scope-delegation-requirements.md) | 全局跨卷章节顺序、用户读取委托、自适应扩展、可执行范围选项与读写范围隔离 |
+| [chapter-targeting-and-context-expansion-requirements.md](./chapter-targeting-and-context-expansion-requirements.md) | 小说级 Agent、任意章节目标解析、初始 contextScope、范围外只读扩展及续写/新增/改写边界 |
 | [agent-skill-requirements.md](./agent-skill-requirements.md) | Agent Skill、用户自定义 Skill、版本、解析、Prompt 与安全边界 |
 | [toolchain-requirements.md](./toolchain-requirements.md) | 领域 Toolchain 定义、首批链路、运行约束与验收标准 |
 | [multi-chapter-processing-requirements.md](./multi-chapter-processing-requirements.md) | 多章节统一范围、分层上下文、专家处理、三层审批与批次草稿契约 |
+| [chat-context-reading-and-activity-requirements.md](./chat-context-reading-and-activity-requirements.md) | 聊天按需章节读取、统一 deadline、真实取消、总结重试与工具活动生命周期 |
+| [intent-first-retrieval-bugfix-2026-07-28.md](./intent-first-retrieval-bugfix-2026-07-28.md) | Intent 优先路由、正文按需读取、稳定 Toolchain 确定性计划与低成本只读自动执行 Bugfix |
 | [file-import-requirements.md](./file-import-requirements.md) | 首页确定性小说导入、Agent 会话附件、正文追加与创作素材审核导入 |
-| [retry-failover-resilience-requirements.md](./retry-failover-resilience-requirements.md) | 网络请求重试、熔断、Provider/模型切换、Run 恢复与多 Agent 失败恢复 |
+| [retry-failover-resilience-requirements.md](./retry-failover-resilience-requirements.md) | Agent 全流程运行韧性：网络重试、模型结果 checkpoint、本地处理/发布恢复、产物级审核可用性、部分成功与多 Agent 恢复 |
+| [durable-draft-operation-requirements.md](./durable-draft-operation-requirements.md) | LangGraph 异步草稿 Operation、幂等状态机、SQLite 原子提交、历史清理与灰度切换 |
 | [ui-and-prototype.md](./ui-and-prototype.md) | Stitch 原型、UI 模块、写作/Agent 数据流 |
 | [sse-event-stream.md](./sse-event-stream.md) | SSE 事件流 v1 设计、事件模型、断线恢复、取消逻辑 |
 | [roadmap.md](./roadmap.md) | Phase 1-3 路线图、当前落实状态、后续补齐项 |

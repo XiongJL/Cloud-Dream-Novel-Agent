@@ -41,6 +41,7 @@ _ROLE_REGISTRY: list[dict[str, Any]] = [
         "description": {"zh": "负责结构、节奏、逻辑和文字质量审校。", "en": "Review structure, pacing, logic, and prose quality."},
         "tools": ["novel.list", "volume.list", "chapter.list", "chapter.get", "rag.ask", "search.query", "plotline.list", "character.list", "worldsetting.list"],
         "skills": ["结构审校", "节奏诊断", "一致性检查"],
+        "defaultSkillIds": ["builtin.continuity-review"],
         "presets": [
             {"id": "editor-chapter-audit", "label": {"zh": "章节质量审校", "en": "Chapter review"}, "description": {"zh": "输出按优先级排序的问题与修改建议。", "en": "Produce prioritized findings and revision advice."}, "goal": {"zh": "读取当前章节和必要上下文，从结构、节奏、人物动机、设定一致性和文字表达五方面审校，列出证据与修改建议。", "en": "Review the current chapter for structure, pacing, motivation, setting consistency, and prose, with evidence and recommendations."}},
             {"id": "editor-continuity", "label": {"zh": "连续性检查", "en": "Continuity check"}, "description": {"zh": "检查章节间事实与状态是否冲突。", "en": "Check factual and state continuity across chapters."}, "goal": {"zh": "读取当前章节及相邻章节，检查时间、地点、人物状态、物品和设定的连续性冲突，并给出修复建议。", "en": "Read the current and adjacent chapters, find continuity conflicts in time, place, character state, items, and setting, and suggest fixes."}},

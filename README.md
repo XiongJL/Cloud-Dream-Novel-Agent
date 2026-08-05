@@ -123,8 +123,8 @@ pnpm dev:desktop
 # Desktop Agent 合约与恢复测试
 pnpm --filter novel-editor-desktop run test:agent-recovery
 
-# TypeScript
-pnpm --dir apps/desktop exec tsc --noEmit
+# TypeScript（应用与 Vite Node 配置）
+pnpm --filter novel-editor-desktop run typecheck
 
 # Core / Prisma
 pnpm run build:core

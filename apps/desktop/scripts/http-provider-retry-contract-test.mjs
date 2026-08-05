@@ -24,5 +24,9 @@ assert.doesNotMatch(providerSource, /return await fetch\(url, init\)/u);
 assert.match(providerSource, /status === 408/u);
 assert.match(providerSource, /status === 425 \|\| status === 429/u);
 assert.match(providerSource, /status >= 500/u);
+assert.match(providerSource, /firstByteTimeoutMs/u);
+assert.match(providerSource, /streamIdleTimeoutMs/u);
+assert.match(providerSource, /req\.onActivity\?\.\(receivedFirstByte \? 'chunk' : 'first_byte'\)/u);
+assert.match(providerSource, /timeoutKind: timeoutKind \?\? 'operation'/u);
 
 console.log('HTTP Provider retry contract tests passed.');

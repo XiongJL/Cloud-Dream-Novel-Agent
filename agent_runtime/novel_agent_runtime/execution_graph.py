@@ -14,6 +14,7 @@ from langgraph.types import Command, interrupt
 class ExecutionState(TypedDict):
     run_id: str
     approved_step_ids: list[str]
+    approval_mode: str
     novel_id: str
     volume_id: str | None
     chapter_id: str | None
@@ -29,6 +30,7 @@ class ExecutionState(TypedDict):
     report_findings: list[dict[str, Any]]
     creative_direction_checked: bool
     toolchain_state: dict[str, Any] | None
+    pending_operation: dict[str, Any] | None
 
 
 AdvanceExecution = Callable[[ExecutionState], Awaitable[dict[str, Any]]]
@@ -94,10 +96,33 @@ class PlanExecutionGraph:
                 "resume_response": response,
             }
 
-        def route(state: ExecutionState) -> Literal["advance", "approval", "__end__"]:
+        def operation_node(state: ExecutionState) -> dict[str, Any]:
+            pending_operation = state.get("pending_operation")
+            if not pending_operation:
+                raise ValueError("Execution graph reached operation wait without an operation")
+            response = interrupt({
+                "checkpointType": "draft_operation",
+                **pending_operation,
+            })
+            if not isinstance(response, dict):
+                raise ValueError("Draft operation resume payload must be an object")
+            if response.get("operationId") != pending_operation.get("operationId"):
+                raise ValueError("Draft operation resume payload does not match the checkpoint")
+            return {
+                "action": "continue",
+                "pending_operation": None,
+                # Operation completion is a machine signal, not an approval
+                # response. Keeping it out of resume_response prevents an
+                # unrelated approval node from consuming it later.
+                "resume_response": None,
+            }
+
+        def route(state: ExecutionState) -> Literal["advance", "approval", "operation", "__end__"]:
             action = state.get("action")
             if action == "waiting_approval":
                 return "approval"
+            if action == "waiting_operation":
+                return "operation"
             if action == "terminal":
                 return END
             return "advance"
@@ -105,9 +130,11 @@ class PlanExecutionGraph:
         builder = StateGraph(ExecutionState)
         builder.add_node("advance", advance_node)
         builder.add_node("approval", approval_node)
+        builder.add_node("operation", operation_node)
         builder.add_edge(START, "advance")
-        builder.add_conditional_edges("advance", route, ["advance", "approval", END])
+        builder.add_conditional_edges("advance", route, ["advance", "approval", "operation", END])
         builder.add_edge("approval", "advance")
+        builder.add_edge("operation", "advance")
 
         self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": 200}

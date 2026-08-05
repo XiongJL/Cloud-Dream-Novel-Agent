@@ -15,6 +15,7 @@ ToolchainErrorCode = Literal[
     "BUDGET_EXCEEDED",
     "CONTEXT_INSUFFICIENT",
     "NODE_FAILED",
+    "MODEL_OUTPUT_INVALID",
     "SIDE_EFFECT_UNKNOWN",
     "CANCELLED",
 ]
@@ -137,6 +138,53 @@ class ChapterScopeContextInput(BaseModel):
         return self
 
 
+class StyleSkillExtractionInput(BaseModel):
+    """Input for the style extractor from either project samples or a named work."""
+    sourceMode: Literal["project_chapter_scope", "named_work_model_prior"] = "project_chapter_scope"
+    sourceWorkTitle: str | None = Field(default=None, max_length=300)
+    scopeId: str | None = None
+    novelId: str | None = None
+    kind: ChapterScopeKind = "current_chapter"
+    volumeId: str | None = None
+    chapterId: str | None = None
+    chapterIds: list[str] = Field(default_factory=list)
+    anchorChapterId: str | None = None
+    processingMode: Literal["detailed", "batched"] = "detailed"
+    currentContent: str = ""
+    goal: str = Field(min_length=1)
+    locale: str = "zh-CN"
+    batchSize: int = Field(default=4, ge=1, le=10)
+    maxDetailedChapters: int = Field(default=20, ge=1, le=20)
+    maxEstimatedTokens: int | None = Field(default=None, ge=4000, le=200000)
+
+    @model_validator(mode="after")
+    def validate_source(self) -> "StyleSkillExtractionInput":
+        if self.sourceMode == "named_work_model_prior":
+            if not (self.sourceWorkTitle or "").strip():
+                raise ValueError("sourceWorkTitle is required for named_work_model_prior")
+            self.novelId = self.novelId.strip() if isinstance(self.novelId, str) and self.novelId.strip() else None
+            return self
+        scope = ChapterScopeContextInput.model_validate({
+            "scopeId": self.scopeId,
+            "novelId": self.novelId,
+            "kind": self.kind,
+            "volumeId": self.volumeId,
+            "chapterId": self.chapterId,
+            "chapterIds": self.chapterIds,
+            "anchorChapterId": self.anchorChapterId,
+            "processingMode": self.processingMode,
+            "currentContent": self.currentContent,
+            "goal": self.goal,
+            "locale": self.locale,
+            "batchSize": self.batchSize,
+            "maxDetailedChapters": self.maxDetailedChapters,
+            "maxEstimatedTokens": self.maxEstimatedTokens,
+        })
+        for field_name, value in scope.model_dump().items():
+            setattr(self, field_name, value)
+        return self
+
+
 class CreativeAssetDraftInput(BaseModel):
     novelId: str = Field(min_length=1)
     goal: str = Field(min_length=1)
@@ -146,6 +194,136 @@ class CreativeAssetDraftInput(BaseModel):
     includeExistingEntities: bool = True
     filterCompletedPlotLines: bool = True
     maxEstimatedTokens: int | None = Field(default=None, ge=1000, le=200000)
+
+
+class NovelBootstrapInput(BaseModel):
+    goal: str = Field(min_length=1)
+    locale: str = "zh-CN"
+    userDecisions: dict[str, Any] = Field(default_factory=dict)
+    maxEstimatedTokens: int | None = Field(default=None, ge=1000, le=200000)
+
+
+class NovelBootstrapCharacter(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    role: str = Field(min_length=1, max_length=200)
+    desire: str = Field(min_length=1, max_length=500)
+    cost: str = Field(min_length=1, max_length=500)
+    change: str = Field(min_length=1, max_length=500)
+
+
+class NovelBootstrapVolumePlan(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    dramaticQuestion: str = Field(min_length=1, max_length=500)
+    turningPoint: str = Field(min_length=1, max_length=500)
+    chapterRange: str = Field(min_length=1, max_length=80)
+
+
+class NovelBootstrapChapterPlan(BaseModel):
+    chapterNumber: int = Field(ge=1, le=999)
+    title: str = Field(min_length=1, max_length=160)
+    sceneGoal: str = Field(min_length=1, max_length=500)
+    conflict: str = Field(min_length=1, max_length=500)
+    hook: str = Field(min_length=1, max_length=500)
+
+
+class NovelBootstrapDraft(BaseModel):
+    titleCandidates: list[str] = Field(min_length=1, max_length=5)
+    genrePromise: str = Field(min_length=1, max_length=1000)
+    readerPromise: str = Field(min_length=1, max_length=1000)
+    corePremise: str = Field(min_length=1, max_length=2000)
+    centralQuestion: str = Field(min_length=1, max_length=1000)
+    narrativeShape: str = Field(min_length=1, max_length=1000)
+    characters: list[NovelBootstrapCharacter] = Field(min_length=1, max_length=12)
+    worldRules: list[str] = Field(default_factory=list, max_length=20)
+    conflictEscalation: list[str] = Field(min_length=3, max_length=12)
+    suspenseStrategy: list[str] = Field(min_length=1, max_length=12)
+    openingBeats: list[str] = Field(min_length=3, max_length=12)
+    volumePlan: list[NovelBootstrapVolumePlan] = Field(min_length=1, max_length=6)
+    chapterPlan: list[NovelBootstrapChapterPlan] = Field(min_length=3, max_length=24)
+    writingModeRecommendation: str = Field(min_length=1, max_length=500)
+    targetChapterCount: int = Field(ge=3, le=999)
+    targetWordsPerChapter: int = Field(ge=500, le=20000)
+    validationChecklist: list[str] = Field(min_length=3, max_length=12)
+    userDecisionSummary: str = Field(min_length=1, max_length=2000)
+    assumptions: list[str] = Field(default_factory=list, max_length=20)
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+
+
+class NovelProjectInitializeInput(BaseModel):
+    """Initialize the active novel from an explicitly approved bootstrap draft."""
+
+    novelId: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    locale: str = "zh-CN"
+    bootstrapArtifactId: str = Field(min_length=1)
+    bootstrapDraft: NovelBootstrapDraft
+    targetSections: list[str] = Field(
+        default_factory=lambda: [
+            "plotLines",
+            "plotPoints",
+            "characters",
+            "items",
+            "skills",
+            "worldSettings",
+            "maps",
+        ]
+    )
+    maxEstimatedTokens: int | None = Field(default=None, ge=1000, le=200000)
+
+
+class StyleSkillDraftPreview(BaseModel):
+    draftKey: Literal["language_style", "suspense_release", "ensemble_progression"]
+    stableIdCandidate: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1000)
+    guidanceMode: Literal["adaptive", "guided", "strict"] = "guided"
+    confidence: Literal["low", "medium", "high"]
+    triggerHints: list[str] = Field(min_length=1, max_length=8)
+    antiTriggerHints: list[str] = Field(min_length=1, max_length=8)
+    supportedOperations: list[str] = Field(min_length=1, max_length=8)
+    instructions: str = Field(min_length=1, max_length=12000)
+    constraints: list[str] = Field(min_length=1, max_length=20)
+    evidenceNotes: list[str] = Field(default_factory=list, max_length=20)
+    contaminationWarnings: list[str] = Field(default_factory=list, max_length=20)
+    evaluationPrompt: str = Field(min_length=1, max_length=2000)
+
+
+class StyleSkillPackBindingPreview(BaseModel):
+    operationId: str = Field(min_length=1, max_length=120)
+    roleId: str = Field(min_length=1, max_length=80)
+    primaryDraftKey: str = Field(min_length=1, max_length=80)
+    auxiliaryDraftKey: str | None = Field(default=None, max_length=80)
+
+
+class StyleSkillPackPreview(BaseModel):
+    stableIdCandidate: str = Field(min_length=1, max_length=64)
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1000)
+    bindings: list[StyleSkillPackBindingPreview] = Field(min_length=1, max_length=20)
+
+
+class StyleSkillPackDraftArtifact(BaseModel):
+    summary: str = Field(min_length=1, max_length=2000)
+    sourceCoverage: dict[str, Any] = Field(default_factory=dict)
+    skills: list[StyleSkillDraftPreview] = Field(min_length=2, max_length=3)
+    pack: StyleSkillPackPreview
+    omittedDimensions: list[str] = Field(default_factory=list, max_length=10)
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_dimensions_and_bindings(self) -> "StyleSkillPackDraftArtifact":
+        keys = [item.draftKey for item in self.skills]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Style Skill draft keys must be unique")
+        if "language_style" not in keys or "suspense_release" not in keys:
+            raise ValueError("Style extraction requires language_style and suspense_release drafts")
+        known = set(keys)
+        for binding in self.pack.bindings:
+            if binding.primaryDraftKey not in known or (
+                binding.auxiliaryDraftKey and binding.auxiliaryDraftKey not in known
+            ):
+                raise ValueError("Skill Pack binding references an unknown draft key")
+        return self
 
 
 class ContextEvidence(BaseModel):
@@ -419,7 +597,7 @@ class ChapterBatchRewriteInput(ChapterSequenceContinuationInput):
     kind: Literal["current_chapter", "selected_chapters", "chapter_range"] = "selected_chapters"
     chapterIds: list[str] = Field(min_length=1, max_length=5)
     scopeId: str | None = None
-    processingMode: Literal["detailed"] = "detailed"
+    processingMode: Literal["detailed", "batched"] = "detailed"
 
     @model_validator(mode="after")
     def validate_rewrite_targets(self) -> "ChapterBatchRewriteInput":
@@ -549,6 +727,7 @@ class ReaderJourneyFinding(BaseModel):
 class ReaderChapterEvaluation(BaseModel):
     chapterId: str = Field(min_length=1)
     chapterTitle: str = ""
+    scoreScale: Literal[100]
     clarityScore: int = Field(ge=0, le=100)
     emotionalIntensity: int = Field(ge=0, le=100)
     suspenseScore: int = Field(ge=0, le=100)
@@ -561,7 +740,7 @@ class ReaderChapterEvaluation(BaseModel):
     dropRisk: Literal["low", "medium", "high"] = "low"
     summary: str = Field(min_length=1)
     readerStateSummary: str = Field(min_length=1, max_length=2000)
-    findings: list[ReaderJourneyFinding] = Field(default_factory=list, max_length=20)
+    findings: list[ReaderJourneyFinding] = Field(default_factory=list, max_length=4)
     warnings: list[str] = Field(default_factory=list)
 
 

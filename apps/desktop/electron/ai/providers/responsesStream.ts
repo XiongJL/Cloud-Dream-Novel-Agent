@@ -37,7 +37,14 @@ function eventErrorMessage(event: any): string {
     );
 }
 
-export async function consumeResponsesStream(response: Response): Promise<ResponsesStreamResult> {
+export type ResponsesStreamOptions = {
+    onActivity?: () => void;
+};
+
+export async function consumeResponsesStream(
+    response: Response,
+    options: ResponsesStreamOptions = {},
+): Promise<ResponsesStreamResult> {
     if (!response.body) {
         throw new Error('Responses stream body is unavailable');
     }
@@ -107,6 +114,7 @@ export async function consumeResponsesStream(response: Response): Promise<Respon
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
+            if (value.byteLength > 0) options.onActivity?.();
             buffer += decoder.decode(value, { stream: true });
             consumeAvailableBlocks();
         }

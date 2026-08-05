@@ -21,12 +21,29 @@ export type TimelineRun = {
     planSnapshot?: TimelinePlan;
 };
 
+export type TimelineUserInputResolution = {
+    requestId: string;
+    phase: 'pre_plan' | 'execution';
+    resolvedAt: string;
+    request?: { runId?: string };
+    plan?: { planId: string };
+    run?: { runId: string };
+};
+
 export type AgentConversationTimelineEntry =
     | { kind: 'message'; key: string; timestamp: number; message: TimelineMessage }
-    | { kind: 'task'; key: string; timestamp: number; plan: TimelinePlan; run: TimelineRun | null };
+    | { kind: 'task'; key: string; timestamp: number; plan: TimelinePlan; run: TimelineRun | null; resolutions: TimelineUserInputResolution[] }
+    | { kind: 'resolution'; key: string; timestamp: number; resolution: TimelineUserInputResolution };
 
-function timestamp(value: string | undefined, fallback: number): number {
-    const parsed = value ? Date.parse(value) : Number.NaN;
+export function agentDateTimestamp(value: unknown, fallback: number): number {
+    if (value instanceof Date) {
+        const parsed = value.getTime();
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : fallback;
+    }
+    const parsed = typeof value === 'string' && value ? Date.parse(value) : Number.NaN;
     return Number.isFinite(parsed) ? parsed : fallback;
 }
 
@@ -39,15 +56,17 @@ export function buildAgentConversationTimeline({
     runs,
     currentRun,
     currentPlan,
+    resolutions,
     updatedAt,
 }: {
     messages: TimelineMessage[];
     runs?: TimelineRun[];
     currentRun: TimelineRun | null;
     currentPlan: TimelinePlan | null;
+    resolutions?: TimelineUserInputResolution[];
     updatedAt: string;
 }): AgentConversationTimelineEntry[] {
-    const fallback = timestamp(updatedAt, Date.now());
+    const fallback = agentDateTimestamp(updatedAt, Date.now());
     const runMap = new Map<string, TimelineRun>();
     for (const run of runs ?? []) runMap.set(run.runId, run);
     if (currentRun) runMap.set(currentRun.runId, currentRun);
@@ -55,7 +74,7 @@ export function buildAgentConversationTimeline({
     const entries: Array<AgentConversationTimelineEntry & { order: number }> = messages.map((message, order) => ({
         kind: 'message',
         key: `message:${message.id}`,
-        timestamp: timestamp(message.createdAt, fallback),
+        timestamp: agentDateTimestamp(message.createdAt, fallback),
         message,
         order,
     }));
@@ -67,9 +86,10 @@ export function buildAgentConversationTimeline({
         entries.push({
             kind: 'task',
             key: `run:${run.runId}`,
-            timestamp: timestamp(started?.createdAt, fallback),
+            timestamp: agentDateTimestamp(started?.createdAt, fallback),
             plan,
             run,
+            resolutions: [],
             order: entries.length,
         });
     }
@@ -81,8 +101,36 @@ export function buildAgentConversationTimeline({
             timestamp: fallback,
             plan: currentPlan,
             run: null,
+            resolutions: [],
             order: entries.length,
         });
+    }
+
+    for (const resolution of resolutions ?? []) {
+        const runId = resolution.request?.runId || resolution.run?.runId;
+        const planId = resolution.plan?.planId;
+        const task = entries.find((entry) => entry.kind === 'task' && (
+            (runId && entry.run?.runId === runId)
+            || (planId && entry.plan.planId === planId)
+        ));
+        if (task?.kind === 'task') {
+            task.resolutions.push(resolution);
+            continue;
+        }
+        entries.push({
+            kind: 'resolution',
+            key: `resolution:${resolution.requestId}`,
+            timestamp: agentDateTimestamp(resolution.resolvedAt, fallback),
+            resolution,
+            order: entries.length,
+        });
+    }
+
+    for (const entry of entries) {
+        if (entry.kind !== 'task') continue;
+        entry.resolutions.sort((left, right) => (
+            agentDateTimestamp(left.resolvedAt, fallback) - agentDateTimestamp(right.resolvedAt, fallback)
+        ));
     }
 
     return entries

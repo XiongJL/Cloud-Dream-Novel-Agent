@@ -1,6 +1,7 @@
 export type RecoverableAgentRunStatus =
     | 'idle'
     | 'waiting_approval'
+    | 'waiting_user_input'
     | 'running'
     | 'completed'
     | 'failed'
@@ -13,7 +14,7 @@ export type ParsedSseFrame = {
 };
 
 const TERMINAL_EVENT_TYPES = new Set(['run_completed', 'run_failed', 'run_cancelled']);
-const LIVE_RUN_STATUSES = new Set<RecoverableAgentRunStatus>(['running', 'cancelling', 'waiting_approval']);
+const LIVE_RUN_STATUSES = new Set<RecoverableAgentRunStatus>(['running', 'cancelling', 'waiting_approval', 'waiting_user_input']);
 
 export function parseSseFrame(frame: string): ParsedSseFrame | null {
     const lines = frame.split(/\r?\n/);

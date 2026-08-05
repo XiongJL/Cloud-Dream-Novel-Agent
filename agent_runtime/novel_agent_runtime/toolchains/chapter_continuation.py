@@ -110,18 +110,25 @@ def chapter_draft_params(
     context: ContextBundle,
     brief: str,
     prepared_context: dict[str, Any] | None = None,
+    resolved_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_content = input_data.currentContent or str(context.chapter.get("content") or "")
-    if not current_content.strip():
+    fills_existing_empty_chapter = (
+        isinstance(resolved_target, dict)
+        and resolved_target.get("hasContent") is False
+        and _has_usable_prior_chapter_context(input_data.chapterId, context.adjacentChapters)
+    )
+    if not current_content.strip() and not fills_existing_empty_chapter:
         raise ToolchainError(
             "CONTEXT_INSUFFICIENT",
-            "Current chapter content is required before generating a continuation draft.",
+            "生成续写草稿前需要当前章节正文，或可用的前序章节上下文。",
             node_id="draft.generate",
         )
     params: dict[str, Any] = {
         "novelId": input_data.novelId,
         "chapterId": input_data.chapterId,
         "currentContent": current_content,
+        "mode": "new_chapter" if fills_existing_empty_chapter else "continue_chapter",
         "userIntent": brief,
         "locale": input_data.locale,
         "presentation": "toast",
@@ -135,6 +142,19 @@ def chapter_draft_params(
     if prepared_context:
         params["preparedContext"] = prepared_context
     return params
+
+
+def _has_usable_prior_chapter_context(
+    target_chapter_id: str,
+    adjacent_chapters: list[dict[str, Any]],
+) -> bool:
+    content_fields = ("content", "excerpt", "summary", "summaryText", "text")
+    return any(
+        str(chapter.get("chapterId") or chapter.get("id") or "") != target_chapter_id
+        and any(str(chapter.get(field) or "").strip() for field in content_fields)
+        for chapter in adjacent_chapters
+        if isinstance(chapter, dict)
+    )
 
 
 def normalize_chapter_draft(value: Any) -> DraftSessionRef:

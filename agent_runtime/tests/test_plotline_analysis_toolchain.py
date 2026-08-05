@@ -335,7 +335,7 @@ def test_ambiguous_scope_waits_before_tools_and_survives_runtime_restart(tmp_pat
         assert not any(method == "plotline.list" for method, _, _ in automation.calls)
 
         runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
-        assert runtime.state.runs[run.runId].status == "waiting_approval"
+        assert runtime.state.runs[run.runId].status == "waiting_user_input"
         await runtime.submit_approval(
             {
                 "runId": run.runId,

@@ -26,7 +26,10 @@ const TOOL_DEFS = [
   { name: 'search.query', description: '全文搜索。', inputSchema: { type: 'object', properties: { novelId: { type: 'string' }, keyword: { type: 'string' }, limit: { type: 'number' }, offset: { type: 'number' } }, required: ['novelId', 'keyword'] } },
   { name: 'creative_assets.generate_draft', description: '调用软件内置 AI 生成创意草稿，结果同时进入右侧草稿区和 MCP JSON。', inputSchema: { type: 'object', properties: { novelId: { type: 'string' }, brief: { type: 'string' }, locale: { type: 'string' }, overrideUserPrompt: { type: 'string' }, targetSections: { type: 'array', items: { type: 'string' } }, contextChapterCount: { type: 'number' }, includeExistingEntities: { type: 'boolean' }, filterCompletedPlotLines: { type: 'boolean' } }, required: ['novelId', 'brief'] } },
   { name: 'outline.generate_draft', description: '调用软件内置 AI 生成大纲草稿。', inputSchema: { type: 'object', properties: { novelId: { type: 'string' }, brief: { type: 'string' }, locale: { type: 'string' } }, required: ['novelId', 'brief'] } },
-  { name: 'chapter.generate_draft', description: '调用软件内置 AI 生成章节草稿。', inputSchema: { type: 'object', properties: { novelId: { type: 'string' }, chapterId: { type: 'string' }, currentContent: { type: 'string' }, locale: { type: 'string' }, ideaIds: { type: 'array', items: { type: 'string' } }, contextChapterCount: { type: 'number' }, targetLength: { type: 'number' }, userIntent: { type: 'string' }, currentLocation: { type: 'string' }, overrideUserPrompt: { type: 'string' } }, required: ['novelId', 'chapterId', 'currentContent'] } },
+  { name: 'chapter.draft.start', description: '幂等受理后台章节草稿任务并立即返回 operationId。', inputSchema: { type: 'object', properties: { operationKey: { type: 'string' }, generationRevision: { type: 'integer', minimum: 1 }, operationDeadlineAt: { type: 'string', format: 'date-time' }, maxAttempts: { type: 'integer', minimum: 1, maximum: 4 }, owner: { type: 'object' }, payload: { type: 'object' } }, required: ['operationKey', 'generationRevision', 'payload'] } },
+  { name: 'chapter.draft.get_status', description: '读取后台章节草稿任务的权威状态和结果引用。', inputSchema: { type: 'object', properties: { operationId: { type: 'string' } }, required: ['operationId'] } },
+  { name: 'chapter.draft.cancel', description: '请求取消后台章节草稿任务。', inputSchema: { type: 'object', properties: { operationId: { type: 'string' }, expectedVersion: { type: 'integer', minimum: 1 } }, required: ['operationId'] } },
+  { name: 'chapter.draft.retry', description: '重试明确失败且仍在预算内的后台章节草稿任务。', inputSchema: { type: 'object', properties: { operationId: { type: 'string' }, expectedVersion: { type: 'integer', minimum: 1 } }, required: ['operationId'] } },
   { name: 'creative_assets.validate_draft', description: '校验创意草稿会话。', inputSchema: { type: 'object', properties: { draftSessionId: { type: 'string' }, version: { type: 'number' } }, required: ['draftSessionId'] } },
   { name: 'draft.list', description: '列出草稿会话。', inputSchema: { type: 'object', properties: { novelId: { type: 'string' }, workspace: { type: 'string' }, type: { type: 'string' }, status: { type: 'string' }, includeInactive: { type: 'boolean' } } } },
   { name: 'draft.get', description: '读取单个草稿会话。', inputSchema: { type: 'object', properties: { draftSessionId: { type: 'string' } }, required: ['draftSessionId'] } },
@@ -39,14 +42,6 @@ const TOOL_DEFS = [
   { name: 'story_patch.apply', description: '将外部生成的结构化剧情补丁写入软件。', inputSchema: { type: 'object', properties: { novelId: { type: 'string' }, draft: { type: 'object' } }, required: ['novelId', 'draft'] } },
   { name: 'prompt.preview', description: '预览软件内置提示词。', inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['creative_assets', 'chapter'] }, payload: { type: 'object' } }, required: ['kind', 'payload'] } },
 ];
-
-const chapterGenerateDraftTool = TOOL_DEFS.find((tool) => tool.name === 'chapter.generate_draft');
-if (chapterGenerateDraftTool?.inputSchema?.properties) {
-  chapterGenerateDraftTool.inputSchema.properties.presentation = {
-    type: 'string',
-    enum: ['silent', 'toast', 'modal'],
-  };
-}
 
 function getAppDataPath() {
   if (process.env.APPDATA) return process.env.APPDATA;

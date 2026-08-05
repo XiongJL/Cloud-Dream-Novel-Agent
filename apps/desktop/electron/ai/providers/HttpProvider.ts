@@ -193,11 +193,34 @@ export class HttpProvider implements AiProvider {
         if (req.signal?.aborted) abortFromCaller();
         else req.signal?.addEventListener('abort', abortFromCaller, { once: true });
         let didTimeout = false;
+        let timeoutKind: 'operation' | 'first_byte' | 'stream_idle' | undefined;
         const timeout = Math.max(1000, req.timeoutMs ?? this.settings.http.timeoutMs);
-        const timer = setTimeout(() => {
+        const firstByteTimeout = Math.max(1000, Math.min(timeout, req.firstByteTimeoutMs ?? timeout));
+        const streamIdleTimeout = Math.max(1000, Math.min(timeout, req.streamIdleTimeoutMs ?? timeout));
+        const abortForTimeout = (kind: typeof timeoutKind) => {
             didTimeout = true;
+            timeoutKind = kind;
             controller.abort();
-        }, timeout);
+        };
+        const operationTimer = setTimeout(() => abortForTimeout('operation'), timeout);
+        operationTimer.unref?.();
+        let activityTimer: NodeJS.Timeout | undefined = setTimeout(
+            () => abortForTimeout('first_byte'),
+            firstByteTimeout,
+        );
+        activityTimer.unref?.();
+        let receivedFirstByte = false;
+        const markStreamActivity = () => {
+            if (activityTimer) clearTimeout(activityTimer);
+            activityTimer = setTimeout(() => abortForTimeout('stream_idle'), streamIdleTimeout);
+            activityTimer.unref?.();
+            req.onActivity?.(receivedFirstByte ? 'chunk' : 'first_byte');
+            receivedFirstByte = true;
+        };
+        const stopActivityTimeout = () => {
+            if (activityTimer) clearTimeout(activityTimer);
+            activityTimer = undefined;
+        };
 
         const apiMode = this.settings.http.apiMode ?? 'chat-completions';
         const body = apiMode === 'responses'
@@ -228,6 +251,8 @@ export class HttpProvider implements AiProvider {
             devLog('INFO', 'HttpProvider.generate.request', 'AI text generation request', {
                 url,
                 timeoutMs: timeout,
+                firstByteTimeoutMs: firstByteTimeout,
+                streamIdleTimeoutMs: streamIdleTimeout,
                 body: redactForLog(summarizeGenerationBody(body)),
             });
             const res = await transportFetch(url, {
@@ -243,7 +268,8 @@ export class HttpProvider implements AiProvider {
 
             const contentType = res.headers.get('content-type') || '';
             if (res.ok && apiMode === 'responses' && contentType.includes('text/event-stream')) {
-                const streamed = await consumeResponsesStream(res);
+                const streamed = await consumeResponsesStream(res, { onActivity: markStreamActivity });
+                stopActivityTimeout();
                 devLog('INFO', 'HttpProvider.generate.response', 'AI text generation stream completed', {
                     url,
                     status: res.status,
@@ -262,7 +288,9 @@ export class HttpProvider implements AiProvider {
                 };
             }
 
+            markStreamActivity();
             const text = await res.text();
+            stopActivityTimeout();
             const json = parseJsonSafe(text);
             devLog('INFO', 'HttpProvider.generate.response', 'AI text generation response', {
                 url,
@@ -299,6 +327,7 @@ export class HttpProvider implements AiProvider {
                 url,
                 elapsedMs: Date.now() - startedAt,
                 didTimeout,
+                timeoutKind,
                 requestBody: redactForLog(summarizeGenerationBody(body)),
             });
             if (req.signal?.aborted && !didTimeout) {
@@ -309,7 +338,15 @@ export class HttpProvider implements AiProvider {
                     'PROVIDER_TIMEOUT',
                     '模型请求超时。',
                     undefined,
-                    { retryable: true, timeoutMs: timeout },
+                    {
+                        retryable: true,
+                        timeoutKind: timeoutKind ?? 'operation',
+                        timeoutMs: timeoutKind === 'first_byte'
+                            ? firstByteTimeout
+                            : timeoutKind === 'stream_idle'
+                                ? streamIdleTimeout
+                                : timeout,
+                    },
                 );
             }
             if (error instanceof AiActionError) {
@@ -322,7 +359,8 @@ export class HttpProvider implements AiProvider {
                 { retryable: true },
             );
         } finally {
-            clearTimeout(timer);
+            clearTimeout(operationTimer);
+            stopActivityTimeout();
             req.signal?.removeEventListener('abort', abortFromCaller);
         }
     }

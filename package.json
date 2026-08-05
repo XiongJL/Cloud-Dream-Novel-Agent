@@ -9,7 +9,7 @@
     "build:desktop:win": "pnpm --filter novel-editor-desktop run build:win",
     "build:desktop:mac": "pnpm --filter novel-editor-desktop run build:mac",
     "build:core": "pnpm --filter @novel-editor/core run build",
-    "dev": "turbo run dev",
+    "dev": "pnpm --filter novel-editor-desktop run dev",
     "dev:desktop": "pnpm --filter novel-editor-desktop run dev",
     "db:push": "pnpm --filter @novel-editor/core run db:push",
     "db:generate": "pnpm --filter @novel-editor/core run generate",

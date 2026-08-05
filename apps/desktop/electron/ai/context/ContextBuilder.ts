@@ -10,6 +10,7 @@ import type {
     ContinuationContextSnapshot,
     NarrativeStateLedger,
 } from '../../../shared/agentChapterScope';
+import { extractReadableText } from '../../../shared/lexicalDocument';
 
 export interface ContinueWritingContext {
     currentContentSource: string;
@@ -75,25 +76,8 @@ function uniqueArray(values: string[]): string[] {
     return output;
 }
 
-function extractPlainTextFromLexical(content: string): string {
-    if (!content?.trim()) return '';
-    try {
-        const parsed = JSON.parse(content);
-        const texts: string[] = [];
-        const walk = (node: any) => {
-            if (!node || typeof node !== 'object') return;
-            if (typeof node.text === 'string') {
-                texts.push(node.text);
-            }
-            if (Array.isArray(node.children)) {
-                node.children.forEach(walk);
-            }
-        };
-        walk(parsed?.root || parsed);
-        return texts.join(' ').replace(/\s+/g, ' ').trim();
-    } catch {
-        return content.replace(/\s+/g, ' ').trim();
-    }
+export function extractPlainTextFromLexical(content: string): string {
+    return extractReadableText(content);
 }
 
 function estimateTokenCount(text: string): number {
@@ -140,6 +124,34 @@ function boundedExcerpt(text: string, limit = 1600): string {
 }
 
 export class ContextBuilder {
+    private async findNearestPreviousChapterWithContent(
+        orderedChapters: Array<Record<string, unknown>>,
+        anchorIndex: number,
+    ): Promise<Record<string, unknown> | null> {
+        const previousChapters = orderedChapters.slice(0, Math.max(0, anchorIndex));
+        const batchSize = 25;
+        for (let end = previousChapters.length; end > 0; end -= batchSize) {
+            const batch = previousChapters.slice(Math.max(0, end - batchSize), end);
+            const ids = batch.map((chapter) => String(chapter.id || '')).filter(Boolean);
+            if (!ids.length) continue;
+            const rows = await (db as any).chapter.findMany({
+                where: { id: { in: ids }, deleted: false },
+                select: { id: true, content: true },
+            });
+            const contentById = new Map<string, string>(
+                rows.map((chapter: any) => [String(chapter.id), String(chapter.content || '')]),
+            );
+            for (let index = batch.length - 1; index >= 0; index -= 1) {
+                const chapter = batch[index];
+                const rawContent = contentById.get(String(chapter.id || '')) || '';
+                if (extractPlainTextFromLexical(rawContent).trim()) {
+                    return chapter;
+                }
+            }
+        }
+        return null;
+    }
+
     async buildForChapterScope(payload: AgentChapterScopeBuildPayload): Promise<ChapterScopeBundle> {
         const novelId = String(payload.novelId || '').trim();
         if (!novelId) throw new Error('novelId is required');
@@ -622,8 +634,21 @@ export class ContextBuilder {
         );
         const anchorIndex = orderedChapters.findIndex((chapter: any) => String(chapter.id) === payload.chapterId);
         if (anchorIndex < 0) throw new Error('Current chapter does not belong to novel');
-        const previousMetadata = orderedChapters.slice(Math.max(0, anchorIndex - previousChapterCount), anchorIndex);
-        const scopeChapterIds = [...previousMetadata.map((chapter: any) => String(chapter.id)), payload.chapterId];
+        let previousMetadata = orderedChapters.slice(Math.max(0, anchorIndex - previousChapterCount), anchorIndex);
+        const currentContentSource = payload.currentContent || String((await db.chapter.findUnique({
+            where: { id: payload.chapterId },
+            select: { content: true },
+        }))?.content || '');
+        const forcedPriorContextChapter = !extractPlainTextFromLexical(currentContentSource).trim()
+            ? await this.findNearestPreviousChapterWithContent(orderedChapters, anchorIndex)
+            : null;
+        if (
+            forcedPriorContextChapter
+            && !previousMetadata.some((chapter: any) => String(chapter.id) === String(forcedPriorContextChapter.id))
+        ) {
+            previousMetadata = [forcedPriorContextChapter, ...previousMetadata];
+        }
+        const scopeChapterIds = uniqueArray([...previousMetadata.map((chapter: any) => String(chapter.id)), payload.chapterId]);
         const scopeBundle = await this.buildForChapterScope({
             novelId: payload.novelId,
             kind: 'selected_chapters',
@@ -634,10 +659,6 @@ export class ContextBuilder {
             maxDetailedChapters: 20,
             maxEstimatedTokens: 120000,
         });
-        const currentContentSource = payload.currentContent || String((await db.chapter.findUnique({
-            where: { id: payload.chapterId },
-            select: { content: true },
-        }))?.content || '');
         const rawChapterIds = previousMetadata.slice(-recentRawChapterCount).map((chapter: any) => String(chapter.id));
         const rawChapterRows = rawChapterIds.length > 0
             ? await db.chapter.findMany({
@@ -838,6 +859,7 @@ export class ContextBuilder {
                 `ordered_previous_chapters_${recentChapterItems.length}`,
                 `previous_chapter_summaries_${recentChapterItems.filter((item) => item.contentMode === 'summary').length}`,
                 `previous_chapter_full_text_${recentChapterItems.filter((item) => item.contentMode === 'full' || item.contentMode === 'truncated').length}`,
+                ...(forcedPriorContextChapter ? [`nearest_written_prior_chapter_${String(forcedPriorContextChapter.id || '')}`] : []),
                 narrativeSummaries.length > 0 ? `narrative_summaries_${narrativeSummaries.length}` : 'narrative_summaries_0',
                 selectedIdeas.length > 0 ? `selected_ideas_${selectedIdeas.length}` : 'selected_ideas_0',
                 selectedIdeaEntities.length > 0 ? `selected_idea_entities_${selectedIdeaEntities.length}` : 'selected_idea_entities_0',

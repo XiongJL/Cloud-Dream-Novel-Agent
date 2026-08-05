@@ -7,10 +7,43 @@ from typing import Any
 from novel_agent_runtime.events import AgentEventBus
 from novel_agent_runtime.runtime import NovelAgentRuntime
 from novel_agent_runtime.store import AgentStateStore
-from novel_agent_runtime.toolchains.schemas import ChapterScopeBundle
+from novel_agent_runtime.toolchains.chapter_batch_rewrite import rewrite_scope_context_params
+from novel_agent_runtime.toolchains.schemas import ChapterBatchRewriteInput, ChapterScopeBundle
 from novel_agent_runtime.toolchains.writer_range_revision_plan import normalize_writer_range_revision_plan
 
-from test_runtime import FakeAutomationClient
+from test_runtime import FakeAutomationClient, install_durable_draft_protocol
+
+
+def test_batch_rewrite_omits_empty_optional_scope_context_params() -> None:
+    input_data = ChapterBatchRewriteInput(
+        novelId="novel_1",
+        volumeId="volume_1",
+        chapterId="chapter_1",
+        chapterIds=["chapter_1", "chapter_2"],
+        goal="改写两章",
+    )
+
+    params = rewrite_scope_context_params(input_data)
+
+    assert "scopeId" not in params
+    assert params["chapterIds"] == ["chapter_1", "chapter_2"]
+    assert params["anchorChapterId"] == "chapter_1"
+
+
+def test_batch_rewrite_accepts_batched_scope_but_requests_detailed_context() -> None:
+    input_data = ChapterBatchRewriteInput(
+        novelId="novel_1",
+        volumeId="volume_1",
+        chapterId="chapter_1",
+        chapterIds=["chapter_1", "chapter_2"],
+        processingMode="batched",
+        goal="改写两章",
+    )
+
+    params = rewrite_scope_context_params(input_data)
+
+    assert input_data.processingMode == "batched"
+    assert params["processingMode"] == "detailed"
 
 
 def _scope_bundle() -> dict[str, Any]:
@@ -229,6 +262,7 @@ def test_writer_revision_plan_publishes_expert_report(tmp_path: Path) -> None:
             return await original_invoke(method, params, origin, request_id=request_id)
 
         automation.invoke = invoke  # type: ignore[method-assign]
+        install_durable_draft_protocol(automation)
         runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
         plan = await runtime.plan({"goal": "给这两章做作者多章节修订计划", "role": "writer"}, {})
         run = await runtime.execute_plan({
@@ -332,6 +366,7 @@ def test_batch_rewrite_uses_explicit_targets_and_original_content(tmp_path: Path
             return {"ok": True}
 
         automation.invoke = invoke  # type: ignore[method-assign]
+        install_durable_draft_protocol(automation)
         runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
         plan = await runtime.plan({
             "goal": "批量改写选中的两章",
@@ -477,6 +512,7 @@ def test_batch_rewrite_regeneration_preserves_prefix_and_snapshot(tmp_path: Path
             return {"ok": True}
 
         automation.invoke = invoke  # type: ignore[method-assign]
+        install_durable_draft_protocol(automation)
         runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
         run = await runtime.regenerate_batch({
             "draftBatchId": batch["draftBatchId"],

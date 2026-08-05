@@ -79,6 +79,41 @@ function normalizeReadableText(value: string): string {
         .trim();
 }
 
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function matchesChapterHeading(line: string, chapterTitle: string): boolean {
+    const trimmedLine = line.trim();
+    const trimmedTitle = chapterTitle.trim();
+    if (!trimmedLine || !trimmedTitle) return false;
+    if (trimmedLine === trimmedTitle) return true;
+    const escapedTitle = escapeRegExp(trimmedTitle);
+    const headingPattern = new RegExp(
+        `^第\\s*[0-9一二三四五六七八九十百千万零〇两]+\\s*[章节卷回幕部篇]\\s*[:：、\\-—\\s]*${escapedTitle}$`,
+        'u',
+    );
+    return headingPattern.test(trimmedLine);
+}
+
+export function normalizeChapterDraftText(content: string, chapterTitle?: string): string {
+    const normalized = String(content || '').replace(/\r\n/g, '\n').trim();
+    const trimmedTitle = String(chapterTitle || '').trim();
+    if (!normalized || !trimmedTitle) return normalized;
+
+    const lines = normalized.split('\n');
+    let index = 0;
+    while (index < lines.length && !lines[index].trim()) index += 1;
+    if (index >= lines.length) return '';
+
+    if (matchesChapterHeading(lines[index], trimmedTitle)) {
+        index += 1;
+        while (index < lines.length && !lines[index].trim()) index += 1;
+        return lines.slice(index).join('\n').trim();
+    }
+    return normalized;
+}
+
 export function extractReadableText(content: string): string {
     if (!content?.trim()) return '';
     const { document, trailingText } = parseLexicalPrefix(content);
@@ -86,6 +121,30 @@ export function extractReadableText(content: string): string {
 
     const lexicalText = normalizeReadableText(nodeText(document.root));
     return [lexicalText, normalizeReadableText(trailingText)].filter(Boolean).join('\n\n');
+}
+
+function comparableReadableText(value: string): string {
+    return value.normalize('NFKC').replace(/\s+/gu, '');
+}
+
+function logicalParagraphCount(value: string): number {
+    return value.split(/\r?\n/u).filter((line) => line.trim()).length;
+}
+
+/**
+ * Restores paragraph boundaries from an authoritative structured source without
+ * changing the snapshot's words. Older rewrite drafts flattened Lexical blocks
+ * into spaces before storing baseContent; this keeps those drafts reviewable
+ * while refusing to substitute content that has since changed.
+ */
+export function restoreReadableTextStructure(snapshotContent: string, structuredSource: string): string {
+    const snapshotText = extractReadableText(snapshotContent);
+    const structuredText = extractReadableText(structuredSource);
+    if (!snapshotText || !structuredText) return snapshotText;
+    if (comparableReadableText(snapshotText) !== comparableReadableText(structuredText)) return snapshotText;
+    return logicalParagraphCount(structuredText) > logicalParagraphCount(snapshotText)
+        ? structuredText
+        : snapshotText;
 }
 
 function createTextNode(text: string): LexicalNode {

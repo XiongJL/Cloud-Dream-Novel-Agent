@@ -422,6 +422,12 @@ export class PythonRuntimeClient {
         const port = this.port;
         const token = this.token;
         const requestId = envelope.requestId || randomUUID();
+        const requestedDeadline = typeof envelope.params?.deadlineAt === 'string'
+            ? Date.parse(envelope.params.deadlineAt)
+            : Number.NaN;
+        const invokeTimeoutMs = Number.isFinite(requestedDeadline)
+            ? Math.max(1_000, requestedDeadline - Date.now() + 15_000)
+            : envelope.method === 'agent.chat' ? 315_000 : 180_000;
         let lastSequence = 0;
         let polling = false;
         const pollProgress = async () => {
@@ -454,7 +460,7 @@ export class PythonRuntimeClient {
                 params: envelope.params || {},
                 context: envelope.context || {},
                 },
-                180000,
+                invokeTimeoutMs,
             );
             if (timer) clearInterval(timer);
             while (polling) {
@@ -463,8 +469,16 @@ export class PythonRuntimeClient {
             await pollProgress();
             this.markHealthy();
             if (!response.ok) {
-                throw Object.assign(new Error(response.message || 'Agent runtime failed'), {
-                    code: response.code || 'AGENT_RUNTIME_ERROR',
+                const rawMessage = response.message || 'Agent runtime failed';
+                const embeddedCode = rawMessage.match(/^([A-Z][A-Z0-9_]+):\s*/u)?.[1];
+                const responseCode = response.code === 'AGENT_RUNTIME_ERROR' && embeddedCode
+                    ? embeddedCode
+                    : response.code || 'AGENT_RUNTIME_ERROR';
+                const publicMessage = responseCode === 'CHAPTER_TARGET_UNRESOLVED'
+                    ? '暂时无法确定目标章节。请刷新章节目录后直接重试生成计划。'
+                    : rawMessage;
+                throw Object.assign(new Error(publicMessage), {
+                    code: responseCode,
                     details: response.data,
                 });
             }
@@ -716,6 +730,8 @@ export class PythonRuntimeClient {
             env: {
                 ...process.env,
                 PYTHONUNBUFFERED: '1',
+                PYTHONIOENCODING: 'utf-8',
+                PYTHONUTF8: '1',
                 LANGGRAPH_STRICT_MSGPACK: 'true',
             },
             windowsHide: true,

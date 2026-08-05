@@ -12,8 +12,14 @@ export type ReviewCommentSentMode = 'discuss' | 'regenerate';
 export interface ReviewCommentAnchor {
     kind: ReviewCommentAnchorKind;
     targetId: string;
+    diffVersion?: number;
     paragraphIndex?: number;
     diffHunkId?: string;
+    oldStartLine?: number;
+    oldEndLine?: number;
+    newStartLine?: number;
+    newEndLine?: number;
+    side?: 'old' | 'new' | 'both';
     fieldPath?: string;
     startOffset?: number;
     endOffset?: number;

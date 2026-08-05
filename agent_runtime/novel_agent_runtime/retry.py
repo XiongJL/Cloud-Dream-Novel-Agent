@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import Any
 
@@ -16,10 +16,17 @@ RETRY_LIMIT = MAX_ATTEMPTS - 1
 _NON_RETRYABLE_CODES = frozenset({
     "CANCELLED",
     "CONFLICT",
+    "CONTEXT_BUDGET_UNSATISFIABLE",
+    "CONTEXT_CURRENT_REQUEST_IDENTITY_MISMATCH",
+    "CONTEXT_INPUT_TOO_LARGE",
     "CONTEXT_INSUFFICIENT",
+    "CONTEXT_PROTECTED_INPUT_TOO_LARGE",
+    "CONTEXT_TOKEN_COUNTER_UNAVAILABLE",
     "INPUT_INVALID",
     "INVALID_INPUT",
     "INVALID_STATE",
+    "MODEL_OUTPUT_INVALID",
+    "MODEL_RESULT_TOO_LARGE",
     "NOT_FOUND",
     "PERSISTENCE_ERROR",
     "PROVIDER_AUTH",
@@ -68,6 +75,7 @@ class AgentRequestFailure:
     user_message: str
     diagnostic_ref: str
     http_status: int | None = None
+    details: dict[str, Any] = field(default_factory=dict)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -77,6 +85,7 @@ class AgentRequestFailure:
             "userMessage": self.user_message,
             "diagnosticRef": self.diagnostic_ref,
             **({"httpStatus": self.http_status} if self.http_status is not None else {}),
+            **self.details,
         }
 
 
@@ -140,6 +149,7 @@ def normalize_agent_error(error: BaseException, *, attempts: int = 1) -> AgentRe
         error = error.__cause__ if isinstance(error.__cause__, BaseException) else error
 
     code = _error_code(error)
+    source_details = _error_details(error)
     http_status = _http_status(error)
     retryable = is_retryable_agent_error(error)
     if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):
@@ -150,6 +160,20 @@ def normalize_agent_error(error: BaseException, *, attempts: int = 1) -> AgentRe
         user_message = "模型鉴权失败，请检查 API Key 或权限。"
     elif code == "CANCELLED":
         user_message = "请求已取消。"
+    elif code == "CONTEXT_INPUT_TOO_LARGE":
+        user_message = "当前消息超过模型可用上下文，请缩小范围或分批发送。"
+    elif code == "CONTEXT_PROTECTED_INPUT_TOO_LARGE":
+        user_message = "当前任务的必要状态超过模型可用上下文，请缩小章节范围或减少活动任务。"
+    elif code == "CONTEXT_CURRENT_REQUEST_IDENTITY_MISMATCH":
+        user_message = "当前消息与已保存会话不一致，请刷新会话后重试。"
+    elif code == "CONTEXT_TOKEN_COUNTER_UNAVAILABLE":
+        user_message = "当前模型缺少可靠的上下文计数能力，请检查模型配置。"
+    elif code == "CONTEXT_BUDGET_UNSATISFIABLE":
+        user_message = "当前窗口无法同时容纳必要能力描述、任务上下文和回复空间，请减少能力范围或改用更大窗口。"
+    elif code == "MODEL_OUTPUT_INVALID":
+        user_message = "模型返回的结构不符合要求，已保存结果并可尝试修复。"
+    elif code == "MODEL_REPAIR_IN_PROGRESS":
+        user_message = "JSON 修复仍在处理中，请稍后再次点击恢复按钮。"
     elif retryable:
         user_message = "模型服务暂时不可用，请稍后重试。"
     else:
@@ -164,4 +188,16 @@ def normalize_agent_error(error: BaseException, *, attempts: int = 1) -> AgentRe
         user_message=user_message,
         diagnostic_ref=diagnostic_ref,
         http_status=http_status,
+        details={
+            key: source_details[key]
+            for key in (
+                "modelResultRef",
+                "modelResultRevision",
+                "contractId",
+                "contractVersion",
+                "validationIssues",
+                "resultHash",
+            )
+            if key in source_details
+        },
     )

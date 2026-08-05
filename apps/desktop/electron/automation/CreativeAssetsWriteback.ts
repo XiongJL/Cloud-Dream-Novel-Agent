@@ -57,6 +57,17 @@ const ENTITY_SELECTS: Record<CreativeAssetWritebackEntityKind, Record<string, bo
         createdAt: true,
         updatedAt: true,
     },
+    worldSetting: {
+        id: true,
+        novelId: true,
+        name: true,
+        content: true,
+        type: true,
+        icon: true,
+        sortOrder: true,
+        createdAt: true,
+        updatedAt: true,
+    },
     mapCanvas: {
         id: true,
         novelId: true,
@@ -234,11 +245,13 @@ export async function undoCreativeAssetsWriteback(
     const plotLineIds = idsFor(entities, 'plotLine');
     const characterIds = idsFor(entities, 'character');
     const itemIds = idsFor(entities, 'item');
+    const worldSettingIds = idsFor(entities, 'worldSetting');
     const mapIds = idsFor(entities, 'mapCanvas');
     if (plotPointIds.length) await tx.plotPoint.deleteMany({ where: { id: { in: plotPointIds }, novelId } });
     if (plotLineIds.length) await tx.plotLine.deleteMany({ where: { id: { in: plotLineIds }, novelId } });
     if (characterIds.length) await tx.character.deleteMany({ where: { id: { in: characterIds }, novelId } });
     if (itemIds.length) await tx.item.deleteMany({ where: { id: { in: itemIds }, novelId } });
+    if (worldSettingIds.length) await tx.worldSetting.deleteMany({ where: { id: { in: worldSettingIds }, novelId } });
     if (mapIds.length) await tx.mapCanvas.deleteMany({ where: { id: { in: mapIds }, novelId } });
 
     return {

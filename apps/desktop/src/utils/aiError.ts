@@ -41,6 +41,12 @@ function cleanInvokePrefix(message: string): string {
         .trim();
 }
 
+function hasLikelyMojibake(message: string): boolean {
+    if (message.includes('\uFFFD')) return true;
+    const suspiciousCharacters = message.match(/[妯鏈闇瑕浣缁鍖棰銆锛鈿馃]/gu) ?? [];
+    return suspiciousCharacters.length >= 2 || message.includes('â€') || message.includes('Ã');
+}
+
 export function inferAiErrorCode(error: unknown): UiAiErrorCode | undefined {
     const maybeCode = normalizeCode((error as any)?.code);
     if (maybeCode) return maybeCode;
@@ -91,7 +97,7 @@ export function formatAiErrorFromUnknown(error: unknown, t?: (key: string) => st
         return formatAiError(code, t, fallback);
     }
     const cleaned = cleanInvokePrefix(toMessage(error));
-    if (cleaned) return cleaned;
+    if (cleaned && !hasLikelyMojibake(cleaned)) return cleaned;
     if (t) return t('aiError.UNKNOWN');
-    return fallback || 'Unknown error.';
+    return fallback || '请求处理失败，请重试。详细错误已写入日志。';
 }

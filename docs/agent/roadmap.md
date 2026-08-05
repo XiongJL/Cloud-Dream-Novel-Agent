@@ -188,7 +188,7 @@ LangGraph 后续负责运行时，不负责定义产品入口：
 5. 接入读者、世界观和考据。（后端已完成）
 6. 实现团队 Supervisor。（后端已完成）
 7. 最后开发范围选择、报告审批、章节矩阵和批次审核 Renderer。（已完成主流程）
-- `sideEffectUnknown` 人工对账、正文状态台账、作者范围修订计划与已有章节批量改写均已完成。下一功能增量优先接入真正的外部网络考据 Tool 与计划审批开关。
+- `sideEffectUnknown` 人工对账、正文状态台账、作者范围修订计划与已有章节批量改写均已完成。外部网络考据 Tool 已决策延期；恢复时优先实现独立 `web.search` / `web.fetch` 和 `ddgs` 直连 provider，具体边界见[设计决策 112](./decisions.md)与 [Skill 外部来源提炼](./agent-skill-requirements.md)。
 
 可复用工具：
 

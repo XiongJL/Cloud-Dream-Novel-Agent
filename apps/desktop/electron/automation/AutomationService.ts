@@ -1,11 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { jsonrepair } from 'jsonrepair';
 import type { CreativeAssetsDraft, CreativeAssetsDraftValidationResult, CreativeAssetsGeneratePayload, PromptPreviewResult } from '../ai/types';
 import { db } from '@novel-editor/core';
 import { AiService } from '../ai/AiService';
 import * as searchIndex from '../search/searchIndex';
 import { scheduleChapterSummaryRebuild } from '../ai/summary/chapterSummary';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
-import { DraftSessionStore } from './DraftSessionStore';
+import {
+    DraftSessionStore,
+    type PreparedChapterDraft,
+} from './DraftSessionStore';
+import {
+    canonicalDraftOperationJson,
+    DraftOperationStore,
+    hashDraftOperationParams,
+} from './DraftOperationStore';
+import { DraftOperationCoordinator } from './DraftOperationCoordinator';
+import type { DraftOperationResultRef } from '../../shared/draftOperation';
 import { ReviewCommentStore } from './ReviewCommentStore';
 import type {
     AutomationInvokeContext,
@@ -34,6 +45,7 @@ import {
     createLexicalDocumentFromPlainText,
     ensureLexicalDocument,
     extractReadableText,
+    normalizeChapterDraftText,
 } from '../../shared/lexicalDocument';
 import type { ChapterBeatInput, NarrativeStateDelta } from '../../shared/draftBatch';
 import { commitDraftBatchChapters, undoDraftBatchWriteback } from './DraftBatchCommitter';
@@ -53,6 +65,10 @@ import type {
     ReviewCommentSaveInput,
 } from '../../shared/reviewComments';
 import { AgentAttachmentStore } from '../agent/AgentAttachmentStore';
+import { AgentModelResultStore } from './AgentModelResultStore';
+import { getAgentStructuredOutputContract, validateAgentStructuredOutput } from './AgentStructuredOutputContracts';
+import { parseRepairableJsonObject } from '../../shared/agentJson';
+import { AgentSkillStore } from '../agentSkills/AgentSkillStore';
 
 const EMPTY_CREATIVE_DRAFT: CreativeAssetsDraft = {
     plotLines: [],
@@ -60,6 +76,7 @@ const EMPTY_CREATIVE_DRAFT: CreativeAssetsDraft = {
     characters: [],
     items: [],
     skills: [],
+    worldSettings: [],
     maps: [],
 };
 
@@ -85,11 +102,17 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'rag.ask': 90000,
     'rag.preview': 30000,
     'rag.rebuild_index': 180000,
-    'agent.generate_chat': 150000,
+    // One normal generation (up to 145s) plus one bounded JSON repair (up to 120s).
+    'agent.generate_chat': 300000,
     'agent.generate_plan': 150000,
+    'agent.summarize_user_input': 90000,
+    'agent.generate_user_input_followup': 120000,
     'agent.revise_plan': 150000,
     'agent.generate_report': 210000,
     'agent.generate_consistency_review': 240000,
+    'agent.generate_novel_bootstrap': 240000,
+    'agent.generate_style_skill_pack': 420000,
+    'agent.generate_skill_draft': 240000,
     'agent.generate_editor_range_review': 240000,
     'agent.generate_writer_range_revision_plan': 240000,
     'agent.generate_reader_chapter_evaluation': 240000,
@@ -100,6 +123,16 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'agent.generate_plotline_analysis': 240000,
     'agent.detect_creative_direction': 150000,
     'agent.generate_chapter_beats': 180000,
+    'agent.repair_structured_output': 180000,
+    'agent.reprocess_saved_structured_output': 30000,
+    'agent_skill.list': 15000,
+    'agent_skill.get': 15000,
+    'agent_skill.binding.list': 15000,
+    'agent_skill.draft.list': 15000,
+    'agent_skill.draft.get': 15000,
+    'agent_skill.draft.upsert': 30000,
+    'agent_skill.draft.commit': 30000,
+    'agent_skill.draft.discard': 15000,
     'artifact.review.submit': 30000,
     'review.comment.list': 15000,
     'review.comment.save': 15000,
@@ -140,7 +173,10 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'creative_assets.generate_draft': 210000,
     'creative_assets.revise_draft': 300000,
     'outline.generate_draft': 210000,
-    'chapter.generate_draft': 360000,
+    'chapter.draft.start': 15000,
+    'chapter.draft.get_status': 15000,
+    'chapter.draft.cancel': 15000,
+    'chapter.draft.retry': 15000,
     'chapter.revise_draft': 360000,
     'chapter.continuation_context.build': 90000,
 };
@@ -155,6 +191,7 @@ function createSelectionFromDraft(draft: CreativeAssetsDraft): CreativeDraftSele
         characters: (draft.characters ?? []).map(() => true),
         items: (draft.items ?? []).map(() => true),
         skills: (draft.skills ?? []).map(() => true),
+        worldSettings: (draft.worldSettings ?? []).map(() => true),
         maps: (draft.maps ?? []).map(() => true),
     };
 }
@@ -168,6 +205,7 @@ function normalizeCreativeDraft(input: unknown): CreativeAssetsDraft {
         characters: Array.isArray(draft.characters) ? draft.characters : [],
         items: Array.isArray(draft.items) ? draft.items : [],
         skills: Array.isArray(draft.skills) ? draft.skills : [],
+        worldSettings: Array.isArray(draft.worldSettings) ? draft.worldSettings : [],
         maps: Array.isArray(draft.maps) ? draft.maps : [],
     };
 }
@@ -179,6 +217,7 @@ function summarizeCreativeDraft(draft: CreativeAssetsDraft): string {
         `角色 ${(draft.characters?.length ?? 0)}`,
         `物品 ${(draft.items?.length ?? 0)}`,
         `技能 ${(draft.skills?.length ?? 0)}`,
+        `设定 ${(draft.worldSettings?.length ?? 0)}`,
         `地图 ${(draft.maps?.length ?? 0)}`,
     ];
     return parts.join(' / ');
@@ -195,6 +234,7 @@ function sanitizeGeneratedDraft(draft: CreativeAssetsDraft): CreativeAssetsDraft
         characters: keepNonEmpty(draft.characters, 'name'),
         items: keepNonEmpty(draft.items, 'name'),
         skills: keepNonEmpty(draft.skills, 'name'),
+        worldSettings: keepNonEmpty(draft.worldSettings, 'name'),
         maps: keepNonEmpty(draft.maps, 'name'),
     };
 }
@@ -207,6 +247,7 @@ function pickSelectedCreativeDraft(draft: CreativeAssetsDraft, selection?: Creat
         characters: (draft.characters ?? []).filter((_, index) => selection.characters[index]),
         items: (draft.items ?? []).filter((_, index) => selection.items[index]),
         skills: (draft.skills ?? []).filter((_, index) => selection.skills[index]),
+        worldSettings: (draft.worldSettings ?? []).filter((_, index) => selection.worldSettings[index]),
         maps: (draft.maps ?? []).filter((_, index) => selection.maps[index]),
     };
 }
@@ -260,20 +301,235 @@ function normalizePromptPreviewKind(kind: unknown): NormalizedPromptPreviewKind 
     throw createAutomationError('INVALID_INPUT', `Unsupported prompt preview kind: ${String(kind || '')}`);
 }
 
+type ChapterDraftGenerationPayload = {
+    novelId: string;
+    chapterId: string;
+    currentContent: string;
+    presentation?: 'silent' | 'toast' | 'modal';
+    locale?: string;
+    mode?: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter';
+    ideaIds?: string[];
+    contextChapterCount?: number;
+    recentRawChapterCount?: number;
+    targetLength?: number;
+    style?: string;
+    tone?: string;
+    pace?: string;
+    temperature?: number;
+    userIntent?: string;
+    currentLocation?: string;
+    overrideUserPrompt?: string;
+    preparedContext?: import('../ai/context/ContextBuilder').ContinueWritingContext;
+    sourceOperationId?: string;
+    draftBatchId?: string;
+    childIndex?: number;
+    generationRevision?: number;
+    batchTitle?: string;
+    batchContext?: Record<string, unknown>;
+    batchMode?: 'sequence_continuation' | 'batch_rewrite';
+    targetChapterId?: string;
+};
+
 export class AutomationService {
     private readonly aiService: AiService;
     private readonly draftStore: DraftSessionStore;
+    private readonly draftOperationStore: DraftOperationStore;
+    private readonly draftOperationCoordinator: DraftOperationCoordinator;
     private readonly reviewStore: AgentReviewStore;
     private readonly reviewCommentStore: ReviewCommentStore;
     private readonly attachmentStore: AgentAttachmentStore;
+    private readonly modelResultStore: AgentModelResultStore;
+    private readonly agentSkillStore: AgentSkillStore;
     private draftBatchCommitTail: Promise<void> = Promise.resolve();
 
-    constructor(aiService: AiService, getUserDataPath: () => string, attachmentStore = new AgentAttachmentStore(db)) {
+    constructor(
+        aiService: AiService,
+        getUserDataPath: () => string,
+        attachmentStore = new AgentAttachmentStore(db),
+        deliverDraftCompletion?: (event: {
+            outboxId: string;
+            operationId: string;
+            eventType: string;
+            payload: Record<string, unknown>;
+        }) => Promise<void>,
+    ) {
         this.aiService = aiService;
-        this.draftStore = new DraftSessionStore(getUserDataPath);
+        this.modelResultStore = new AgentModelResultStore(db);
+        this.agentSkillStore = new AgentSkillStore(db);
+        this.draftStore = new DraftSessionStore(db);
+        this.draftOperationStore = new DraftOperationStore(db);
+        this.draftOperationCoordinator = new DraftOperationCoordinator(this.draftOperationStore, {
+            execute: async (operation, payload, signal) => {
+                return this.createChapterDraftSession({
+                    ...payload,
+                    sourceOperationId: operation.operationId,
+                } as Parameters<AutomationService['createChapterDraftSession']>[0], {
+                    source: 'http',
+                    origin: 'desktop-ui',
+                    requestId: `draft-operation:${operation.operationId}:${operation.attemptCount}`,
+                    deadlineAt: operation.operationDeadlineAt,
+                    onProviderActivity: (kind) => {
+                        void this.draftOperationStore.markAttemptActivity(
+                            operation.operationId,
+                            operation.attemptCount,
+                            kind,
+                        ).catch((error) => {
+                            devLog('WARN', 'DraftOperation.activity', 'Failed to record provider activity', {
+                                operationId: operation.operationId,
+                                attempt: operation.attemptCount,
+                                kind,
+                                error: String(error),
+                            });
+                        });
+                    },
+                    signal,
+                }, { deferPersistence: true });
+            },
+            commitPrepared: async (operation, prepared) => {
+                const updated = await this.draftOperationStore.commitSucceeded(
+                    operation.operationId,
+                    operation.version,
+                    (tx, current) => this.draftStore.persistPreparedChapterDraft(
+                        tx,
+                        current,
+                        prepared as PreparedChapterDraft,
+                    ),
+                );
+                this.draftStore.invalidateCache();
+                return updated;
+            },
+            findExistingResult: async (operationId): Promise<DraftOperationResultRef | null> => {
+                const session = await this.draftStore.getBySourceOperationId(operationId);
+                if (!session) return null;
+                return {
+                    draftSessionId: session.draftSessionId,
+                    ...(session.draftBatchId ? { draftBatchId: session.draftBatchId } : {}),
+                    ...(typeof session.childIndex === 'number' ? { childIndex: session.childIndex } : {}),
+                    generationRevision: session.generationRevision ?? 1,
+                };
+            },
+            getProvider: () => {
+                const settings = this.aiService.getSettings();
+                return {
+                    providerType: settings.providerType,
+                    model: settings.providerType === 'http' ? settings.http.model : 'mcp-cli',
+                };
+            },
+            onStateChange: (operation) => {
+                devLog('INFO', 'DraftOperation.state', 'Draft operation state changed', {
+                    operationId: operation.operationId,
+                    status: operation.status,
+                    phase: operation.phase,
+                    version: operation.version,
+                    attempt: operation.attempt,
+                });
+            },
+            deliverCompletion: deliverDraftCompletion,
+        });
         this.reviewStore = new AgentReviewStore(db);
         this.reviewCommentStore = new ReviewCommentStore(getUserDataPath);
         this.attachmentStore = attachmentStore;
+    }
+
+    async initialize(): Promise<void> {
+        await this.draftOperationCoordinator.initialize();
+    }
+
+    async shutdown(): Promise<void> {
+        await this.draftOperationCoordinator.shutdown();
+    }
+
+    private async resolveChapterDraftTitle(input: {
+        chapterId?: string;
+        targetChapterId?: string;
+        draftBatchId?: string;
+        childIndex?: number;
+        batchTitle?: string;
+        batchContext?: Record<string, unknown>;
+    }): Promise<string> {
+        if (input.draftBatchId && Number.isInteger(input.childIndex)) {
+            const currentBeat = input.batchContext?.currentBeat && typeof input.batchContext.currentBeat === 'object'
+                ? input.batchContext.currentBeat as Record<string, unknown>
+                : {};
+            const beatTitle = String(currentBeat.title || input.batchTitle || '').trim();
+            if (beatTitle) return beatTitle;
+        }
+
+        const chapterId = String(
+            input.targetChapterId
+            || input.chapterId
+            || '',
+        ).trim();
+        if (!chapterId || chapterId.startsWith('draft-batch:')) return '';
+        const chapter = await db.chapter.findUnique({
+            where: { id: chapterId },
+            select: { title: true },
+        });
+        return String(chapter?.title || '').trim();
+    }
+
+    private async startChapterDraftOperation(input: any): Promise<unknown> {
+        const operationKey = assertRequiredString(input?.operationKey, 'operationKey');
+        const payload = input?.payload && typeof input.payload === 'object'
+            ? input.payload as Record<string, unknown>
+            : null;
+        if (!payload) throw createAutomationError('INVALID_INPUT', 'payload is required');
+        const novelId = assertRequiredString(payload.novelId, 'payload.novelId');
+        const chapterId = assertRequiredString(payload.chapterId, 'payload.chapterId');
+        const generationRevision = Number(input?.generationRevision ?? payload.generationRevision ?? 1);
+        if (!Number.isInteger(generationRevision) || generationRevision < 1) {
+            throw createAutomationError('INVALID_INPUT', 'generationRevision must be a positive integer');
+        }
+        const targetChapterId = typeof payload.targetChapterId === 'string' && payload.targetChapterId.trim()
+            ? payload.targetChapterId.trim()
+            : chapterId;
+        const sourceChapter = await db.chapter.findUnique({
+            where: { id: targetChapterId },
+            select: {
+                id: true,
+                version: true,
+                content: true,
+                deleted: true,
+                volumeId: true,
+                volume: { select: { novelId: true } },
+            },
+        });
+        if (!sourceChapter || sourceChapter.deleted || sourceChapter.volume.novelId !== novelId) {
+            throw createAutomationError('NOT_FOUND', 'Chapter source is unavailable');
+        }
+        const operationDeadlineAt = typeof input?.operationDeadlineAt === 'string'
+            ? new Date(input.operationDeadlineAt)
+            : new Date(Date.now() + 10 * 60_000);
+        if (!Number.isFinite(operationDeadlineAt.getTime()) || operationDeadlineAt.getTime() <= Date.now()) {
+            throw createAutomationError('INVALID_INPUT', 'operationDeadlineAt must be a future ISO timestamp');
+        }
+        const requestJson = canonicalDraftOperationJson(payload);
+        const paramsHash = hashDraftOperationParams(payload);
+        const owner = input?.owner && typeof input.owner === 'object' ? input.owner as Record<string, unknown> : {};
+        const started = await this.draftOperationCoordinator.start({
+            operationKey,
+            paramsHash,
+            requestJson,
+            novelId,
+            volumeId: sourceChapter.volumeId,
+            chapterId,
+            draftBatchId: typeof payload.draftBatchId === 'string' ? payload.draftBatchId : undefined,
+            childIndex: typeof payload.childIndex === 'number' ? payload.childIndex : undefined,
+            generationRevision,
+            sourceChapterVersion: sourceChapter.version,
+            sourceContentHash: createHash('sha256').update(sourceChapter.content || '', 'utf8').digest('hex'),
+            maxAttempts: typeof input?.maxAttempts === 'number' ? input.maxAttempts : 4,
+            operationDeadlineAt: operationDeadlineAt.toISOString(),
+            sourceConversationId: typeof owner.conversationId === 'string' ? owner.conversationId : undefined,
+            sourceRunId: typeof owner.runId === 'string' ? owner.runId : undefined,
+            sourceStepId: typeof owner.stepId === 'string' ? owner.stepId : undefined,
+        });
+        return {
+            ...started.operation,
+            existing: started.existing,
+            acceptedAt: started.operation.createdAt,
+            pollAfterMs: 1000,
+        };
     }
 
     private async createRevisionTaskPlan(
@@ -345,6 +601,252 @@ export class AutomationService {
         }
     }
 
+    private invokeAgentStructured<T>(
+        method: string,
+        context: AutomationInvokeContext,
+        task: () => Promise<T>,
+        checkpointOptions: {
+            repairAttemptId?: string;
+            repairedFromRevision?: number;
+            modelResultRef?: string;
+            autoRepair?: boolean;
+        } = {},
+    ): Promise<T> {
+        const resultRequestId = checkpointOptions.modelResultRef || context.requestId || randomUUID();
+        return this.aiService.withAgentStructuredInvocation({
+            requestId: resultRequestId,
+            method,
+            checkpoint: async (rawText, contract) => {
+                const record = await this.modelResultStore.save(
+                    resultRequestId,
+                    method,
+                    contract,
+                    rawText,
+                    {
+                        repairAttemptId: checkpointOptions.repairAttemptId,
+                        repairedFromRevision: checkpointOptions.repairedFromRevision,
+                    },
+                );
+                return {
+                    modelResultRef: record.modelResultRef,
+                    revision: record.revision,
+                    resultHash: record.resultHash,
+                };
+            },
+            ...(checkpointOptions.autoRepair ? {
+                autoRepair: async ({ checkpoint, contract, validationIssues }) => {
+                    const repairAttemptId = createHash('sha256')
+                        .update(`${checkpoint.modelResultRef}|${method}|repair|1`)
+                        .digest('hex');
+                    try {
+                        const result = await this.repairStructuredOutput({
+                            modelResultRef: checkpoint.modelResultRef,
+                            sourceMethod: method,
+                            contractId: contract.contractId,
+                            contractVersion: contract.version,
+                            validationIssues,
+                            repairAttempt: 1,
+                            repairAttemptId,
+                        }, context);
+                        const repairedPayload = result.repairedPayload;
+                        if (!repairedPayload || typeof repairedPayload !== 'object' || Array.isArray(repairedPayload)) {
+                            throw createAutomationError('MODEL_OUTPUT_INVALID', 'The automatic structured repair returned no usable payload');
+                        }
+                        return repairedPayload as Record<string, unknown>;
+                    } catch (error) {
+                        const repairFailureCode = String((error as { code?: unknown })?.code || 'MODEL_REPAIR_FAILED');
+                        if (repairFailureCode === 'CANCELLED') throw error;
+                        const repairDetails = error && typeof error === 'object'
+                            && (error as { details?: unknown }).details
+                            && typeof (error as { details?: unknown }).details === 'object'
+                            && !Array.isArray((error as { details?: unknown }).details)
+                            ? (error as { details: Record<string, unknown> }).details
+                            : {};
+                        throw createAutomationError('MODEL_OUTPUT_INVALID', 'The automatic structured repair did not produce a valid payload', {
+                            modelResultRef: checkpoint.modelResultRef,
+                            sourceMethod: method,
+                            contractId: contract.contractId,
+                            contractVersion: contract.version,
+                            validationIssues: Array.isArray(repairDetails.validationIssues)
+                                ? repairDetails.validationIssues
+                                : validationIssues,
+                            automaticRepairAttempts: 1,
+                            repairFailureCode,
+                        });
+                    }
+                },
+            } : {}),
+        }, task);
+    }
+
+    private async reprocessSavedStructuredOutput(params: any): Promise<Record<string, unknown>> {
+        const modelResultRef = assertRequiredString(params?.modelResultRef, 'modelResultRef');
+        const sourceMethod = assertRequiredString(params?.sourceMethod, 'sourceMethod');
+        const contract = getAgentStructuredOutputContract(sourceMethod);
+        if (!contract) {
+            throw createAutomationError('OUTPUT_CONTRACT_MISMATCH', 'The structured output contract is unavailable');
+        }
+        const source = await this.modelResultStore.getLatest(modelResultRef);
+        if (!source || source.sourceMethod !== sourceMethod) {
+            throw createAutomationError('MODEL_RESULT_NOT_FOUND', 'The saved model result is unavailable');
+        }
+        if (source.contractId !== contract.contractId || source.contractVersion !== contract.version) {
+            throw createAutomationError('OUTPUT_CONTRACT_MISMATCH', 'The saved model result uses a stale contract');
+        }
+        const parseResult = parseRepairableJsonObject(source.rawText, jsonrepair);
+        const payload = parseResult?.value ?? null;
+        const validationIssues = payload ? validateAgentStructuredOutput(payload, contract) : [];
+        if (!payload || validationIssues.length > 0) {
+            throw createAutomationError('MODEL_OUTPUT_INVALID', 'The saved model result cannot be reprocessed locally', {
+                contractId: contract.contractId,
+                contractVersion: contract.version,
+                validationIssues,
+            });
+        }
+        return {
+            modelResultRef,
+            revision: source.revision,
+            payload,
+            resultHash: source.resultHash,
+        };
+    }
+
+    private async repairStructuredOutput(params: any, context: AutomationInvokeContext): Promise<Record<string, unknown>> {
+        const modelResultRef = assertRequiredString(params?.modelResultRef, 'modelResultRef');
+        const sourceMethod = assertRequiredString(params?.sourceMethod, 'sourceMethod');
+        const repairAttemptId = assertRequiredString(params?.repairAttemptId, 'repairAttemptId');
+        const repairAttempt = Number(params?.repairAttempt);
+        if (repairAttempt !== 1 && repairAttempt !== 2) {
+            throw createAutomationError('INVALID_INPUT', 'repairAttempt must be 1 or 2');
+        }
+        const contract = getAgentStructuredOutputContract(sourceMethod);
+        const contractId = typeof params?.contractId === 'string' && params.contractId.trim()
+            ? params.contractId.trim()
+            : contract?.contractId || '';
+        const contractVersion = typeof params?.contractVersion === 'string' && params.contractVersion.trim()
+            ? params.contractVersion.trim()
+            : contract?.version || '';
+        if (!contract || contract.contractId !== contractId || contract.version !== contractVersion) {
+            throw createAutomationError('OUTPUT_CONTRACT_MISMATCH', 'The requested output contract is unavailable or stale', {
+                sourceMethod,
+                contractId,
+                contractVersion,
+            });
+        }
+        const source = await this.modelResultStore.getLatest(modelResultRef);
+        if (!source || source.sourceMethod !== sourceMethod) {
+            throw createAutomationError('MODEL_RESULT_NOT_FOUND', 'The saved model result is unavailable', {
+                modelResultRef,
+                sourceMethod,
+            });
+        }
+        if (source.contractId !== contractId || source.contractVersion !== contractVersion) {
+            throw createAutomationError('OUTPUT_CONTRACT_MISMATCH', 'The saved model result uses a different output contract');
+        }
+        if (source.rawText.length > 200_000) {
+            throw createAutomationError('MODEL_REPAIR_INPUT_TOO_LARGE', 'The saved model result is too large for structured repair');
+        }
+        const localParseResult = parseRepairableJsonObject(source.rawText, jsonrepair);
+        const localPayload = localParseResult?.value ?? null;
+        const localValidationIssues = localPayload
+            ? validateAgentStructuredOutput(localPayload, contract)
+            : [];
+        if (localPayload && localValidationIssues.length === 0) {
+            devLog('INFO', 'AutomationService.structuredOutput.localRepair', 'Saved structured JSON repaired locally', {
+                modelResultRef,
+                sourceMethod,
+                revision: source.revision,
+                repaired: localParseResult?.repaired === true,
+                rawLength: source.rawText.length,
+            });
+            return {
+                modelResultRef,
+                revision: source.revision,
+                repairedPayload: localPayload,
+                resultHash: source.resultHash,
+                repairKind: 'local',
+            };
+        }
+        const claim = await this.modelResultStore.claimRepairAttempt(
+            repairAttemptId,
+            modelResultRef,
+            repairAttempt as 1 | 2,
+        );
+        if (claim.status === 'completed' && claim.result) {
+            const repairedPayload = parseRepairableJsonObject(claim.result.rawText, jsonrepair)?.value ?? null;
+            const persistedIssues = repairedPayload ? validateAgentStructuredOutput(repairedPayload, contract) : [];
+            if (!repairedPayload || persistedIssues.length > 0) {
+                throw createAutomationError('MODEL_OUTPUT_INVALID', 'The persisted repair attempt is still invalid', {
+                    modelResultRef,
+                    repairAttemptId,
+                    contractId,
+                    contractVersion,
+                    validationIssues: persistedIssues,
+                });
+            }
+            return {
+                modelResultRef,
+                revision: claim.result.revision,
+                repairedPayload,
+                resultHash: claim.result.resultHash,
+            };
+        }
+        if (claim.status !== 'claimed') {
+            throw createAutomationError(
+                claim.status === 'in_progress' ? 'MODEL_REPAIR_IN_PROGRESS' : 'MODEL_REPAIR_ATTEMPT_EXHAUSTED',
+                claim.status === 'in_progress'
+                    ? 'The structured output repair attempt is already running'
+                    : 'The structured output repair attempt cannot be repeated',
+                { modelResultRef, repairAttemptId },
+            );
+        }
+        const requestedValidationIssues = Array.isArray(params?.validationIssues)
+            ? params.validationIssues.slice(0, 20).map((issue: unknown) => {
+                const value = issue && typeof issue === 'object' ? issue as Record<string, unknown> : {};
+                return {
+                    path: String(value.path || '').slice(0, 500),
+                    message: String(value.message || '').slice(0, 1000),
+                };
+            })
+            : [];
+        const validationIssues = localValidationIssues.length > 0
+            ? localValidationIssues.slice(0, 20)
+            : requestedValidationIssues;
+        try {
+            const repairedPayload = await this.invokeAgentStructured(
+                sourceMethod,
+                context,
+                () => this.aiService.repairAgentStructuredOutput({
+                    rawText: source.rawText,
+                    contract,
+                    validationIssues,
+                }, context.signal),
+                {
+                    modelResultRef,
+                    repairAttemptId,
+                    repairedFromRevision: source.revision,
+                },
+            );
+            const repaired = await this.modelResultStore.findByRepairAttempt(repairAttemptId);
+            if (!repaired) {
+                throw createAutomationError('PERSISTENCE_ERROR', 'The repaired model result was not checkpointed');
+            }
+            await this.modelResultStore.completeRepairAttempt(repairAttemptId, repaired.revision);
+            return {
+                modelResultRef,
+                revision: repaired.revision,
+                repairedPayload,
+                resultHash: repaired.resultHash,
+            };
+        } catch (error) {
+            await this.modelResultStore.failRepairAttempt(
+                repairAttemptId,
+                String((error as { code?: unknown })?.code || 'MODEL_REPAIR_FAILED'),
+            );
+            throw error;
+        }
+    }
+
     private logInvokeStart(method: string, params: unknown, context: AutomationInvokeContext, timeoutMs: number): void {
         devLog('INFO', 'AutomationService.invoke.start', 'Automation invoke start', {
             requestId: context.requestId,
@@ -373,13 +875,40 @@ export class AutomationService {
         });
     }
 
-    private async withTimeout<T>(method: string, params: unknown, context: AutomationInvokeContext, task: () => Promise<T>): Promise<T> {
-        const timeoutMs = resolveAutomationTimeout(method);
+    private async withTimeout<T>(method: string, params: unknown, context: AutomationInvokeContext, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+        const deadlineRemainingMs = context.deadlineAt ? Date.parse(context.deadlineAt) - Date.now() : Number.POSITIVE_INFINITY;
+        const timeoutMs = Math.max(1, Math.min(resolveAutomationTimeout(method), deadlineRemainingMs - 1_000));
         const startedAt = Date.now();
         this.logInvokeStart(method, params, context, timeoutMs);
+        const controller = new AbortController();
+        const abortFromParent = () => controller.abort(context.signal?.reason);
+        if (context.signal?.aborted) abortFromParent();
+        else context.signal?.addEventListener('abort', abortFromParent, { once: true });
+        if (controller.signal.aborted) {
+            context.signal?.removeEventListener('abort', abortFromParent);
+            throw createAutomationError('CANCELLED', `Automation method ${method} was cancelled`, {
+                method,
+                requestId: context.requestId,
+            });
+        }
         let timer: NodeJS.Timeout | undefined;
+        let timedOut = false;
+        const abortPromise = new Promise<never>((_, reject) => {
+            const rejectCancelled = () => {
+                if (!timedOut) {
+                    reject(createAutomationError('CANCELLED', `Automation method ${method} was cancelled`, {
+                        method,
+                        requestId: context.requestId,
+                    }));
+                }
+            };
+            if (controller.signal.aborted) rejectCancelled();
+            else controller.signal.addEventListener('abort', rejectCancelled, { once: true });
+        });
         const timeoutPromise = new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
+                timedOut = true;
+                controller.abort(createAutomationError('UPSTREAM_TIMEOUT', `Automation method ${method} timed out`));
                 reject(createAutomationError('UPSTREAM_TIMEOUT', `Automation method ${method} timed out after ${timeoutMs}ms`, {
                     method,
                     timeoutMs,
@@ -389,13 +918,23 @@ export class AutomationService {
             timer.unref?.();
         });
 
+        const taskPromise = task(controller.signal);
         try {
-            const result = await Promise.race([task(), timeoutPromise]);
+            const result = await Promise.race([taskPromise, timeoutPromise, abortPromise]);
             if (timer) clearTimeout(timer);
             this.logInvokeSuccess(method, context, startedAt, result);
             return result;
         } catch (error) {
             if (timer) clearTimeout(timer);
+            if (controller.signal.aborted) {
+                await Promise.race([
+                    taskPromise.then(() => undefined, () => undefined),
+                    new Promise<void>((resolve) => {
+                        const settleTimer = setTimeout(resolve, 5_000);
+                        settleTimer.unref?.();
+                    }),
+                ]);
+            }
             this.logInvokeError(method, context, startedAt, error);
             if (context.signal?.aborted) {
                 throw createAutomationError('CANCELLED', `Automation method ${method} was cancelled`, {
@@ -404,6 +943,8 @@ export class AutomationService {
                 });
             }
             throw error;
+        } finally {
+            context.signal?.removeEventListener('abort', abortFromParent);
         }
     }
 
@@ -762,38 +1303,46 @@ export class AutomationService {
     }
 
     async createChapterDraftSession(
-        payload: {
-            novelId: string;
-            chapterId: string;
-            currentContent: string;
-            presentation?: 'silent' | 'toast' | 'modal';
-            locale?: string;
-            mode?: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter';
-            ideaIds?: string[];
-            contextChapterCount?: number;
-            recentRawChapterCount?: number;
-            targetLength?: number;
-            style?: string;
-            tone?: string;
-            pace?: string;
-            temperature?: number;
-            userIntent?: string;
-            currentLocation?: string;
-            overrideUserPrompt?: string;
-            preparedContext?: import('../ai/context/ContextBuilder').ContinueWritingContext;
-            draftBatchId?: string;
-            childIndex?: number;
-            generationRevision?: number;
-            batchTitle?: string;
-            batchContext?: Record<string, unknown>;
-            batchMode?: 'sequence_continuation' | 'batch_rewrite';
-            targetChapterId?: string;
-        },
+        payload: ChapterDraftGenerationPayload,
         context: AutomationInvokeContext,
-    ): Promise<DraftSessionRecord> {
+    ): Promise<DraftSessionRecord>;
+    async createChapterDraftSession(
+        payload: ChapterDraftGenerationPayload,
+        context: AutomationInvokeContext,
+        options: { deferPersistence: true },
+    ): Promise<PreparedChapterDraft>;
+    async createChapterDraftSession(
+        payload: ChapterDraftGenerationPayload,
+        context: AutomationInvokeContext,
+        options?: { deferPersistence?: boolean },
+    ): Promise<DraftSessionRecord | PreparedChapterDraft> {
         assertRequiredString(payload?.novelId, 'novelId');
         assertRequiredString(payload?.chapterId, 'chapterId');
-        assertRequiredString(payload?.currentContent, 'currentContent');
+        if (payload?.mode === 'new_chapter') {
+            if (typeof payload.currentContent !== 'string') {
+                throw createAutomationError('INVALID_INPUT', 'currentContent must be a string');
+            }
+        } else {
+            assertRequiredString(payload?.currentContent, 'currentContent');
+        }
+        const sourceOperationId = typeof payload.sourceOperationId === 'string' ? payload.sourceOperationId.trim() : '';
+        if (sourceOperationId) {
+            const existing = await this.draftStore.getBySourceOperationId(sourceOperationId);
+            if (existing) {
+                if (options?.deferPersistence) {
+                    return {
+                        kind: 'existing',
+                        result: {
+                            draftSessionId: existing.draftSessionId,
+                            ...(existing.draftBatchId ? { draftBatchId: existing.draftBatchId } : {}),
+                            ...(typeof existing.childIndex === 'number' ? { childIndex: existing.childIndex } : {}),
+                            generationRevision: existing.generationRevision ?? payload.generationRevision ?? 1,
+                        },
+                    };
+                }
+                return existing;
+            }
+        }
         const requestedPresentation = typeof payload.presentation === 'string' ? payload.presentation.trim().toLowerCase() : '';
         const normalizedPresentation = requestedPresentation === 'silent' || requestedPresentation === 'toast' || requestedPresentation === 'modal'
             ? requestedPresentation
@@ -820,6 +1369,7 @@ export class AutomationService {
         }
         const {
             presentation: _presentation,
+            sourceOperationId: _sourceOperationId,
             draftBatchId: _draftBatchId,
             childIndex: _childIndex,
             batchTitle: _batchTitle,
@@ -828,7 +1378,11 @@ export class AutomationService {
             targetChapterId: _targetChapterId,
             ...chapterGeneratePayload
         } = payload;
-        const result = await this.aiService.continueWriting(chapterGeneratePayload, context.signal) as {
+        const result = await this.aiService.continueWriting(
+            chapterGeneratePayload,
+            context.signal,
+            context.onProviderActivity,
+        ) as {
             text: string;
             usedContext: string[];
             warnings?: string[];
@@ -836,6 +1390,19 @@ export class AutomationService {
             contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
             consistency: { ok: boolean; issues: string[] };
         };
+
+        const draftHeadingTitle = await this.resolveChapterDraftTitle({
+            chapterId: payload.chapterId,
+            targetChapterId: payload.targetChapterId,
+            draftBatchId,
+            childIndex,
+            batchTitle: payload.batchTitle,
+            batchContext: payload.batchContext,
+        });
+        const generatedText = normalizeChapterDraftText(String(result.text || '').trim(), draftHeadingTitle);
+        if (!generatedText) {
+            throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty draft after chapter title normalization');
+        }
 
         let narrativeStateDelta: NarrativeStateDelta | undefined;
         let stateExtractionWarning = '';
@@ -850,7 +1417,7 @@ export class AutomationService {
             try {
                 const extracted = await this.aiService.extractNarrativeState({
                     locale: payload.locale,
-                    generatedText: result.text,
+                    generatedText,
                     currentBeat: payload.batchContext?.currentBeat && typeof payload.batchContext.currentBeat === 'object'
                         ? payload.batchContext.currentBeat as Record<string, unknown>
                         : {},
@@ -882,8 +1449,8 @@ export class AutomationService {
         const chapterPayload: ChapterDraftPayload = {
             chapterId: targetChapterId,
             baseContent,
-            generatedText: result.text,
-            content: isRewriteBatch ? result.text : appendPlainTextToLexical(baseContent, result.text),
+            generatedText,
+            content: isRewriteBatch ? generatedText : appendPlainTextToLexical(baseContent, generatedText),
             presentation: normalizedPresentation,
             usedContext: result.usedContext,
             warnings: [
@@ -904,32 +1471,52 @@ export class AutomationService {
             origin: context.origin ?? 'unknown',
             novelId: payload.novelId,
             chapterId: targetChapterId,
+            sourceOperationId: sourceOperationId || undefined,
+            generationRevision: payload.generationRevision ?? 1,
             status: 'draft',
             payload: chapterPayload,
-            previewSummary: `${payload.batchTitle?.trim() || '章节草稿'} ${result.text.length} 字符`,
+            previewSummary: `${payload.batchTitle?.trim() || '章节草稿'} ${generatedText.length} 字符`,
         } as const;
         if (draftBatchId && Number.isInteger(childIndex)) {
             const currentBeat = payload.batchContext?.currentBeat && typeof payload.batchContext.currentBeat === 'object'
                 ? payload.batchContext.currentBeat as Record<string, unknown>
                 : {};
+            const progress = {
+                title: String(currentBeat.title || payload.batchTitle || '').trim(),
+                coreConflict: String(currentBeat.coreConflict || '').trim(),
+                keyEvents: Array.isArray(currentBeat.keyEvents) ? currentBeat.keyEvents.map(String) : [],
+                reveals: Array.isArray(currentBeat.reveals) ? currentBeat.reveals.map(String) : [],
+                endingHook: String(currentBeat.endingHook || '').trim(),
+                summary: generatedText.length > 700
+                    ? `${generatedText.slice(0, 350)} ... ${generatedText.slice(-250)}`
+                    : generatedText,
+                stateDelta: narrativeStateDelta,
+            };
+            if (options?.deferPersistence) {
+                return {
+                    kind: 'create',
+                    sessionInput,
+                    draftBatchId,
+                    childIndex: childIndex as number,
+                    progress,
+                    expectedGenerationRevision: payload.generationRevision,
+                };
+            }
             const attached = await this.draftStore.createBatchChildSession(
                 draftBatchId,
                 childIndex as number,
                 sessionInput,
-                {
-                    title: String(currentBeat.title || payload.batchTitle || '').trim(),
-                    coreConflict: String(currentBeat.coreConflict || '').trim(),
-                    keyEvents: Array.isArray(currentBeat.keyEvents) ? currentBeat.keyEvents.map(String) : [],
-                    reveals: Array.isArray(currentBeat.reveals) ? currentBeat.reveals.map(String) : [],
-                    endingHook: String(currentBeat.endingHook || '').trim(),
-                    summary: result.text.length > 700
-                        ? `${result.text.slice(0, 350)} ... ${result.text.slice(-250)}`
-                        : result.text,
-                    stateDelta: narrativeStateDelta,
-                },
+                progress,
                 payload.generationRevision,
             );
             return attached.session;
+        }
+        if (options?.deferPersistence) {
+            return {
+                kind: 'create',
+                sessionInput,
+                expectedGenerationRevision: payload.generationRevision,
+            };
         }
         return this.draftStore.create(sessionInput);
     }
@@ -961,6 +1548,9 @@ export class AutomationService {
             throw createAutomationError('INVALID_STATE', 'Only the current reviewable draft can be regenerated');
         }
         const sourcePayload = source.payload as ChapterDraftPayload;
+        const revisedTitle = await this.resolveChapterDraftTitle({
+            chapterId: sourcePayload.sourceSnapshot?.chapterId || sourcePayload.chapterId,
+        });
         const instructions = input.comments.map((comment, index) => {
             const location = typeof comment.anchor.paragraphIndex === 'number'
                 ? `第 ${comment.anchor.paragraphIndex + 1} 段`
@@ -973,7 +1563,7 @@ export class AutomationService {
         const result = await this.aiService.continueWriting({
             novelId: source.novelId,
             chapterId: sourcePayload.sourceSnapshot?.chapterId || sourcePayload.chapterId,
-            currentContent: sourcePayload.generatedText,
+            currentContent: normalizeChapterDraftText(sourcePayload.generatedText, revisedTitle),
             locale: input.locale || 'zh-CN',
             mode: 'rewrite_chapter',
             userIntent: [
@@ -991,8 +1581,10 @@ export class AutomationService {
             contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
             consistency: { ok: boolean; issues: string[] };
         };
-        const generatedText = result.text.trim();
-        if (!generatedText) throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty revised draft');
+        const generatedText = normalizeChapterDraftText(String(result.text || '').trim(), revisedTitle);
+        if (!generatedText) {
+            throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty revised draft after chapter title normalization');
+        }
         return this.draftStore.create({
             workspace: source.workspace,
             type: 'chapter-draft',
@@ -1396,6 +1988,9 @@ export class AutomationService {
             }
             const snapshot = latestWriteback.chapters[0];
             if (!snapshot) throw createAutomationError('INVALID_STATE', 'The writeback has no chapter snapshot');
+            const committedPayloadContent = session.type === 'chapter-draft'
+                ? String((session.payload as ChapterDraftPayload).content || '')
+                : '';
             const restoredChapter = await db.$transaction(async (tx) => {
                 const current = await tx.chapter.findUnique({
                     where: { id: snapshot.chapterId },
@@ -1404,11 +1999,17 @@ export class AutomationService {
                 const currentHash = current
                     ? createHash('sha256').update(current.content || '', 'utf8').digest('hex')
                     : '';
+                const readableContentUnchanged = Boolean(
+                    current
+                    && committedPayloadContent
+                    && current.version === snapshot.afterVersion
+                    && extractReadableText(current.content || '') === extractReadableText(committedPayloadContent),
+                );
                 if (
                     !current
                     || current.deleted
                     || current.version !== snapshot.afterVersion
-                    || currentHash !== snapshot.afterContentHash
+                    || (currentHash !== snapshot.afterContentHash && !readableContentUnchanged)
                 ) {
                     throw createAutomationError(
                         'VERSION_CONFLICT',
@@ -1502,38 +2103,72 @@ export class AutomationService {
     }
 
     async invoke(method: string, params: any, context: AutomationInvokeContext): Promise<unknown> {
-        return this.withTimeout(method, params, context, async () => {
+        return this.withTimeout(method, params, context, async (signal) => {
+            const activeContext = { ...context, signal };
+            const invokeStructured = <T>(task: () => Promise<T>, autoRepair = false): Promise<T> => (
+                this.invokeAgentStructured(method, activeContext, task, { autoRepair })
+            );
             switch (method) {
                 case 'agent.generate_chat':
-                    return this.aiService.generateAgentChat(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentChat(params, signal), true);
                 case 'agent.generate_plan':
-                    return this.aiService.generateAgentPlan(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentPlan(params, signal));
+                case 'agent.summarize_user_input':
+                    return invokeStructured(() => this.aiService.summarizeAgentUserInput(params, signal));
+                case 'agent.generate_user_input_followup':
+                    return invokeStructured(() => this.aiService.generateAgentUserInputFollowup(params, signal));
                 case 'agent.revise_plan':
-                    return this.aiService.reviseAgentPlan(params, context.signal);
+                    return invokeStructured(() => this.aiService.reviseAgentPlan(params, signal));
                 case 'agent.generate_report':
-                    return this.aiService.generateAgentReport(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentReport(params, signal));
                 case 'agent.generate_consistency_review':
-                    return this.aiService.generateAgentConsistencyReview(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentConsistencyReview(params, signal));
+                case 'agent.generate_novel_bootstrap':
+                    return invokeStructured(() => this.aiService.generateAgentNovelBootstrap(params, signal));
+                case 'agent.generate_style_skill_pack':
+                    return invokeStructured(() => this.aiService.generateAgentStyleSkillPack(params, signal));
+                case 'agent.generate_skill_draft':
+                    return invokeStructured(() => this.aiService.generateAgentSkillDraft(params, signal));
                 case 'agent.generate_editor_range_review':
-                    return this.aiService.generateAgentEditorRangeReview(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentEditorRangeReview(params, signal));
                 case 'agent.generate_writer_range_revision_plan':
-                    return this.aiService.generateAgentWriterRangeRevisionPlan(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentWriterRangeRevisionPlan(params, signal));
                 case 'agent.generate_reader_chapter_evaluation':
-                    return this.aiService.generateAgentReaderChapterEvaluation(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentReaderChapterEvaluation(params, signal));
                 case 'agent.generate_worldbuilding_range_consistency':
-                    return this.aiService.generateAgentWorldbuildingRangeConsistency(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentWorldbuildingRangeConsistency(params, signal));
                 case 'agent.extract_research_claims':
-                    return this.aiService.extractAgentResearchClaims(params, context.signal);
+                    return invokeStructured(() => this.aiService.extractAgentResearchClaims(params, signal));
                 case 'agent.generate_research_fact_check':
-                    return this.aiService.generateAgentResearchFactCheck(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentResearchFactCheck(params, signal));
                 case 'agent.generate_scope_audit':
-                    return this.aiService.generateAgentScopeAudit(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentScopeAudit(params, signal));
                 case 'agent.generate_plotline_analysis':
-                    return this.aiService.generateAgentPlotlineAnalysis(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateAgentPlotlineAnalysis(params, signal));
                 case 'agent.detect_creative_direction':
-                    return this.aiService.detectAgentCreativeDirection(params, context.signal);
+                    return invokeStructured(() => this.aiService.detectAgentCreativeDirection(params, signal));
                 case 'agent.generate_chapter_beats':
-                    return this.aiService.generateChapterBeats(params, context.signal);
+                    return invokeStructured(() => this.aiService.generateChapterBeats(params, signal));
+                case 'agent.repair_structured_output':
+                    return this.repairStructuredOutput(params, activeContext);
+                case 'agent.reprocess_saved_structured_output':
+                    return this.reprocessSavedStructuredOutput(params);
+                case 'agent_skill.list':
+                    return this.agentSkillStore.listSkills(params || {});
+                case 'agent_skill.get':
+                    return this.agentSkillStore.getSkill(params);
+                case 'agent_skill.binding.list':
+                    return this.agentSkillStore.listBindings(params || {});
+                case 'agent_skill.draft.list':
+                    return this.agentSkillStore.listDrafts(params || {});
+                case 'agent_skill.draft.get':
+                    return this.agentSkillStore.getDraft(String(params?.draftId || params?.id || ''));
+                case 'agent_skill.draft.upsert':
+                    return this.agentSkillStore.upsertDraft(params);
+                case 'agent_skill.draft.commit':
+                    return this.agentSkillStore.commitDraft(params);
+                case 'agent_skill.draft.discard':
+                    return this.agentSkillStore.discardDraft(String(params?.draftId || params?.id || ''), params?.expectedVersion);
                 case 'artifact.review.submit':
                     return this.reviewStore.submitArtifactReview(params as ArtifactReviewSubmitInput);
                 case 'review.comment.list':
@@ -1547,13 +2182,13 @@ export class AutomationService {
                 case 'revision_task.list':
                     return this.reviewStore.listRevisionTasks(params as RevisionTaskListFilters);
                 case 'revision_task.create_plan':
-                    return this.createRevisionTaskPlan(params as RevisionTaskCreatePlanInput, context);
+                    return this.createRevisionTaskPlan(params as RevisionTaskCreatePlanInput, activeContext);
                 case 'revision_task.update_status':
                     return this.reviewStore.updateRevisionTaskStatus(params as import('../../shared/expertReport').RevisionTaskUpdateStatusInput);
                 case 'revision_task.sync_run':
                     return this.reviewStore.syncRevisionTasksFromRun(params as import('../../shared/expertReport').RevisionTaskSyncRunInput);
                 case 'rag.ask':
-                    return this.aiService.askNovel(params, context.signal);
+                    return this.aiService.askNovel(params, signal);
                 case 'attachment.list':
                     return (await this.attachmentStore.list(
                         assertRequiredString(params?.novelId, 'novelId'),
@@ -1631,18 +2266,30 @@ export class AutomationService {
                 case 'draft.batch.discard':
                     return this.discardDraftBatch(params);
                 case 'creative_assets.generate_draft':
-                    return this.generateCreativeAssetsDraft(params, context, 'creative-assets');
+                    return this.generateCreativeAssetsDraft(params, activeContext, 'creative-assets');
                 case 'creative_assets.revise_draft':
-                    return this.reviseCreativeAssetsDraftSession(params, context);
+                    return this.reviseCreativeAssetsDraftSession(params, activeContext);
                 case 'outline.generate_draft':
                     return this.generateCreativeAssetsDraft({
                         ...params,
                         targetSections: ['plotLines', 'plotPoints'],
-                    }, context, 'outline-draft');
-                case 'chapter.generate_draft':
-                    return this.createChapterDraftSession(params, context);
+                    }, activeContext, 'outline-draft');
+                case 'chapter.draft.start':
+                    return this.startChapterDraftOperation(params);
+                case 'chapter.draft.get_status':
+                    return this.draftOperationCoordinator.get(assertRequiredString(params?.operationId, 'operationId'));
+                case 'chapter.draft.cancel':
+                    return this.draftOperationCoordinator.cancel(
+                        assertRequiredString(params?.operationId, 'operationId'),
+                        typeof params?.expectedVersion === 'number' ? params.expectedVersion : undefined,
+                    );
+                case 'chapter.draft.retry':
+                    return this.draftOperationCoordinator.retry(
+                        assertRequiredString(params?.operationId, 'operationId'),
+                        typeof params?.expectedVersion === 'number' ? params.expectedVersion : undefined,
+                    );
                 case 'chapter.revise_draft':
-                    return this.reviseChapterDraftSession(params, context);
+                    return this.reviseChapterDraftSession(params, activeContext);
                 case 'creative_assets.validate_draft':
                     return this.validateCreativeDraftSession(params);
                 case 'outline.write':

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, nativeImage, protocol, net, session } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, nativeImage, protocol, net, session, shell } from 'electron'
 import { initDb, db, ensureDbSchema } from '@novel-editor/core'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
@@ -18,9 +18,23 @@ import { PythonRuntimeClient } from './agent/PythonRuntimeClient'
 import { AgentConversationStore, type AgentConversationRecord } from './agent/AgentConversationStore'
 import { AgentAttachmentStore } from './agent/AgentAttachmentStore'
 import { DocumentExtractorClient } from './agent/DocumentExtractorClient'
+import { applyDurableDraftCutover } from './agent/DurableDraftCutover'
 import { readNovelFileAsStructure } from './importers/novelImport'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+function configureWindowsUtf8Console(): void {
+    if (process.platform !== 'win32') return;
+    try {
+        // Electron inherits the console opened by pnpm/cmd. Align its code page
+        // with Node and Python's UTF-8 output so Chinese diagnostics stay readable.
+        execSync('chcp.com 65001', { stdio: 'ignore', windowsHide: true });
+    } catch {
+        // File logs remain UTF-8 even when the host console cannot change pages.
+    }
+}
+
+configureWindowsUtf8Console();
 
 // The built directory structure
 process.env.APP_ROOT = path.join(__dirname, '..')
@@ -162,7 +176,7 @@ function resolveDefaultUserDataPath(): string {
 }
 
 type AiDiagCommand =
-    | { action: 'smoke'; kind: 'mcp' | 'skill'; json: boolean; dbPath?: string; userDataPath?: string }
+    | { action: 'smoke'; kind: 'mcp'; json: boolean; dbPath?: string; userDataPath?: string }
     | { action: 'coverage'; json: boolean; dbPath?: string; userDataPath?: string };
 
 type McpCliSetupPayload = {
@@ -369,7 +383,7 @@ function parseAiDiagCommand(argv: string[]): { command?: AiDiagCommand; error?: 
 
     const tokens = argv.slice(markerIndex + 1);
     if (tokens.length === 0) {
-        return { error: 'Missing diagnostic action. Use: --ai-diag smoke <mcp|skill> [--json] [--db <path>] [--user-data <path>] or --ai-diag coverage [--json] [--db <path>] [--user-data <path>]' };
+        return { error: 'Missing diagnostic action. Use: --ai-diag smoke mcp [--json] [--db <path>] [--user-data <path>] or --ai-diag coverage [--json] [--db <path>] [--user-data <path>]' };
     }
 
     const positionals: string[] = [];
@@ -408,8 +422,8 @@ function parseAiDiagCommand(argv: string[]): { command?: AiDiagCommand; error?: 
         return { command: { action: 'coverage', json, dbPath, userDataPath } };
     }
     if (action === 'smoke') {
-        if (kind !== 'mcp' && kind !== 'skill') {
-            return { error: 'Smoke mode requires kind: mcp | skill' };
+        if (kind !== 'mcp') {
+            return { error: 'Smoke mode requires kind: mcp' };
         }
         return { command: { action: 'smoke', kind, json, dbPath, userDataPath } };
     }
@@ -436,7 +450,7 @@ function formatAiDiagReadable(result: unknown, command: AiDiagCommand): string {
 
     const output = result as {
         ok: boolean;
-        kind: 'mcp' | 'skill';
+        kind: 'mcp';
         detail: string;
         missingActions: string[];
         checks: Array<{ actionId: string; ok: boolean; skipped?: boolean; detail: string }>;
@@ -456,7 +470,7 @@ function formatAiDiagReadable(result: unknown, command: AiDiagCommand): string {
 async function runAiDiagCommand(aiService: AiService, command: AiDiagCommand): Promise<number> {
     const result = command.action === 'coverage'
         ? aiService.getCapabilityCoverage()
-        : await aiService.testOpenClawSmoke({ kind: command.kind });
+        : await aiService.testOpenClawSmoke();
 
     if (command.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -643,6 +657,19 @@ ipcMain.handle('app:get-user-data-path', () => {
     return app.getPath('userData');
 });
 
+ipcMain.handle('app:open-external', async (_event, value: unknown) => {
+    if (typeof value !== 'string' || value.length > 4096) return false;
+
+    try {
+        const url = new URL(value);
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+        await shell.openExternal(url.toString());
+        return true;
+    } catch {
+        return false;
+    }
+});
+
 ipcMain.handle('db:get-novels', async () => {
     console.log('[Main] Received db:get-novels');
     try {
@@ -785,6 +812,24 @@ ipcMain.handle('db:upsert-agent-conversation', async (_, conversation: AgentConv
         return await agentConversationStore.upsert(conversation);
     } catch (e) {
         console.error('[Main] db:upsert-agent-conversation failed:', e);
+        throw e;
+    }
+});
+
+ipcMain.handle('db:update-agent-conversation-draft', async (_, payload: { conversationId: string; composerDraft: string }) => {
+    try {
+        return await agentConversationStore.updateComposerDraft(payload.conversationId, payload.composerDraft);
+    } catch (e) {
+        console.error('[Main] db:update-agent-conversation-draft failed:', e);
+        throw e;
+    }
+});
+
+ipcMain.handle('db:acknowledge-agent-conversation-run', async (_, payload: { conversationId: string; runId: string | null }) => {
+    try {
+        return await agentConversationStore.acknowledgeRun(payload.conversationId, payload.runId);
+    } catch (e) {
+        console.error('[Main] db:acknowledge-agent-conversation-run failed:', e);
         throw e;
     }
 });
@@ -1557,16 +1602,6 @@ ipcMain.handle('ai:get-openclaw-manifest', async () => {
     }
 });
 
-ipcMain.handle('ai:get-openclaw-skill-manifest', async () => {
-    try {
-        return aiService.getOpenClawSkillManifest();
-    } catch (e) {
-        logAiIpcError('ai:get-openclaw-skill-manifest', undefined, e);
-        console.error('[Main] ai:get-openclaw-skill-manifest failed:', e);
-        throw e;
-    }
-});
-
 ipcMain.handle('ai:update-settings', async (_, partial: any) => {
     try {
         const updated = aiService.updateSettings(partial || {});
@@ -1609,22 +1644,11 @@ ipcMain.handle('ai:test-openclaw-mcp', async () => {
     }
 });
 
-ipcMain.handle('ai:test-openclaw-skill', async () => {
+ipcMain.handle('ai:test-openclaw-smoke', async () => {
     try {
-        return await aiService.testOpenClawSkill();
+        return await aiService.testOpenClawSmoke();
     } catch (e) {
-        logAiIpcError('ai:test-openclaw-skill', undefined, e);
-        console.error('[Main] ai:test-openclaw-skill failed:', e);
-        throw e;
-    }
-});
-
-ipcMain.handle('ai:test-openclaw-smoke', async (_, payload: { kind?: 'mcp' | 'skill' } | undefined) => {
-    try {
-        const kind = payload?.kind === 'skill' ? 'skill' : 'mcp';
-        return await aiService.testOpenClawSmoke({ kind });
-    } catch (e) {
-        logAiIpcError('ai:test-openclaw-smoke', payload, e);
+        logAiIpcError('ai:test-openclaw-smoke', undefined, e);
         console.error('[Main] ai:test-openclaw-smoke failed:', e);
         throw e;
     }
@@ -1785,6 +1809,18 @@ ipcMain.handle('ai:rebuild-chapter-summary', async (_, payload: { chapterId?: st
     }
 });
 
+ipcMain.handle('ai:rebuild-agent-context-summary', async (_, payload: { storageConversationId?: string }) => {
+    try {
+        const storageConversationId = String(payload?.storageConversationId || '').trim();
+        if (!storageConversationId) throw new Error('storageConversationId is required');
+        return await aiService.rebuildAgentContextSummary(storageConversationId);
+    } catch (e) {
+        logAiIpcError('ai:rebuild-agent-context-summary', payload, e);
+        console.error('[Main] ai:rebuild-agent-context-summary failed:', e);
+        throw e;
+    }
+});
+
 ipcMain.handle('ai:execute-action', async (_, payload: { actionId: string; payload?: unknown }) => {
     try {
         return await aiService.executeAction(payload);
@@ -1816,21 +1852,6 @@ ipcMain.handle('ai:openclaw-mcp-invoke', async (_, payload: { name: string; argu
     } catch (e) {
         logAiIpcError('ai:openclaw-mcp-invoke', payload, e);
         console.error('[Main] ai:openclaw-mcp-invoke failed:', e);
-        const normalized = normalizeAiError(e);
-        return {
-            ok: false,
-            code: normalized.code,
-            error: formatAiErrorForDisplay(normalized.code, normalized.message),
-        };
-    }
-});
-
-ipcMain.handle('ai:openclaw-skill-invoke', async (_, payload: { name: string; input?: unknown }) => {
-    try {
-        return await aiService.invokeOpenClawSkill(payload);
-    } catch (e) {
-        logAiIpcError('ai:openclaw-skill-invoke', payload, e);
-        console.error('[Main] ai:openclaw-skill-invoke failed:', e);
         const normalized = normalizeAiError(e);
         return {
             ok: false,
@@ -1873,7 +1894,6 @@ ipcMain.handle('automation:invoke', async (_, payload: { method: string; params?
             'creative_assets.revise_draft',
             'creative_assets.validate_draft',
             'outline.generate_draft',
-            'chapter.generate_draft',
             'chapter.revise_draft',
             'draft.update',
             'draft.commit',
@@ -1939,19 +1959,41 @@ ipcMain.handle('agent:invoke', async (_, payload: {
     params?: Record<string, unknown>;
     context?: Record<string, unknown>;
     requestId?: string;
+    preserveErrorDetails?: boolean;
 }) => {
-    if (!agentRuntimeClient) {
-        throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
+    try {
+        if (!agentRuntimeClient) {
+            throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
+        }
+        const requestId = String(payload.requestId || '').trim() || randomUUID();
+        const result = await agentRuntimeClient.invoke({
+            requestId,
+            method: payload.method,
+            params: payload.params || {},
+            context: payload.context || {},
+        }, ['agent.chat', 'agent.recover_chat', 'agent.retry_chat_summary'].includes(payload.method) ? (progress) => {
+            win?.webContents.send('agent:chat-progress', { requestId, ...progress });
+        } : undefined);
+        return payload.preserveErrorDetails
+            ? { __agentInvokeResult: true, ok: true, data: result }
+            : result;
+    } catch (error) {
+        if (!payload.preserveErrorDetails) throw error;
+        const structured = error && typeof error === 'object'
+            ? error as { code?: unknown; message?: unknown; details?: unknown }
+            : {};
+        return {
+            __agentInvokeResult: true,
+            ok: false,
+            error: {
+                code: String(structured.code || 'AGENT_RUNTIME_ERROR'),
+                message: String(structured.message || error || 'Agent request failed'),
+                details: structured.details && typeof structured.details === 'object'
+                    ? structured.details
+                    : undefined,
+            },
+        };
     }
-    const requestId = String(payload.requestId || '').trim() || randomUUID();
-    return agentRuntimeClient.invoke({
-        requestId,
-        method: payload.method,
-        params: payload.params || {},
-        context: payload.context || {},
-    }, payload.method === 'agent.chat' ? (progress) => {
-        win?.webContents.send('agent:chat-progress', { requestId, ...progress });
-    } : undefined);
 });
 
 ipcMain.handle('agent:cancel-chat', async (_, payload: { requestId?: string }) => {
@@ -3110,6 +3152,11 @@ app.on('before-quit', () => {
         unsubscribe();
     }
     agentRunSubscriptions.clear();
+    if (automationService) {
+        void automationService.shutdown().catch((error) => {
+            console.error('[Main] Failed to stop automation service:', error);
+        });
+    }
     if (automationServer) {
         void automationServer.stop().catch((error) => {
             console.error('[Main] Failed to stop automation server:', error);
@@ -3157,7 +3204,6 @@ app.whenReady().then(async () => {
             getAutomationRuntimePath,
             isPackaged: app.isPackaged,
         });
-        agentRuntimeClient.prewarm();
     }
 
     if (aiDiagParse.command && app.isPackaged) {
@@ -3271,29 +3317,27 @@ app.whenReady().then(async () => {
     // 4. Initialize Core Database (Re-connect/Use instance)
     initDb(dbUrl);
     try {
+        await db.$queryRawUnsafe('PRAGMA busy_timeout = 5000');
         const schemaApplied = await ensureDbSchema();
         if (schemaApplied) {
             console.log('[Main] Bundled database schema applied successfully.');
         }
         await agentConversationStore.ensureSchema();
         await agentAttachmentStore.ensureSchema();
+        if (!aiDiagParse.command) {
+            const cutover = await applyDurableDraftCutover(app.getPath('userData'), db);
+            if (cutover.applied) {
+                console.log('[Main] Durable draft cutover completed.', cutover);
+            }
+        }
     } catch (error) {
         console.error('[Main] Failed to ensure bundled database schema:', error);
         throw error;
     }
-    aiService = new AiService(() => app.getPath('userData'));
+    aiService = new AiService(() => app.getPath('userData'), agentConversationStore);
     registerRagSummaryIndexRefresh((sourceType, sourceId, reason) => {
         void refreshRagSourceIndex(sourceType, sourceId, reason);
     });
-    automationService = new AutomationService(aiService, () => app.getPath('userData'), agentAttachmentStore);
-    automationServer = new AutomationServer(
-        automationService,
-        () => app.getPath('userData'),
-        (method) => {
-            win?.webContents.send('automation:data-changed', { method });
-        },
-    );
-    await automationServer.start();
 
     if (aiDiagParse.command) {
         try {
@@ -3312,6 +3356,38 @@ app.whenReady().then(async () => {
     // 5. Initialize Search Index
     await searchIndex.initSearchIndex();
     console.log('[Main] Search index initialized');
+
+    automationService = new AutomationService(
+        aiService,
+        () => app.getPath('userData'),
+        agentAttachmentStore,
+        async (event) => {
+            if (!agentRuntimeClient) {
+                throw new Error('Agent runtime client is unavailable');
+            }
+            await agentRuntimeClient.invoke({
+                requestId: `draft-completion:${event.outboxId}`,
+                method: 'agent.operation_completed',
+                params: {
+                    outboxId: event.outboxId,
+                    eventType: event.eventType,
+                    operationId: event.operationId,
+                    ...event.payload,
+                },
+                context: { origin: 'draft-operation-outbox' },
+            });
+        },
+    );
+    await automationService.initialize();
+    automationServer = new AutomationServer(
+        automationService,
+        () => app.getPath('userData'),
+        (method) => {
+            win?.webContents.send('automation:data-changed', { method });
+        },
+    );
+    await automationServer.start();
+    agentRuntimeClient?.prewarm();
 
     // 5.5 Apply AI proxy settings before networked AI calls
     try {

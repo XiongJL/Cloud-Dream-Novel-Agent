@@ -6,6 +6,9 @@ from .schemas import IntentPreflight, IntentRequest
 
 
 _OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("novel.bootstrap", ("新建小说", "创建一本小说", "从零开始写小说", "开一本新书", "novel bootstrap", "new novel")),
+    ("novel.project_initialize", ("初始化小说项目", "根据蓝图创建素材", "生成项目初始化草稿", "initialize novel project")),
+    ("agent_skill.style_extract", ("提炼文风", "抽取文风", "文风 skill", "语言风格 skill", "风格技能包", "style extraction", "writing style skill")),
     ("novel.scope_audit", ("团队综合审计", "多专家审核", "项目全局审计", "团队检查", "团队审计", "综合检查", "scope audit")),
     ("writer.range_revision_plan", ("作者多章节修订计划", "多章节修订建议", "跨章修订计划", "改写顺序", "续写准备度", "writer revision plan")),
     ("editor.range_review", ("多章节编辑审核", "跨章编辑审核", "章节范围审核", "当前卷编辑审核", "整本编辑审核", "editor range review")),
@@ -16,6 +19,7 @@ _OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("plotline.analysis", ("情节线分析", "主线支线", "主线和支线", "伏笔回收", "未回收伏笔", "长期停滞", "剧情线体检", "plotline analysis")),
     ("chapter.context", ("章节上下文", "装配上下文", "上下文包", "assemble chapter context")),
     ("chapter.scope_context", ("多章节上下文", "章节范围", "范围上下文", "cross chapter context")),
+    ("chapter.create", ("新增一章", "新建一章", "创建一章", "写下一章", "新增章节", "新建章节", "create next chapter")),
     ("chapter.sequence_continuation", ("续写多章", "连续写两章", "连续写三章", "续写两章", "续写三章", "写后续几章", "continue multiple chapters")),
     ("chapter.batch_rewrite", ("批量改写章节", "批量改写", "改写多章", "重写多章", "重写选中章节", "batch rewrite")),
     ("chapter.continuation", ("续写", "继续写", "接着写", "往下写", "continue the chapter", "continue writing")),
@@ -25,6 +29,7 @@ _OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _DRAFT_OPERATION_IDS = {
+    "chapter.create",
     "chapter.sequence_continuation",
     "chapter.batch_rewrite",
     "chapter.continuation",
@@ -61,6 +66,24 @@ _CONVERSATION_FIRST_MARKERS = (
     "想知道", "想了解", "有什么区别",
     "discuss first", "just discuss", "do not execute", "don't execute",
     "do not generate", "don't generate", "advice only",
+)
+
+_CHAPTER_COUNT_TOKENS: dict[str, int] = {
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "几": 2,
+    "多": 2,
+}
+_ORDINAL_CHAPTER_REFERENCE = re.compile(
+    r"(?:最后一章|最终一章|倒数第?[一二两三四五1-5]章|第\s*[一二两三四五1-5]\s*章|末章|最终章)"
+)
+_EXPLICIT_CHAPTER_RANGE = re.compile(
+    r"第?\s*[零〇一二两三四五六七八九十百\d]+\s*(?:章)?\s*(?:到|至|—|－|-|~|～)\s*"
+    r"第?\s*[零〇一二两三四五六七八九十百\d]+\s*章"
 )
 
 
@@ -146,16 +169,62 @@ def build_preflight(request: IntentRequest) -> IntentPreflight:
     )
 
 
+def requested_continuation_chapter_count(message: str) -> int | None:
+    """Extract a requested generation count without treating target ordinals as counts."""
+    normalized = _mask_non_requested_draft_language(message.strip().lower())
+    count_source = _ORDINAL_CHAPTER_REFERENCE.sub(" ", normalized)
+    match = re.search(
+        r"(?:续写|继续写|接着写|连续写|往下写|再写|生成)(?:(?!第).){0,10}([1-5一二两三四五几多])\s*(?:个)?章",
+        count_source,
+    )
+    if not match:
+        return None
+    token = match.group(1)
+    return _CHAPTER_COUNT_TOKENS.get(token, int(token) if token.isdigit() else None)
+
+
+def requested_created_chapter_count(message: str) -> int | None:
+    """Extract the number of newly inserted chapters; omitted means one."""
+    normalized = message.strip().lower()
+    match = re.search(
+        r"(?:新增|新建|创建|写下)(?:.{0,6}?)([1-5一二两三四五])\s*(?:个)?章",
+        normalized,
+    )
+    if not match:
+        return 1 if any(marker in normalized for marker in ("新增章节", "新建章节", "创建章节", "写下一章")) else None
+    token = match.group(1)
+    return _CHAPTER_COUNT_TOKENS.get(token, int(token) if token.isdigit() else None)
+
+
 def detect_explicit_operations(message: str) -> list[str]:
     normalized = message.strip().lower()
     actionable_draft_text = _mask_non_requested_draft_language(normalized)
     matches: list[tuple[int, str]] = []
-    multi_chapter_match = re.search(
-        r"(?:续写|继续写|接着写|连续写|往下写).{0,6}(?:[1-5]|一|二|两|三|四|五|几|多)章",
-        actionable_draft_text,
-    )
-    if multi_chapter_match:
-        matches.append((multi_chapter_match.start(), "chapter.sequence_continuation"))
+    requested_count = requested_continuation_chapter_count(actionable_draft_text)
+    if _EXPLICIT_CHAPTER_RANGE.search(actionable_draft_text) and any(
+        marker in actionable_draft_text for marker in ("改写", "重写", "润色", "rewrite")
+    ):
+        rewrite_positions = [
+            actionable_draft_text.find(marker)
+            for marker in ("改写", "重写", "润色", "rewrite")
+            if marker in actionable_draft_text
+        ]
+        matches.append((min(rewrite_positions) if rewrite_positions else 0, "chapter.batch_rewrite"))
+    create_count = requested_created_chapter_count(actionable_draft_text)
+    if create_count is not None:
+        create_positions = [
+            actionable_draft_text.find(marker)
+            for marker in ("新增", "新建", "创建", "写下一", "create")
+            if marker in actionable_draft_text
+        ]
+        matches.append((min(create_positions) if create_positions else 0, "chapter.create"))
+    if requested_count is not None:
+        action_positions = [
+            actionable_draft_text.find(marker)
+            for marker in ("续写", "继续写", "接着写", "连续写", "往下写", "再写", "生成")
+            if marker in actionable_draft_text
+        ]
+        matches.append((min(action_positions) if action_positions else 0, "chapter.sequence_continuation"))
     for operation_id, patterns in _OPERATION_PATTERNS:
         source = actionable_draft_text if operation_id in _DRAFT_OPERATION_IDS else normalized
         positions = [source.find(pattern) for pattern in patterns if pattern in source]

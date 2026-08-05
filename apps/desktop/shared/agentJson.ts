@@ -47,3 +47,30 @@ export function parseFirstJsonObject(text: string): Record<string, unknown> | nu
     }
     return null;
 }
+
+export type RepairableJsonObjectResult = {
+    value: Record<string, unknown>;
+    repaired: boolean;
+};
+
+type JsonRepairer = (text: string) => string;
+
+const MAX_LOCAL_JSON_REPAIR_CHARS = 200_000;
+
+export function parseRepairableJsonObject(
+    text: string,
+    repair: JsonRepairer,
+): RepairableJsonObjectResult | null {
+    const parsed = parseFirstJsonObject(text);
+    if (parsed) return { value: parsed, repaired: false };
+
+    const normalized = String(text || '').trim();
+    if (!normalized || normalized.length > MAX_LOCAL_JSON_REPAIR_CHARS) return null;
+
+    try {
+        const repaired = parseFirstJsonObject(repair(normalized));
+        return repaired ? { value: repaired, repaired: true } : null;
+    } catch {
+        return null;
+    }
+}

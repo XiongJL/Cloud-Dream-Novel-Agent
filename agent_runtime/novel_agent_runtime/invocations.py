@@ -11,6 +11,7 @@ from .schemas import utc_now
 
 InvocationStatus = Literal[
     "prepared",
+    "operation_pending",
     "in_flight",
     "succeeded",
     "failed",
@@ -47,6 +48,34 @@ class SideEffectResultUnknown(RuntimeError):
         )
 
 
+class DraftOperationFailed(RuntimeError):
+    def __init__(self, code: str, message: str, operation_id: str) -> None:
+        self.code = code
+        self.operation_id = operation_id
+        super().__init__(message)
+
+
+class AgentControlFlowSignal(BaseException):
+    """Internal scheduler signal that must bypass business error handlers."""
+
+
+class DraftOperationPending(AgentControlFlowSignal):
+    def __init__(
+        self,
+        operation_id: str,
+        operation_key: str,
+        status: str,
+        version: int,
+        poll_after_seconds: float = 1.0,
+    ) -> None:
+        self.operation_id = operation_id
+        self.operation_key = operation_key
+        self.status = status
+        self.version = version
+        self.poll_after_seconds = poll_after_seconds
+        super().__init__(f"Draft operation {operation_id} is still {status}")
+
+
 def invocation_params_hash(params: dict[str, Any]) -> str:
     encoded = json.dumps(params, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -60,3 +89,16 @@ def build_invocation_key(
 ) -> tuple[str, str]:
     params_hash = invocation_params_hash(params)
     return f"{run_id}:{step_id or 'none'}:{method}:{params_hash[:24]}", params_hash
+
+
+def build_durable_operation_key(
+    plan_id: str,
+    step_id: str | None,
+    method: str,
+    params: dict[str, Any],
+) -> tuple[str, str]:
+    """Build an idempotency key that survives Agent run retries and restarts."""
+    params_hash = invocation_params_hash(params)
+    encoded = f"{plan_id}:{step_id or 'none'}:{method}:{params_hash}"
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return f"draftop_{digest}", params_hash

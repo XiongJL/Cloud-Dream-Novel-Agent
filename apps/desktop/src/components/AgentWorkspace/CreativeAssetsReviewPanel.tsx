@@ -29,6 +29,7 @@ const SECTIONS: Array<{ id: CreativeSection; label: string; singular: string }> 
   { id: 'characters', label: '角色', singular: '角色' },
   { id: 'items', label: '物品与设定', singular: '物品' },
   { id: 'skills', label: '技能', singular: '技能' },
+  { id: 'worldSettings', label: '世界设定', singular: '设定' },
   { id: 'maps', label: '地图与地点', singular: '地图' },
 ];
 
@@ -41,6 +42,8 @@ const FIELD_LABELS: Record<string, string> = {
   color: '颜色',
   imagePrompt: '画面描述',
   imageUrl: '图片地址',
+  content: '内容',
+  icon: '图标',
 };
 
 function normalizeDraft(input: unknown): CreativeAssetsDraft {
@@ -163,7 +166,7 @@ export function CreativeAssetsReviewPanel({
       onArtifactStatusChange(session.draftSessionId, 'committed');
       const created = response.confirmResult.created;
       window.dispatchEvent(new CustomEvent('creative-assets-persisted', { detail: { novelId: session.novelId, created } }));
-      if ((created.characters || 0) + (created.items || 0) + (created.skills || 0) > 0) {
+      if ((created.characters || 0) + (created.items || 0) + (created.skills || 0) + (created.worldSettings || 0) > 0) {
         window.dispatchEvent(new CustomEvent('world-assets-updated', { detail: { novelId: session.novelId } }));
       }
       if ((created.maps || 0) + (created.mapImages || 0) > 0) {

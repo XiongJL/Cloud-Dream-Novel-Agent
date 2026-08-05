@@ -68,6 +68,7 @@ export interface CreativeDraftSelection {
     characters: boolean[];
     items: boolean[];
     skills: boolean[];
+    worldSettings: boolean[];
     maps: boolean[];
 }
 
@@ -97,6 +98,7 @@ export interface DraftSessionRecord {
     origin: AutomationDraftOrigin;
     novelId: string;
     chapterId?: string;
+    sourceOperationId?: string;
     draftBatchId?: string;
     childIndex?: number;
     generationRevision?: number;
@@ -118,6 +120,9 @@ export interface AutomationInvokeContext {
     source: 'renderer' | 'http';
     origin?: AutomationDraftOrigin;
     requestId?: string;
+    parentRequestId?: string;
+    deadlineAt?: string;
+    onProviderActivity?: (kind: 'first_byte' | 'chunk') => void;
     signal?: AbortSignal;
 }
 
@@ -136,6 +141,7 @@ export interface AutomationEnvelope<T = unknown> {
 
 export interface DraftListFilters {
     novelId?: string;
+    sourceOperationId?: string;
     draftBatchId?: string;
     includeBatchChildren?: boolean;
     workspace?: AutomationWorkspace;

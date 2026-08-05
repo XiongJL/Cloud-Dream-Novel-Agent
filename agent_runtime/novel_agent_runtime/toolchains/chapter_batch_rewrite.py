@@ -11,7 +11,7 @@ from .schemas import (
 
 
 def rewrite_scope_context_params(input_data: ChapterBatchRewriteInput) -> dict[str, Any]:
-    return {
+    params = {
         "scopeId": input_data.scopeId,
         "novelId": input_data.novelId,
         "kind": input_data.kind,
@@ -27,6 +27,9 @@ def rewrite_scope_context_params(input_data: ChapterBatchRewriteInput) -> dict[s
         "maxDetailedChapters": 5,
         "maxEstimatedTokens": 120000,
     }
+    # FastMCP validates optional fields when they are present. Sending JSON null
+    # for an optional string is therefore invalid; omit absent values entirely.
+    return {key: value for key, value in params.items() if value is not None}
 
 
 def normalize_rewrite_scope_bundle(value: Any, input_data: ChapterBatchRewriteInput) -> ChapterScopeBundle:

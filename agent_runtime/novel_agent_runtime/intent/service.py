@@ -7,15 +7,26 @@ from .capabilities import match_operation_capability
 from .context import ResolvedIntentReference, resolve_conversation_reference
 from .operations import INTENT_OPERATION_REGISTRY, IntentOperationDefinition
 from .risk import assess_intent_risk
-from .rules import build_preflight, detect_explicit_operations, is_light_conversation, prefers_conversation
+from .targets import extract_style_work_title
+from .rules import (
+    build_preflight,
+    detect_explicit_operations,
+    is_light_conversation,
+    prefers_conversation,
+    requested_continuation_chapter_count,
+)
 from .schemas import (
     IntentDecision,
     IntentDeliverable,
     IntentOperation,
     IntentPreflight,
     IntentRequest,
+    IntentSkillRequest,
     IntentTargetRef,
     SemanticProposal,
+    SemanticUserInputOption,
+    SemanticUserInputQuestion,
+    SemanticUserInputRequest,
     RetryFailedRunAction,
 )
 
@@ -81,14 +92,153 @@ class IntentService:
         payload = {
             "responseContent": str(value.get("responseContent") or value.get("content") or "").strip(),
             "shouldPlan": value.get("shouldPlan") is True,
-            "needsClarification": value.get("needsClarification") is True,
+            "needsClarification": value.get("needsClarification") is True or isinstance(value.get("inputRequest"), dict),
             "requestedOperations": requested_operations,
             "deliverable": deliverable,
             "suggestedRole": value.get("suggestedRole") if value.get("suggestedRole") in ALLOWED_ROLES else None,
             "confidence": value.get("confidence") if isinstance(value.get("confidence"), (int, float)) else 0.5,
             "toolCalls": tool_calls,
+            "inputRequest": value.get("inputRequest") if isinstance(value.get("inputRequest"), dict) else None,
         }
+        if payload["inputRequest"] and not payload["responseContent"]:
+            payload["responseContent"] = str(payload["inputRequest"].get("title") or "需要你确认以下关键方向。").strip()
         return SemanticProposal.model_validate(payload)
+
+    def enrich_semantic(self, request: IntentRequest, semantic: SemanticProposal) -> SemanticProposal:
+        """Attach deterministic product questions when a built-in workflow requires them."""
+        operation_ids = [*(request.entryHint.operationIds if request.entryHint else []), *detect_explicit_operations(request.message)]
+        if request.entryHint and request.entryHint.kind == "novel.bootstrap":
+            operation_ids.insert(0, "novel.bootstrap")
+        # New-novel creation is a product-owned workflow. A model-proposed
+        # one-off question must not replace the required core choices.
+        if "novel.bootstrap" not in operation_ids:
+            return semantic
+        is_zh = request.locale.startswith("zh")
+        questions = [
+            SemanticUserInputQuestion(
+                questionId="genre_concept",
+                header="题材与创意" if is_zh else "Genre and concept",
+                prompt=(
+                    "你想写什么题材？选择一个方向，或在自定义输入里补充独有的核心创意。"
+                    if is_zh else "What genre do you want to write? Choose a direction or add your own core concept."
+                ),
+                options=[
+                    SemanticUserInputOption(
+                        optionId="suspense_mystery",
+                        label="悬疑推理" if is_zh else "Mystery and suspense",
+                        description=(
+                            "围绕谜团、线索、误导与阶段揭示推进，适合强钩子连载。"
+                            if is_zh else "Build around mysteries, clues, misdirection, and staged reveals."
+                        ),
+                    ),
+                    SemanticUserInputOption(
+                        optionId="fantasy_adventure",
+                        label="奇幻玄幻与冒险" if is_zh else "Fantasy and adventure",
+                        description=(
+                            "通过世界规则、成长目标、探索与势力冲突构建长线升级体验。"
+                            if is_zh else "Build a long-form progression through rules, goals, exploration, and factions."
+                        ),
+                    ),
+                    SemanticUserInputOption(
+                        optionId="romance_realism",
+                        label="情感现实与都市关系" if is_zh else "Romance and realism",
+                        description=(
+                            "以人物关系、现实处境与选择代价构成持续张力。"
+                            if is_zh else "Create sustained tension through relationships, real-world pressure, and costly choices."
+                        ),
+                    ),
+                ],
+                recommendedOptionId="suspense_mystery",
+                recommendationReason=(
+                    "谜题和阶段揭示能较早验证第一批章节的钩子与追更动力；科幻、历史、武侠等题材可直接自定义。"
+                    if is_zh else "Mystery and staged reveals validate hooks early; use custom input for sci-fi, historical, wuxia, or another genre."
+                ),
+            ),
+            SemanticUserInputQuestion(
+                questionId="protagonist_setup",
+                header="主角设定" if is_zh else "Protagonist setup",
+                prompt=("你希望故事由怎样的主角结构承载？" if is_zh else "What protagonist structure should carry the story?"),
+                options=[
+                    SemanticUserInputOption(
+                        optionId="single_male_lead",
+                        label="男性主角" if is_zh else "Male lead",
+                        description=(
+                            "围绕一位男性主角的目标、代价与成长建立主要体验线。"
+                            if is_zh else "Center the experience on one male lead's goal, cost, and growth."
+                        ),
+                    ),
+                    SemanticUserInputOption(
+                        optionId="single_female_lead",
+                        label="女性主角" if is_zh else "Female lead",
+                        description=(
+                            "围绕一位女性主角的选择、关系与成长建立主要体验线。"
+                            if is_zh else "Center the experience on one female lead's choices, relationships, and growth."
+                        ),
+                    ),
+                    SemanticUserInputOption(
+                        optionId="dual_or_ensemble",
+                        label="双主角或群像" if is_zh else "Dual leads or ensemble",
+                        description=(
+                            "让两位核心角色或多个视角共同推进，但需要更严格控制出场与信息差。"
+                            if is_zh else "Advance through two core leads or an ensemble with tighter cadence and information control."
+                        ),
+                    ),
+                ],
+                recommendedOptionId="single_male_lead",
+                recommendationReason=(
+                    "先聚焦一位主角，能更快验证人物目标、冲突和首卷钩子；任何性别或群像细节都可自定义。"
+                    if is_zh else "A single lead validates goals, conflict, and opening hooks sooner; customize any gender or ensemble detail."
+                ),
+            ),
+            SemanticUserInputQuestion(
+                questionId="core_conflict",
+                header="核心冲突" if is_zh else "Core conflict",
+                prompt=("什么冲突应当持续迫使主角作出选择？" if is_zh else "What conflict should continually force the protagonist to choose?"),
+                options=[
+                    SemanticUserInputOption(
+                        optionId="truth_and_mystery",
+                        label="查明真相" if is_zh else "Uncover the truth",
+                        description=(
+                            "主角必须识别隐藏事实、辨别敌友，并承担揭示真相的代价。"
+                            if is_zh else "The protagonist uncovers hidden facts, identifies allies, and pays for the truth."
+                        ),
+                    ),
+                    SemanticUserInputOption(
+                        optionId="survival_and_breakthrough",
+                        label="生存危机与成长突破" if is_zh else "Survival and breakthrough",
+                        description=(
+                            "外部压力持续升级，主角必须获得能力、盟友或新的生存方式。"
+                            if is_zh else "Escalating pressure forces the protagonist to gain capability, allies, or a new way to survive."
+                        ),
+                    ),
+                    SemanticUserInputOption(
+                        optionId="relationship_and_power",
+                        label="爱情阻碍与权力争夺" if is_zh else "Relationship and power",
+                        description=(
+                            "亲密关系、身份与资源分配彼此牵制，选择会改变关系格局。"
+                            if is_zh else "Intimacy, identity, and resources constrain each other, so choices reshape relationships."
+                        ),
+                    ),
+                ],
+                recommendedOptionId="truth_and_mystery",
+                recommendationReason=(
+                    "明确的待解问题能稳定组织首卷线索、章节转折与结尾钩子；其他冲突也可自由输入。"
+                    if is_zh else "A clear unanswered question organizes opening clues, turns, and ending hooks; customize any other conflict."
+                ),
+            ),
+        ]
+        return semantic.model_copy(update={
+            "shouldPlan": True,
+            "needsClarification": True,
+            "requestedOperations": list(dict.fromkeys(["novel.bootstrap", *semantic.requestedOperations])),
+            "deliverable": "report",
+            "responseContent": ("先确认题材、主角和核心冲突；每题第一项是当前推荐，你也可以填写自己的方向。" if is_zh else "Confirm genre, protagonist, and core conflict. The first option is recommended, and you may provide a custom direction."),
+            "inputRequest": SemanticUserInputRequest(
+                title="新小说方向确认" if is_zh else "New novel direction",
+                reason=("这些选择会决定故事承诺、人物弧线和首卷冲突结构。" if is_zh else "These choices determine the story promise, character arc, and opening-volume conflict structure."),
+                questions=questions,
+            ),
+        })
 
     def finalize(
         self,
@@ -99,6 +249,18 @@ class IntentService:
         exploration_performed: bool = False,
     ) -> IntentDecision:
         reasons = list(preflight.reasonCodes)
+        requested_skills: list[IntentSkillRequest] = []
+        disabled_skills_for_turn = False
+        if request.entryHint and request.entryHint.kind == "skill.use":
+            requested_skills.append(IntentSkillRequest(
+                skillId=str(request.entryHint.skillId),
+                requestedRevisionId=request.entryHint.requestedRevisionId,
+                selectionSource="shortcut" if request.source == "shortcut" else "explicit",
+            ))
+            reasons.append("EXPLICIT_SKILL_SELECTED")
+        elif request.entryHint and request.entryHint.kind == "skill.none":
+            disabled_skills_for_turn = True
+            reasons.append("SKILLS_DISABLED_FOR_TURN")
         recovery = self.retry_failed_run_action(request)
         if recovery is not None:
             return IntentDecision(
@@ -139,6 +301,8 @@ class IntentService:
                     reasons.append("SEMANTIC_EFFECT_ESCALATION_DROPPED")
                     continue
                 operation_ids.append(operation_id)
+
+        operation_ids = self._normalize_operation_ids(request.message, operation_ids, reasons)
 
         definitions: list[IntentOperationDefinition] = []
         for operation_id in operation_ids:
@@ -195,6 +359,12 @@ class IntentService:
             and (operation.target.id is not None or operation.target.kind == "selection")
             for operation in operations
         )
+        has_unresolved_explicit_chapter_target = any(
+            operation.target.kind in {"chapter", "chapter_scope"}
+            and operation.target.source == "explicit_id"
+            and operation.target.id is None
+            for operation in operations
+        )
 
         if preflight.pendingApprovalNotice:
             route = "respond"
@@ -216,6 +386,16 @@ class IntentService:
             needs_clarification = False
             response = "普通会话不能直接写回正文或提交草稿。请先生成并审核草稿，再在审核中心确认提交。"
             reasons.append("ROUTE_DOWNGRADED_BY_RISK")
+        elif has_unresolved_explicit_chapter_target:
+            route = "respond"
+            needs_clarification = False
+            response = (
+                "我识别到了你指定的章节，但当前无法读取完整章节目录来确定唯一目标。请刷新项目后重试。"
+                if request.locale.startswith("zh")
+                else "I recognized the chapter reference, but the complete chapter catalog is currently unavailable. Refresh the project and try again."
+            )
+            reasons.append("CHAPTER_TARGET_UNRESOLVED")
+            reasons.append("PROJECT_CATALOG_UNAVAILABLE")
         elif is_light_conversation(request.message) and not operations:
             route = "respond"
             needs_clarification = False
@@ -231,7 +411,7 @@ class IntentService:
             needs_clarification = False
             response = semantic.responseContent
             reasons.append("PROJECT_FACT_RESPONSE")
-        elif semantic.needsClarification and current_selection_resolves_read_only_target:
+        elif semantic.needsClarification and current_selection_resolves_read_only_target and semantic.inputRequest is None:
             route = "plan"
             needs_clarification = False
             response = (
@@ -241,7 +421,7 @@ class IntentService:
             )
             reasons.append("CURRENT_SELECTION_RESOLVED")
             reasons.append("TASK_REQUIRES_PLAN")
-        elif semantic.needsClarification:
+        elif semantic.inputRequest is not None or semantic.needsClarification:
             route = "clarify"
             needs_clarification = True
             response = semantic.responseContent
@@ -275,7 +455,45 @@ class IntentService:
             reasonCodes=list(dict.fromkeys(reasons)),
             responseContent=response.strip(),
             explorationPerformed=exploration_performed,
+            requestedSkills=requested_skills,
+            disabledSkillsForTurn=disabled_skills_for_turn,
         )
+
+    @staticmethod
+    def _normalize_operation_ids(
+        message: str,
+        operation_ids: list[str],
+        reasons: list[str],
+    ) -> list[str]:
+        normalized = list(dict.fromkeys(operation_ids))
+        continuation_pair = {"chapter.continuation", "chapter.sequence_continuation"}
+        if continuation_pair.issubset(normalized):
+            if requested_continuation_chapter_count(message) is not None:
+                normalized = [item for item in normalized if item != "chapter.continuation"]
+            else:
+                normalized = [item for item in normalized if item != "chapter.sequence_continuation"]
+            reasons.append("MUTUALLY_EXCLUSIVE_OPERATION_NORMALIZED")
+        if "chapter.create" in normalized:
+            without_conflicting_continuations = [
+                item
+                for item in normalized
+                if item not in {"chapter.continuation", "chapter.sequence_continuation"}
+            ]
+            if len(without_conflicting_continuations) != len(normalized):
+                normalized = without_conflicting_continuations
+                reasons.append("MUTUALLY_EXCLUSIVE_OPERATION_NORMALIZED")
+        if "chapter.batch_rewrite" in normalized and "chapter.rewrite" in normalized:
+            normalized = [item for item in normalized if item != "chapter.rewrite"]
+            reasons.append("MUTUALLY_EXCLUSIVE_OPERATION_NORMALIZED")
+        if "agent_skill.style_extract" in normalized:
+            without_redundant_context = [
+                item for item in normalized
+                if item not in {"chapter.context", "chapter.scope_context"}
+            ]
+            if len(without_redundant_context) != len(normalized):
+                normalized = without_redundant_context
+                reasons.append("STYLE_SOURCE_WORKFLOW_OWNS_CONTEXT")
+        return normalized
 
     @staticmethod
     def _effect_ceiling(request: IntentRequest, explicit: list[str]) -> IntentEffect | None:
@@ -328,8 +546,73 @@ class IntentService:
     @staticmethod
     def _target_for(request: IntentRequest, definition: IntentOperationDefinition) -> IntentTargetRef:
         selection = request.currentSelection
+        requested = request.requestedTarget
+        if definition.id == "agent_skill.style_extract" and extract_style_work_title(request.message):
+            # A quoted title is an explicit source request for this workflow,
+            # not an unresolved title of a chapter in the open novel.
+            return IntentTargetRef(kind="conversation", source="conversation_reference")
+        if (
+            definition.targetKind in {"chapter", "chapter_scope"}
+            and requested
+            and requested.source in {"user_message", "structured_selection"}
+            and not requested.chapterId
+        ):
+            return IntentTargetRef(
+                kind="chapter_scope" if definition.targetKind == "chapter_scope" else "chapter",
+                source="explicit_id",
+                selector=requested.selector,
+            )
+        if (
+            definition.id == "chapter.create"
+            and requested
+            and requested.selector in {"last_in_novel", "last_in_volume", "last_in_current_volume"}
+            and requested.trailingEmptyChapters
+            and requested.lastWritten
+        ):
+            # The semantic model chose "create next chapter" after seeing both
+            # the structural tail and the last written chapter. Anchor creation
+            # on the last written chapter; choosing chapter.continuation keeps
+            # the structural empty chapter as the existing write target.
+            candidate = requested.lastWritten
+            return IntentTargetRef(
+                kind="chapter",
+                source="explicit_id",
+                id=candidate.chapterId,
+                selector="last_written_in_novel",
+                volumeId=candidate.volumeId,
+                title=candidate.title,
+                label=candidate.label,
+                wordCount=candidate.wordCount,
+                hasContent=candidate.hasContent,
+            )
+        if definition.targetKind == "chapter" and requested and requested.chapterId:
+            return IntentTargetRef(
+                kind="chapter",
+                source="explicit_id" if requested.source in {"user_message", "structured_selection"} else "current_selection",
+                id=requested.chapterId,
+                ids=requested.chapterIds,
+                selector=requested.selector,
+                volumeId=requested.volumeId,
+                title=requested.title,
+                label=requested.label,
+                wordCount=requested.wordCount,
+                hasContent=requested.hasContent,
+            )
         if definition.targetKind == "chapter" and selection.chapterId:
             return IntentTargetRef(kind="chapter", source="current_selection", id=selection.chapterId)
+        if definition.targetKind == "chapter_scope" and requested and requested.chapterIds:
+            return IntentTargetRef(
+                kind="chapter_scope",
+                source="explicit_id" if requested.source in {"user_message", "structured_selection"} else "current_selection",
+                id=requested.chapterId,
+                ids=requested.chapterIds,
+                selector=requested.selector,
+                volumeId=requested.volumeId,
+                title=requested.title,
+                label=requested.label,
+                wordCount=requested.wordCount,
+                hasContent=requested.hasContent,
+            )
         if definition.targetKind == "chapter_scope" and selection.chapterId:
             return IntentTargetRef(kind="chapter_scope", source="current_selection", id=selection.chapterId)
         if definition.targetKind == "volume" and selection.volumeId:

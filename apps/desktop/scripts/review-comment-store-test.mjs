@@ -36,7 +36,23 @@ const input = (reviewVersionId, childIndex, body) => ({
 
 try {
     const store = new ReviewCommentStore(() => tempRoot);
-    const first = await store.save(input('draft-1', 0, '加强开场冲突。'));
+    const firstInput = {
+        ...input('draft-1', 0, '加强开场冲突。'),
+        anchor: {
+            kind: 'diff_hunk',
+            targetId: 'draft-1:diff:diff-v2:test',
+            diffVersion: 2,
+            diffHunkId: 'diff-v2:test',
+            oldStartLine: 3,
+            oldEndLine: 3,
+            newStartLine: 3,
+            newEndLine: 4,
+            side: 'both',
+            quote: '第 1 章首段',
+            contentHash: 'hash-0',
+        },
+    };
+    const first = await store.save(firstInput);
     const second = await store.save(input('draft-2', 1, '收紧这一段的节奏。'));
 
     assert.equal((await store.list({ reviewVersionId: 'draft-1' })).length, 1);
@@ -46,14 +62,17 @@ try {
     );
 
     const edited = await store.save({
-        ...input('draft-1', 0, '加强开场冲突，并提前人物目标。'),
+        ...firstInput,
+        body: '加强开场冲突，并提前人物目标。',
         commentId: first.commentId,
     });
     assert.equal(edited.commentId, first.commentId);
     assert.equal(edited.body, '加强开场冲突，并提前人物目标。');
+    assert.equal(edited.anchor.diffVersion, 2);
+    assert.equal(edited.anchor.side, 'both');
 
     await assert.rejects(
-        () => store.save({ ...input('draft-other', 0, '错误版本。'), commentId: first.commentId }),
+        () => store.save({ ...firstInput, reviewVersionId: 'draft-other', body: '错误版本。', commentId: first.commentId }),
         (error) => error?.code === 'VERSION_CONFLICT',
     );
 
@@ -75,6 +94,7 @@ try {
 
     const persisted = JSON.parse(await fs.readFile(path.join(tempRoot, 'automation', 'review-comments.json'), 'utf8'));
     assert.equal(persisted.comments.length, 1);
+    assert.equal(persisted.comments[0].anchor.diffHunkId, 'diff-v2:test');
     console.log('Review comment persistence, version isolation, and batch submission tests passed.');
 } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });

@@ -12,6 +12,22 @@ const output = ts.transpileModule(source, {
 }).outputText;
 const { AgentAttachmentStore } = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 
+let retrySchemaStatements = 0;
+const retryingStore = new AgentAttachmentStore({
+    $executeRawUnsafe: async () => {
+        retrySchemaStatements += 1;
+        if (retrySchemaStatements === 1) throw new Error('schema initialization failed');
+        return 0;
+    },
+});
+const failedInitialization = await Promise.allSettled(
+    Array.from({ length: 8 }, () => retryingStore.ensureSchema()),
+);
+assert.ok(failedInitialization.every((result) => result.status === 'rejected'));
+assert.equal(retrySchemaStatements, 1);
+await retryingStore.ensureSchema();
+assert.equal(retrySchemaStatements, 5);
+
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'novel-editor-attachment-store-'));
 assert.equal(path.dirname(tempRoot), os.tmpdir());
 const dbPath = path.join(tempRoot, 'attachments.db').replaceAll('\\', '/');
@@ -37,8 +53,24 @@ try {
     await client.$executeRawUnsafe("INSERT INTO Novel (id, title) VALUES ('novel-a', 'A'), ('novel-b', 'B')");
     await client.$executeRawUnsafe("INSERT INTO AgentConversation (id, novelId, title, role) VALUES ('conv-a', 'novel-a', 'A', 'team'), ('conv-b', 'novel-b', 'B', 'team')");
 
-    const store = new AgentAttachmentStore(client);
-    await store.ensureSchema();
+    let attachmentSchemaCreates = 0;
+    const instrumentedClient = new Proxy(client, {
+        get(target, property, receiver) {
+            if (property === '$executeRawUnsafe') {
+                return async (...args) => {
+                    if (String(args[0]).includes('CREATE TABLE IF NOT EXISTS AgentAttachment')) {
+                        attachmentSchemaCreates += 1;
+                    }
+                    return target.$executeRawUnsafe(...args);
+                };
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+        },
+    });
+    const store = new AgentAttachmentStore(instrumentedClient);
+    await Promise.all(Array.from({ length: 16 }, () => store.ensureSchema()));
+    assert.equal(attachmentSchemaCreates, 1);
     assert.deepEqual(await store.list('novel-a', 'unpersisted-conversation'), []);
     await assert.rejects(
         store.list('novel-a', 'conv-b'),

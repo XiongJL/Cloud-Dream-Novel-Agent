@@ -83,11 +83,12 @@ class AgentExplorationGraph:
         on_progress: ProgressUpdated | None = None,
         soft_iterations: int = 4,
         soft_tool_calls: int = 8,
-        total_budget_seconds: float = 165,
+        total_budget_seconds: float = 300,
         finalization_reserve_seconds: float = 45,
     ) -> ExplorationState:
         attempt_counts: dict[str, int] = {}
         started_at = time.monotonic()
+        request_deadline = started_at + max(1, total_budget_seconds)
         exploration_deadline = started_at + max(1, total_budget_seconds - finalization_reserve_seconds)
 
         async def progress(phase: str, **details: Any) -> None:
@@ -105,32 +106,19 @@ class AgentExplorationGraph:
             force_finalization = bool(state.get("force_finalization")) or time.monotonic() >= exploration_deadline
             await progress("finalizing" if force_finalization else "thinking", iteration=state["iterations"] + 1)
             call_state = {**state, "force_finalization": force_finalization, "pending_tool_calls": []}
-            timeout = finalization_reserve_seconds if force_finalization else max(1, exploration_deadline - time.monotonic())
+            timeout = max(0.1, request_deadline - time.monotonic())
             try:
                 async with asyncio.timeout(timeout):
                     decision = await model_call(ExplorationState(**call_state))
             except asyncio.TimeoutError:
-                if force_finalization:
-                    decision = {
-                        "content": "已达到本次读取的时间上限。以上结论仅覆盖已成功读取的范围，未读取部分可能仍有遗漏。",
-                        "toolCalls": [],
-                        "shouldPlan": False,
-                        "needsClarification": False,
-                    }
-                else:
-                    await progress("finalizing", reason="time_budget")
-                    force_finalization = True
-                    call_state = {**state, "force_finalization": True, "pending_tool_calls": []}
-                    try:
-                        async with asyncio.timeout(finalization_reserve_seconds):
-                            decision = await model_call(ExplorationState(**call_state))
-                    except asyncio.TimeoutError:
-                        decision = {
-                            "content": "已达到本次读取的时间上限。以上结论仅覆盖已成功读取的范围，未读取部分可能仍有遗漏。",
-                            "toolCalls": [],
-                            "shouldPlan": False,
-                            "needsClarification": False,
-                        }
+                decision = {
+                    "content": "",
+                    "toolCalls": [],
+                    "failureCode": "REQUEST_DEADLINE_EXCEEDED",
+                    "shouldPlan": False,
+                    "needsClarification": False,
+                }
+                force_finalization = True
             if not isinstance(decision, dict):
                 raise ValueError("Agent exploration model returned an invalid decision")
             raw_calls = decision.get("toolCalls")
@@ -212,7 +200,7 @@ class AgentExplorationGraph:
                 selector=args.get("selector"),
             )
             try:
-                async with asyncio.timeout(max(1, exploration_deadline - time.monotonic())):
+                async with asyncio.timeout(max(0.1, request_deadline - time.monotonic())):
                     result = await tool_call(name, args)
                 observation = {"toolName": name, "args": args, "result": result, "ok": True}
                 trace.append({"toolName": name, "status": "completed"})

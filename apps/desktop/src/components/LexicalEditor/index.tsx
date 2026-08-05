@@ -270,7 +270,7 @@ export default function LexicalChapterEditor({
                     indentMode={preferences.indentMode}
                 />
                 <ShortcutsPlugin shortcuts={shortcuts} onSave={onSave} onCreateIdea={onCreateIdea} />
-                <AutoFormatPlugin indentMode={preferences.indentMode} language={language} />
+                <AutoFormatPlugin language={language} />
 
                 <FloatingTextFormatToolbarPlugin onAddIdea={onAddIdea} />
                 <IdeaInteractionPlugin onIdeaClick={onIdeaClick} />

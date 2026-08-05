@@ -12,7 +12,14 @@ from novel_agent_runtime.toolchains.registry import (
 )
 from novel_agent_runtime.toolchains.schemas import ChapterContextInput, ContextBundle, ToolchainBudget, ToolchainError
 from novel_agent_runtime.intent.schemas import IntentDecision, IntentOperation, IntentTargetRef
-from novel_agent_runtime.planner import build_plan_from_model, route_plan_from_intent, validate_plan_effect
+from novel_agent_runtime.planner import (
+    build_plan_from_intent,
+    build_plan_from_model,
+    infer_plan_effect,
+    revise_plan_from_model,
+    route_plan_from_intent,
+    validate_plan_effect,
+)
 
 
 def _definition(**updates: object) -> ToolchainDefinition:
@@ -38,6 +45,9 @@ def test_default_toolchain_registry_exposes_stable_contracts() -> None:
 
     assert set(contracts) == {
         "chapter.context",
+        "novel.bootstrap",
+        "novel.project_initialize",
+        "agent_skill.style_extract",
         "chapter.scope_context",
         "chapter.consistency_review",
         "writer.range_revision_plan",
@@ -54,6 +64,7 @@ def test_default_toolchain_registry_exposes_stable_contracts() -> None:
     }
     assert contracts["chapter.context"]["version"] == "1.0.0"
     assert contracts["chapter.context"]["sideEffect"] == "read_only"
+    assert contracts["chapter.context"]["approvalPolicy"] == "auto_small_scope"
     assert contracts["chapter.scope_context"]["version"] == "1.0.0"
     assert contracts["chapter.scope_context"]["requiredTools"] == ["chapter.scope_context.build", "rag.ask"]
     assert contracts["chapter.consistency_review"]["outputSchema"]["title"] == "ReviewArtifact"
@@ -64,11 +75,13 @@ def test_default_toolchain_registry_exposes_stable_contracts() -> None:
     assert contracts["reader.journey_review"]["outputSchema"]["title"] == "ReaderJourneyArtifact"
     assert contracts["reader.journey_review"]["requiredTools"] == ["chapter.scope_context.build"]
     assert contracts["reader.journey_review"]["budget"]["maxModelCalls"] == 20
+    assert contracts["reader.journey_review"]["approvalPolicy"] == "auto_small_scope"
     assert contracts["worldbuilding.range_consistency"]["outputSchema"]["title"] == "WorldbuildingConsistencyArtifact"
     assert contracts["worldbuilding.range_consistency"]["requiredTools"] == ["chapter.scope_context.build", "rag.ask"]
     assert contracts["research.range_fact_check"]["outputSchema"]["title"] == "ResearchFactCheckArtifact"
     assert contracts["research.range_fact_check"]["requiredTools"] == ["chapter.scope_context.build", "rag.ask", "search.query"]
     assert contracts["research.range_fact_check"]["budget"]["maxModelCalls"] == 2
+    assert contracts["research.range_fact_check"]["approvalPolicy"] == "always"
     assert contracts["novel.scope_audit"]["outputSchema"]["title"] == "ScopeAuditArtifact"
     assert contracts["novel.scope_audit"]["requiredTools"] == [
         "chapter.scope_context.build",
@@ -76,23 +89,38 @@ def test_default_toolchain_registry_exposes_stable_contracts() -> None:
         "search.query",
     ]
     assert contracts["novel.scope_audit"]["budget"]["maxModelCalls"] == 25
+    assert contracts["novel.scope_audit"]["approvalPolicy"] == "always"
     assert contracts["chapter.continuation"]["sideEffect"] == "draft_write"
     assert "chapter.generate_draft" in contracts["chapter.continuation"]["requiredTools"]
     assert contracts["chapter.sequence_continuation"]["outputSchema"]["title"] == "ChapterDraftBatchResult"
     assert "draft.batch.create" in contracts["chapter.sequence_continuation"]["requiredTools"]
-    assert contracts["chapter.sequence_continuation"]["budget"]["maxToolCalls"] == 12
+    assert "draft.batch.update_outline" in contracts["chapter.sequence_continuation"]["requiredTools"]
+    assert contracts["chapter.sequence_continuation"]["budget"]["maxToolCalls"] == 32
     assert contracts["chapter.batch_rewrite"]["outputSchema"]["title"] == "ChapterDraftBatchResult"
     assert "chapter.scope_context.build" in contracts["chapter.batch_rewrite"]["requiredTools"]
     assert "draft.batch.create" in contracts["chapter.batch_rewrite"]["requiredTools"]
+    assert "draft.batch.update_outline" in contracts["chapter.batch_rewrite"]["requiredTools"]
+    assert contracts["chapter.batch_rewrite"]["budget"]["maxToolCalls"] == 32
     assert contracts["creative_asset.draft"]["outputSchema"]["title"] == "DraftToolchainResult"
     assert "creative_assets.validate_draft" in contracts["creative_asset.draft"]["requiredTools"]
+    assert contracts["novel.project_initialize"]["sideEffect"] == "draft_write"
+    assert contracts["novel.project_initialize"]["approvalPolicy"] == "always"
+    assert "creative_assets.generate_draft" in contracts["novel.project_initialize"]["requiredTools"]
     assert contracts["plotline.analysis"]["sideEffect"] == "read_only"
     assert contracts["plotline.analysis"]["outputSchema"]["title"] == "PlotlineAnalysisArtifact"
     assert contracts["plotline.analysis"]["budget"]["maxToolCalls"] == 24
+    assert contracts["plotline.analysis"]["approvalPolicy"] == "always"
     assert {"scope", "batchSize", "maxChapters", "maxEstimatedTokens"}.issubset(
         contracts["plotline.analysis"]["inputSchema"]["properties"]
     )
     assert "chapter.list" in contracts["plotline.analysis"]["requiredTools"]
+
+
+def test_toolchain_planning_contracts_omit_execution_output_schemas() -> None:
+    contracts = {item["id"]: item for item in TOOLCHAIN_REGISTRY.list_for_planning()}
+
+    assert contracts["chapter.context"]["inputSchema"]["type"] == "object"
+    assert "outputSchema" not in contracts["chapter.context"]
 
 
 def test_registry_rejects_duplicates_unknown_permissions_and_writable_tools() -> None:
@@ -107,6 +135,12 @@ def test_registry_rejects_duplicates_unknown_permissions_and_writable_tools() ->
         ToolchainRegistry([_definition(supportedOperations=("missing.operation",))])
     with pytest.raises(ValueError, match="Read-only Toolchain contains writable tools"):
         ToolchainRegistry([_definition(requiredTools=("chapter.generate_draft",))])
+    with pytest.raises(ValueError, match="auto_small_scope approval"):
+        ToolchainRegistry([_definition(
+            sideEffect="draft_write",
+            approvalPolicy="auto_small_scope",
+            requiredTools=("chapter.generate_draft",),
+        )])
 
 
 def test_registry_resolve_returns_stable_errors() -> None:
@@ -118,9 +152,8 @@ def test_registry_resolve_returns_stable_errors() -> None:
         TOOLCHAIN_REGISTRY.resolve("chapter.context", "2.0.0", "editor")
     assert version.value.code == "VERSION_UNAVAILABLE"
 
-    with pytest.raises(ToolchainError) as role:
-        TOOLCHAIN_REGISTRY.resolve("chapter.consistency_review", "1.0.0", "writer")
-    assert role.value.code == "ROLE_NOT_ALLOWED"
+    resolved = TOOLCHAIN_REGISTRY.resolve("chapter.consistency_review", "1.0.0", "writer")
+    assert resolved.id == "chapter.consistency_review"
 
 
 def test_disabled_toolchain_is_hidden_and_capability_matcher_degrades() -> None:
@@ -212,6 +245,107 @@ def test_multi_chapter_intent_routes_requested_count_to_sequence_toolchain() -> 
     assert routed.steps[0].toolchain is not None
     assert routed.steps[0].toolchain.id == "chapter.sequence_continuation"
     assert routed.steps[0].toolchain.input["chapterCount"] == 3
+
+
+def test_create_one_chapter_reuses_sequence_chain_with_one_child() -> None:
+    operation = INTENT_OPERATION_REGISTRY.require("chapter.create")
+    capability = match_operation_capability(operation, "writer")
+    assert capability.toolchainId == "chapter.sequence_continuation"
+    decision = IntentDecision(
+        interaction="task",
+        route="plan",
+        operations=[IntentOperation(
+            type="chapter.create",
+            target=IntentTargetRef(kind="chapter", source="explicit_id", id="chapter-3"),
+            suggestedToolchainId=capability.toolchainId,
+            suggestedToolchainVersion=capability.toolchainVersion,
+            requestedEffect="draft_write",
+            confidence=0.98,
+        )],
+        deliverable="chapter_draft_batch",
+        requestedEffect="draft_write",
+        confidence=0.98,
+        reasonCodes=["MATCHED_TOOLCHAIN"],
+        responseContent="新增一章。",
+    )
+
+    plan = build_plan_from_intent(
+        "在第三章后新增一章",
+        decision,
+        preferred_role="writer",
+        has_chapter=True,
+    )
+
+    assert plan is not None
+    assert len(plan.steps) == 1
+    assert plan.steps[0].title == "新增章节草稿"
+    assert plan.steps[0].toolchain is not None
+    assert plan.steps[0].toolchain.id == "chapter.sequence_continuation"
+    assert plan.steps[0].toolchain.input["chapterCount"] == 1
+
+
+def test_create_multiple_chapters_reuses_sequence_chain_with_requested_count() -> None:
+    capability = match_operation_capability(INTENT_OPERATION_REGISTRY.require("chapter.create"), "writer")
+    decision = IntentDecision(
+        interaction="task",
+        route="plan",
+        operations=[IntentOperation(
+            type="chapter.create",
+            target=IntentTargetRef(kind="chapter", source="explicit_id", id="chapter-3"),
+            suggestedToolchainId=capability.toolchainId,
+            suggestedToolchainVersion=capability.toolchainVersion,
+            requestedEffect="draft_write",
+            confidence=0.98,
+        )],
+        deliverable="chapter_draft_batch",
+        requestedEffect="draft_write",
+        confidence=0.98,
+        responseContent="新增两章。",
+    )
+
+    plan = build_plan_from_intent(
+        "在第三章后新增两章",
+        decision,
+        preferred_role="writer",
+        has_chapter=True,
+    )
+
+    assert plan is not None
+    assert plan.steps[0].toolchain is not None
+    assert plan.steps[0].toolchain.input["chapterCount"] == 2
+
+
+def test_single_chapter_rewrite_uses_one_target_batch_rewrite_chain() -> None:
+    capability = match_operation_capability(INTENT_OPERATION_REGISTRY.require("chapter.rewrite"), "writer")
+    assert capability.toolchainId == "chapter.batch_rewrite"
+    decision = IntentDecision(
+        interaction="task",
+        route="plan",
+        operations=[IntentOperation(
+            type="chapter.rewrite",
+            target=IntentTargetRef(kind="chapter", source="explicit_id", id="chapter-3"),
+            suggestedToolchainId=capability.toolchainId,
+            suggestedToolchainVersion=capability.toolchainVersion,
+            requestedEffect="draft_write",
+            confidence=0.98,
+        )],
+        deliverable="chapter_draft",
+        requestedEffect="draft_write",
+        confidence=0.98,
+        responseContent="改写第三章。",
+    )
+
+    plan = build_plan_from_intent(
+        "改写第三章",
+        decision,
+        preferred_role="writer",
+        has_chapter=True,
+    )
+
+    assert plan is not None
+    assert plan.steps[0].title == "改写章节草稿"
+    assert plan.steps[0].toolchain is not None
+    assert plan.steps[0].toolchain.id == "chapter.batch_rewrite"
 
 
 def test_editor_range_review_intent_routes_to_expert_report_toolchain() -> None:
@@ -479,7 +613,7 @@ def test_read_only_intent_replaces_model_generated_draft_step() -> None:
     assert routed.steps[0].toolchain.id == "chapter.consistency_review"
 
 
-def test_plan_effect_validator_rejects_draft_step_under_read_only_ceiling() -> None:
+def test_plan_effect_uses_actual_reversible_work_instead_of_stale_intent_ceiling() -> None:
     plan = build_plan_from_model(
         "只做分析",
         {
@@ -494,11 +628,48 @@ def test_plan_effect_validator_rejects_draft_step_under_read_only_ceiling() -> N
         "worldbuilding",
     ).model_copy(update={"deliverable": "report", "requestedEffect": "read_only"})
 
-    with pytest.raises(ValueError, match="Plan step exceeds requested effect"):
-        validate_plan_effect(plan)
+    validate_plan_effect(plan)
+    assert infer_plan_effect(plan) == "draft_write"
 
 
-def test_unknown_intent_is_fail_closed_to_read_only_planning() -> None:
+def test_plan_revision_can_upgrade_a_read_only_plan_to_a_reversible_draft() -> None:
+    original = build_plan_from_model(
+        "提炼当前章节的文风",
+        {
+            "title": "文风提炼计划",
+            "deliverable": "report",
+            "steps": [{
+                "agent": "writer",
+                "title": "提炼文风",
+                "tools": ["chapter.get"],
+            }],
+        },
+        "writer",
+    ).model_copy(update={"requestedEffect": "read_only"})
+
+    revised = revise_plan_from_model(
+        original,
+        {
+            "title": "错误升级的十日写作计划",
+            "deliverable": "creative_assets_draft",
+            "steps": [{
+                "stepId": original.steps[0].stepId,
+                "agent": "worldbuilding",
+                "title": "生成十日写作素材",
+                "tools": ["creative_assets.generate_draft"],
+            }],
+        },
+        revision="不是指七夜，而是十日终焉这本小说。",
+    )
+
+    assert revised.deliverable == "creative_assets_draft"
+    assert revised.requestedEffect == "draft_write"
+    assert revised.steps[0].tools == ["creative_assets.generate_draft"]
+    assert revised.goal.endswith("计划修订：不是指七夜，而是十日终焉这本小说。")
+    validate_plan_effect(revised)
+
+
+def test_unknown_intent_is_normalized_to_the_plan_actual_reversible_effect() -> None:
     report_plan = build_plan_from_model(
         "处理一下这个问题",
         {
@@ -530,5 +701,7 @@ def test_unknown_intent_is_fail_closed_to_read_only_planning() -> None:
         },
         "writer",
     )
-    with pytest.raises(ValueError, match="Intent deliverable exceeds requested effect"):
-        route_plan_from_intent(draft_plan, decision, has_chapter=True)
+    routed_draft = route_plan_from_intent(draft_plan, decision, has_chapter=True)
+    assert routed_draft.deliverable == "chapter_draft"
+    assert routed_draft.requestedEffect == "draft_write"
+    validate_plan_effect(routed_draft)

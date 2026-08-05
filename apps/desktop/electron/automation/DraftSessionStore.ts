@@ -1,6 +1,5 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import type { PrismaClientType } from '@novel-editor/core';
 import type {
     ChapterBeat,
     ChapterBeatInput,
@@ -15,6 +14,7 @@ import type {
     NarrativeStateDelta,
 } from '../../shared/draftBatch';
 import type { DraftWritebackRecord } from '../../shared/draftWriteback';
+import type { DraftOperationRecord, DraftOperationResultRef } from '../../shared/draftOperation';
 import type { DraftListFilters, DraftSessionRecord } from './types';
 
 type DraftSessionFileShape = {
@@ -27,9 +27,9 @@ const EMPTY_STORE: DraftSessionFileShape = {
     batches: [],
 };
 
-type DraftSessionCreateInput = Omit<DraftSessionRecord, 'draftSessionId' | 'version' | 'createdAt' | 'updatedAt'>;
+export type DraftSessionCreateInput = Omit<DraftSessionRecord, 'draftSessionId' | 'version' | 'createdAt' | 'updatedAt'>;
 
-type DraftBatchChildProgress = {
+export type DraftBatchChildProgress = {
     title: string;
     coreConflict: string;
     keyEvents: string[];
@@ -38,6 +38,22 @@ type DraftBatchChildProgress = {
     summary: string;
     stateDelta?: NarrativeStateDelta;
 };
+
+export type PreparedChapterDraft =
+    | {
+        kind: 'existing';
+        result: DraftOperationResultRef;
+    }
+    | {
+        kind: 'create';
+        sessionInput: DraftSessionCreateInput;
+        draftBatchId?: string;
+        childIndex?: number;
+        progress?: DraftBatchChildProgress;
+        expectedGenerationRevision?: number;
+    };
+
+type DraftEntityTransaction = Pick<PrismaClientType, '$executeRawUnsafe' | '$queryRawUnsafe'>;
 
 function createStoreError(code: string, message: string): Error & { code: string } {
     return Object.assign(new Error(message), { code });
@@ -216,45 +232,199 @@ function rollbackNarrativeStateLedger(
 }
 
 export class DraftSessionStore {
-    private readonly getUserDataPath: () => string;
+    private readonly database: PrismaClientType;
     private cache: DraftSessionFileShape | null = null;
+    private sqliteSchemaReady: Promise<void> | null = null;
 
-    constructor(getUserDataPath: () => string) {
-        this.getUserDataPath = getUserDataPath;
-    }
-
-    private getStoreDir(): string {
-        return path.join(this.getUserDataPath(), 'automation');
-    }
-
-    private getStorePath(): string {
-        return path.join(this.getStoreDir(), 'draft-sessions.json');
+    constructor(database: PrismaClientType) {
+        this.database = database;
     }
 
     private async ensureLoaded(): Promise<void> {
         if (this.cache) return;
-        const filePath = this.getStorePath();
-        try {
-            const raw = await fs.readFile(filePath, 'utf8');
-            const parsed = JSON.parse(raw) as Partial<DraftSessionFileShape>;
-            this.cache = {
-                sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
-                batches: Array.isArray(parsed.batches) ? parsed.batches : [],
-            };
-        } catch (error: any) {
-            if (error?.code !== 'ENOENT') {
-                throw error;
-            }
-            this.cache = {
-                sessions: [...EMPTY_STORE.sessions],
-                batches: [...EMPTY_STORE.batches],
-            };
+        await this.ensureSqliteSchema();
+        const [sessionRows, batchRows, childRows] = await this.database.$transaction(async (tx) => {
+            const sessions = await tx.$queryRawUnsafe<Array<{ payloadJson: string }>>(
+                'SELECT "payloadJson" FROM "DraftSession" ORDER BY "updatedAt" DESC',
+            );
+            const batches = await tx.$queryRawUnsafe<Array<{ draftBatchId: string; payloadJson: string }>>(
+                'SELECT "draftBatchId", "payloadJson" FROM "DraftBatch" ORDER BY "updatedAt" DESC',
+            );
+            const children = await tx.$queryRawUnsafe<Array<{
+                draftBatchId: string;
+                childIndex: number;
+                payloadJson: string;
+            }>>(
+                'SELECT "draftBatchId", "childIndex", "payloadJson" FROM "DraftBatchChild" ORDER BY "draftBatchId", "childIndex"',
+            );
+            return [sessions, batches, children] as const;
+        });
+        const childrenByBatch = new Map<string, DraftBatchRecord['children']>();
+        for (const row of childRows) {
+            const children = childrenByBatch.get(row.draftBatchId) ?? [];
+            children.push(JSON.parse(row.payloadJson) as DraftBatchRecord['children'][number]);
+            childrenByBatch.set(row.draftBatchId, children);
         }
+        this.cache = {
+            sessions: sessionRows.map((row) => JSON.parse(row.payloadJson) as DraftSessionRecord),
+            batches: batchRows.map((row) => ({
+                ...(JSON.parse(row.payloadJson) as Omit<DraftBatchRecord, 'children'>),
+                children: childrenByBatch.get(row.draftBatchId) ?? [],
+            })),
+        };
     }
 
     private async flush(): Promise<void> {
-        await fs.mkdir(this.getStoreDir(), { recursive: true });
-        await fs.writeFile(this.getStorePath(), JSON.stringify(this.cache ?? EMPTY_STORE, null, 2), 'utf8');
+        await this.ensureSqliteSchema();
+        const snapshot = this.cache ?? EMPTY_STORE;
+        try {
+            await this.database.$transaction(async (tx) => {
+                    // The in-memory mutation API remains unchanged for this phase,
+                    // but persistence is normalized by entity and replaced inside
+                    // one SQLite transaction so readers never observe a half-flush.
+                    await tx.$executeRawUnsafe('DELETE FROM "DraftBatchChild"');
+                    await tx.$executeRawUnsafe('DELETE FROM "DraftBatch"');
+                    await tx.$executeRawUnsafe('DELETE FROM "DraftSession"');
+                    for (const session of snapshot.sessions) {
+                        await tx.$executeRawUnsafe(
+                        `INSERT INTO "DraftSession" (
+                            "draftSessionId", "workspace", "type", "source", "origin", "novelId",
+                            "chapterId", "sourceOperationId", "draftBatchId", "childIndex",
+                            "generationRevision", "status", "payloadJson", "version", "createdAt", "updatedAt"
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        session.draftSessionId,
+                        session.workspace,
+                        session.type,
+                        session.source,
+                        session.origin,
+                        session.novelId,
+                        session.chapterId ?? null,
+                        session.sourceOperationId ?? null,
+                        session.draftBatchId ?? null,
+                        session.childIndex ?? null,
+                        session.generationRevision ?? null,
+                        session.status,
+                        JSON.stringify(session),
+                        session.version,
+                        new Date(session.createdAt),
+                        new Date(session.updatedAt),
+                        );
+                    }
+                    for (const batch of snapshot.batches) {
+                        const { children, ...batchPayload } = batch;
+                        await tx.$executeRawUnsafe(
+                        `INSERT INTO "DraftBatch" (
+                            "draftBatchId", "novelId", "volumeId", "anchorChapterId", "mode", "status",
+                            "payloadJson", "version", "createdAt", "updatedAt"
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                        batch.draftBatchId,
+                        batch.novelId,
+                        batch.volumeId,
+                        batch.anchorChapterId,
+                        batch.mode,
+                        batch.status,
+                        JSON.stringify(batchPayload),
+                        batch.version,
+                        new Date(batch.createdAt),
+                        new Date(batch.updatedAt),
+                        );
+                        for (const child of children) {
+                            await tx.$executeRawUnsafe(
+                            `INSERT INTO "DraftBatchChild" (
+                                "draftBatchId", "childIndex", "status", "generationRevision",
+                                "draftSessionId", "targetChapterId", "payloadJson", "updatedAt"
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                            batch.draftBatchId,
+                            child.childIndex,
+                            child.status,
+                            child.generationRevision,
+                            child.draftSessionId ?? null,
+                            child.targetChapterId ?? null,
+                            JSON.stringify(child),
+                            new Date(batch.updatedAt),
+                            );
+                        }
+                    }
+            });
+        } catch (error) {
+            // A caller may already have mutated the cached object graph.
+            // Reload from the rolled-back database before the next access.
+            this.cache = null;
+            throw error;
+        }
+    }
+
+    private async ensureSqliteSchema(): Promise<void> {
+        if (!this.sqliteSchemaReady) {
+            this.sqliteSchemaReady = this.initializeSqliteSchema().catch((error) => {
+                this.sqliteSchemaReady = null;
+                throw error;
+            });
+        }
+        return this.sqliteSchemaReady;
+    }
+
+    private async initializeSqliteSchema(): Promise<void> {
+        await this.database.$executeRawUnsafe(`
+            CREATE TABLE IF NOT EXISTS "DraftSession" (
+                "draftSessionId" TEXT NOT NULL PRIMARY KEY,
+                "workspace" TEXT NOT NULL,
+                "type" TEXT NOT NULL,
+                "source" TEXT NOT NULL,
+                "origin" TEXT NOT NULL,
+                "novelId" TEXT NOT NULL,
+                "chapterId" TEXT,
+                "sourceOperationId" TEXT,
+                "draftBatchId" TEXT,
+                "childIndex" INTEGER,
+                "generationRevision" INTEGER,
+                "status" TEXT NOT NULL,
+                "payloadJson" TEXT NOT NULL,
+                "version" INTEGER NOT NULL,
+                "createdAt" DATETIME NOT NULL,
+                "updatedAt" DATETIME NOT NULL
+            )
+        `);
+        await this.database.$executeRawUnsafe(`
+            CREATE TABLE IF NOT EXISTS "DraftBatch" (
+                "draftBatchId" TEXT NOT NULL PRIMARY KEY,
+                "novelId" TEXT NOT NULL,
+                "volumeId" TEXT NOT NULL,
+                "anchorChapterId" TEXT NOT NULL,
+                "mode" TEXT NOT NULL,
+                "status" TEXT NOT NULL,
+                "payloadJson" TEXT NOT NULL,
+                "version" INTEGER NOT NULL,
+                "createdAt" DATETIME NOT NULL,
+                "updatedAt" DATETIME NOT NULL
+            )
+        `);
+        await this.database.$executeRawUnsafe(`
+            CREATE TABLE IF NOT EXISTS "DraftBatchChild" (
+                "draftBatchId" TEXT NOT NULL,
+                "childIndex" INTEGER NOT NULL,
+                "status" TEXT NOT NULL,
+                "generationRevision" INTEGER NOT NULL,
+                "draftSessionId" TEXT,
+                "targetChapterId" TEXT,
+                "payloadJson" TEXT NOT NULL,
+                "updatedAt" DATETIME NOT NULL,
+                PRIMARY KEY ("draftBatchId", "childIndex"),
+                CONSTRAINT "DraftBatchChild_draftBatchId_fkey"
+                    FOREIGN KEY ("draftBatchId") REFERENCES "DraftBatch" ("draftBatchId")
+                    ON DELETE CASCADE ON UPDATE CASCADE
+            )
+        `);
+        const statements = [
+            'CREATE UNIQUE INDEX IF NOT EXISTS "DraftSession_sourceOperationId_key" ON "DraftSession"("sourceOperationId")',
+            'CREATE INDEX IF NOT EXISTS "idx_draft_session_novel_status_updated" ON "DraftSession"("novelId", "status", "updatedAt")',
+            'CREATE INDEX IF NOT EXISTS "idx_draft_session_batch_child" ON "DraftSession"("draftBatchId", "childIndex")',
+            'CREATE INDEX IF NOT EXISTS "idx_draft_batch_novel_status_updated" ON "DraftBatch"("novelId", "status", "updatedAt")',
+            'CREATE INDEX IF NOT EXISTS "idx_draft_batch_volume_updated" ON "DraftBatch"("volumeId", "updatedAt")',
+            'CREATE INDEX IF NOT EXISTS "idx_draft_batch_child_session" ON "DraftBatchChild"("draftSessionId")',
+            'CREATE INDEX IF NOT EXISTS "idx_draft_batch_child_status_updated" ON "DraftBatchChild"("status", "updatedAt")',
+        ];
+        for (const statement of statements) await this.database.$executeRawUnsafe(statement);
     }
 
     private createSessionRecord(input: DraftSessionCreateInput): DraftSessionRecord {
@@ -268,11 +438,226 @@ export class DraftSessionStore {
         };
     }
 
+    private async insertSession(
+        tx: DraftEntityTransaction,
+        session: DraftSessionRecord,
+    ): Promise<void> {
+        await tx.$executeRawUnsafe(
+            `INSERT INTO "DraftSession" (
+                "draftSessionId", "workspace", "type", "source", "origin", "novelId",
+                "chapterId", "sourceOperationId", "draftBatchId", "childIndex",
+                "generationRevision", "status", "payloadJson", "version", "createdAt", "updatedAt"
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            session.draftSessionId,
+            session.workspace,
+            session.type,
+            session.source,
+            session.origin,
+            session.novelId,
+            session.chapterId ?? null,
+            session.sourceOperationId ?? null,
+            session.draftBatchId ?? null,
+            session.childIndex ?? null,
+            session.generationRevision ?? null,
+            session.status,
+            JSON.stringify(session),
+            session.version,
+            new Date(session.createdAt),
+            new Date(session.updatedAt),
+        );
+    }
+
+    async persistPreparedChapterDraft(
+        tx: DraftEntityTransaction,
+        operation: DraftOperationRecord,
+        prepared: PreparedChapterDraft,
+    ): Promise<DraftOperationResultRef> {
+        const existingRows = await tx.$queryRawUnsafe<Array<{ payloadJson: string }>>(
+            'SELECT "payloadJson" FROM "DraftSession" WHERE "sourceOperationId" = ? LIMIT 1',
+            operation.operationId,
+        );
+        if (existingRows[0]) {
+            const existing = JSON.parse(existingRows[0].payloadJson) as DraftSessionRecord;
+            if (
+                existing.sourceOperationId !== operation.operationId
+                || (existing.draftBatchId ?? null) !== (operation.draftBatchId ?? null)
+                || (existing.childIndex ?? null) !== (operation.childIndex ?? null)
+                || existing.generationRevision !== operation.generationRevision
+            ) {
+                throw createStoreError(
+                    'IDEMPOTENCY_CONFLICT',
+                    'Draft operation is already attached to another target revision',
+                );
+            }
+            return {
+                draftSessionId: existing.draftSessionId,
+                ...(existing.draftBatchId ? { draftBatchId: existing.draftBatchId } : {}),
+                ...(typeof existing.childIndex === 'number' ? { childIndex: existing.childIndex } : {}),
+                generationRevision: existing.generationRevision ?? operation.generationRevision,
+            };
+        }
+        if (prepared.kind === 'existing') {
+            throw createStoreError('DRAFT_RESULT_NOT_COMMITTED', 'Prepared existing draft result is no longer present');
+        }
+        if (
+            prepared.sessionInput.sourceOperationId !== operation.operationId
+            || prepared.sessionInput.novelId !== operation.novelId
+            || (prepared.draftBatchId ?? null) !== (operation.draftBatchId ?? null)
+            || (prepared.childIndex ?? null) !== (operation.childIndex ?? null)
+            || (prepared.expectedGenerationRevision ?? prepared.sessionInput.generationRevision) !== operation.generationRevision
+        ) {
+            throw createStoreError('DRAFT_RESULT_MISMATCH', 'Prepared draft does not match the operation target revision');
+        }
+
+        if (!prepared.draftBatchId || typeof prepared.childIndex !== 'number') {
+            const session = this.createSessionRecord({
+                ...prepared.sessionInput,
+                sourceOperationId: operation.operationId,
+                generationRevision: operation.generationRevision,
+            });
+            const activeRows = await tx.$queryRawUnsafe<Array<{
+                draftSessionId: string;
+                payloadJson: string;
+                version: number;
+            }>>(
+                `SELECT "draftSessionId", "payloadJson", "version" FROM "DraftSession"
+                 WHERE "draftBatchId" IS NULL AND "novelId" = ? AND "workspace" = ?
+                   AND "type" = ? AND "status" = 'draft'`,
+                session.novelId,
+                session.workspace,
+                session.type,
+            );
+            for (const row of activeRows) {
+                const stale = {
+                    ...(JSON.parse(row.payloadJson) as DraftSessionRecord),
+                    status: 'stale' as const,
+                    version: row.version + 1,
+                    updatedAt: session.createdAt,
+                };
+                await tx.$executeRawUnsafe(
+                    `UPDATE "DraftSession" SET "status" = 'stale', "payloadJson" = ?,
+                     "version" = ?, "updatedAt" = ? WHERE "draftSessionId" = ? AND "version" = ?`,
+                    JSON.stringify(stale),
+                    stale.version,
+                    new Date(stale.updatedAt),
+                    row.draftSessionId,
+                    row.version,
+                );
+            }
+            await this.insertSession(tx, session);
+            return {
+                draftSessionId: session.draftSessionId,
+                generationRevision: operation.generationRevision,
+            };
+        }
+
+        const batchRows = await tx.$queryRawUnsafe<Array<{ payloadJson: string; version: number }>>(
+            'SELECT "payloadJson", "version" FROM "DraftBatch" WHERE "draftBatchId" = ? LIMIT 1',
+            prepared.draftBatchId,
+        );
+        const childRows = await tx.$queryRawUnsafe<Array<{ childIndex: number; payloadJson: string }>>(
+            `SELECT "childIndex", "payloadJson" FROM "DraftBatchChild"
+             WHERE "draftBatchId" = ? ORDER BY "childIndex"`,
+            prepared.draftBatchId,
+        );
+        if (!batchRows[0]) throw createStoreError('NOT_FOUND', 'Draft batch not found');
+        const current: DraftBatchRecord = {
+            ...(JSON.parse(batchRows[0].payloadJson) as Omit<DraftBatchRecord, 'children'>),
+            children: childRows.map((row) => JSON.parse(row.payloadJson) as DraftBatchRecord['children'][number]),
+        };
+        if (!['ready_to_generate', 'generating'].includes(current.status)) {
+            throw createStoreError('INVALID_STATE', 'Draft batch is not ready to generate');
+        }
+        const child = current.children[prepared.childIndex];
+        if (!child || child.childIndex !== prepared.childIndex) {
+            throw createStoreError('NOT_FOUND', 'Draft batch child not found');
+        }
+        if (child.draftSessionId) throw createStoreError('INVALID_STATE', 'Draft batch child already has a draft session');
+        if (child.generationRevision !== operation.generationRevision) {
+            throw createStoreError('VERSION_CONFLICT', 'Draft batch child generation revision conflict');
+        }
+        if (
+            prepared.childIndex > 0
+            && !['draft', 'committed'].includes(current.children[prepared.childIndex - 1]?.status ?? '')
+        ) {
+            throw createStoreError('INVALID_STATE', 'The previous chapter draft must complete first');
+        }
+        const previousSessionId = prepared.childIndex > 0
+            ? current.children[prepared.childIndex - 1]?.draftSessionId
+            : undefined;
+        const session = this.createSessionRecord({
+            ...prepared.sessionInput,
+            novelId: current.novelId,
+            sourceOperationId: operation.operationId,
+            draftBatchId: prepared.draftBatchId,
+            childIndex: prepared.childIndex,
+            generationRevision: child.generationRevision,
+            dependsOnDraftSessionId: previousSessionId,
+            status: 'draft',
+        });
+        const children = current.children.map((item) => item.childIndex === prepared.childIndex
+            ? { ...item, status: 'draft' as const, draftSessionId: session.draftSessionId }
+            : item);
+        const allDraftsReady = children.every((item) => item.status === 'draft' || item.status === 'committed');
+        const updatedBatch: DraftBatchRecord = {
+            ...current,
+            status: allDraftsReady ? 'ready_for_review' : 'generating',
+            children,
+            stateLedger: advanceNarrativeStateLedger(
+                current.stateLedger,
+                prepared.childIndex,
+                session.draftSessionId,
+                prepared.progress,
+                child.generationRevision,
+            ),
+            version: current.version + 1,
+            updatedAt: new Date().toISOString(),
+        };
+        const { children: _children, ...batchPayload } = updatedBatch;
+        await this.insertSession(tx, session);
+        const changedBatch = await tx.$executeRawUnsafe(
+            `UPDATE "DraftBatch" SET "status" = ?, "payloadJson" = ?, "version" = ?, "updatedAt" = ?
+             WHERE "draftBatchId" = ? AND "version" = ?`,
+            updatedBatch.status,
+            JSON.stringify(batchPayload),
+            updatedBatch.version,
+            new Date(updatedBatch.updatedAt),
+            updatedBatch.draftBatchId,
+            batchRows[0].version,
+        );
+        if (changedBatch !== 1) throw createStoreError('VERSION_CONFLICT', 'Draft batch changed concurrently');
+        const updatedChild = children[prepared.childIndex];
+        const changedChild = await tx.$executeRawUnsafe(
+            `UPDATE "DraftBatchChild" SET "status" = ?, "draftSessionId" = ?,
+             "payloadJson" = ?, "updatedAt" = ? WHERE "draftBatchId" = ? AND "childIndex" = ?
+             AND "generationRevision" = ? AND "draftSessionId" IS NULL`,
+            updatedChild.status,
+            updatedChild.draftSessionId ?? null,
+            JSON.stringify(updatedChild),
+            new Date(updatedBatch.updatedAt),
+            updatedBatch.draftBatchId,
+            updatedChild.childIndex,
+            operation.generationRevision,
+        );
+        if (changedChild !== 1) throw createStoreError('VERSION_CONFLICT', 'Draft batch child changed concurrently');
+        return {
+            draftSessionId: session.draftSessionId,
+            draftBatchId: prepared.draftBatchId,
+            childIndex: prepared.childIndex,
+            generationRevision: operation.generationRevision,
+        };
+    }
+
+    invalidateCache(): void {
+        this.cache = null;
+    }
+
     async list(filters?: DraftListFilters): Promise<DraftSessionRecord[]> {
         await this.ensureLoaded();
         return [...(this.cache?.sessions ?? [])]
             .filter((session) => {
                 if (filters?.novelId && session.novelId !== filters.novelId) return false;
+                if (filters?.sourceOperationId && session.sourceOperationId !== filters.sourceOperationId) return false;
                 if (filters?.draftBatchId && session.draftBatchId !== filters.draftBatchId) return false;
                 if (!filters?.draftBatchId && !filters?.includeBatchChildren && session.draftBatchId) return false;
                 if (filters?.workspace && session.workspace !== filters.workspace) return false;
@@ -289,6 +674,11 @@ export class DraftSessionStore {
         return this.cache?.sessions.find((session) => session.draftSessionId === draftSessionId) ?? null;
     }
 
+    async getBySourceOperationId(sourceOperationId: string): Promise<DraftSessionRecord | null> {
+        await this.ensureLoaded();
+        return this.cache?.sessions.find((session) => session.sourceOperationId === sourceOperationId) ?? null;
+    }
+
     async getLatest(filters: Omit<DraftListFilters, 'includeInactive'>): Promise<DraftSessionRecord | null> {
         const sessions = await this.list(filters);
         return sessions[0] ?? null;
@@ -296,6 +686,10 @@ export class DraftSessionStore {
 
     async create(input: DraftSessionCreateInput): Promise<DraftSessionRecord> {
         await this.ensureLoaded();
+        if (input.sourceOperationId) {
+            const existing = this.cache?.sessions.find((session) => session.sourceOperationId === input.sourceOperationId);
+            if (existing) return existing;
+        }
         const session = this.createSessionRecord(input);
         const sessions = this.cache?.sessions ?? [];
         const retained = input.draftBatchId
@@ -528,6 +922,19 @@ export class DraftSessionStore {
         const batchIndex = batches.findIndex((batch) => batch.draftBatchId === draftBatchId);
         if (batchIndex < 0) throw createStoreError('NOT_FOUND', 'Draft batch not found');
         const current = batches[batchIndex];
+        if (input.sourceOperationId) {
+            const existing = this.cache?.sessions.find((session) => session.sourceOperationId === input.sourceOperationId);
+            if (existing) {
+                if (
+                    existing.draftBatchId !== draftBatchId
+                    || existing.childIndex !== childIndex
+                    || existing.generationRevision !== current.children[childIndex]?.generationRevision
+                ) {
+                    throw createStoreError('IDEMPOTENCY_CONFLICT', 'Draft operation is already attached to another batch child revision');
+                }
+                return { batch: current, session: existing };
+            }
+        }
         if (!['ready_to_generate', 'generating'].includes(current.status)) {
             throw createStoreError('INVALID_STATE', 'Draft batch is not ready to generate');
         }

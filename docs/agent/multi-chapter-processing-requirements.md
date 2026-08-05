@@ -2,7 +2,8 @@
 
 版本：v1.0  
 日期：2026-07-17  
-状态：开发中；既有主链与 Renderer 已完成，2026-07-21 起按“对话优先、侧栏按需”修订整个创作者体验  
+状态：开发中；既有主链与 Renderer 已完成，2026-07-29 起补充全局章节顺序与读取委托
+
 适用范围：CloudDream Novel Agent 章节范围、上下文装配、专家 Toolchain、报告审批、草稿批次与审核界面。
 
 ## 1. 背景与定位
@@ -36,12 +37,12 @@ AgentChapterScope
 
 ## 3. V1 边界与默认限制
 
-- 详细逐章分析最多 20 章，默认每批处理 4 章。
-- 超过 20 章自动进入分批摘要模式，必须显示全文覆盖率、摘要覆盖率、未覆盖范围和原因。
+- 详细逐章分析的单批阈值为 20 章，默认每批处理 4 章；这是处理模式和窗口预算，不是读取授权的语义上限。
+- 超过 20 章自动进入分批摘要模式，必须显示全文覆盖率、摘要覆盖率、未覆盖范围和原因；证据不足时可以继续下一批。
 - 写作类任务每批 1 至 5 章，默认 2 章。
 - Renderer 显式范围和结构化入口携带的真实章节 ID 高于模型推断。
-- 模型不得自行把当前章扩大到当前卷或整本小说。
-- 范围增加、选择变化或处理模式变化必须重新审批计划。
+- 未获得用户读取委托时，模型不得自行把当前章扩大到其他章节、当前卷或整本小说；用户明确允许自适应选择后，可以在该只读授权内扩展。
+- 目标范围、写入范围或处理模式变化必须重新审批计划；已授权的自适应上下文读取不因每次 resolved scope 增加而重复审批。
 - V1 不支持整本小说批量改写、自动合并冲突、强制覆盖或无需审核的正文写回。
 - 现有 `chapter.continuation@1.0.0` 保持单章语义；多章新增使用独立 `chapter.sequence_continuation@1.0.0`。
 
@@ -80,6 +81,15 @@ type AgentChapterScope = {
 - “当前章”“这一章”等指代优先解析为 Renderer 当前 SelectionContext。
 - Planner 或模型给出的范围只是建议，Runtime 必须重新校验用户原话、结构化入口和审批结果。
 - 快照中的版本与正文哈希用于报告过期判断、草稿依赖判断和提交冲突检查。
+
+### 4.1 目标范围、读取范围与写入范围
+
+- `AgentChapterScope` 继续表达用户明确选择的目标章节；额外上下文章节以 `target=false` 进入 Bundle。
+- `readAuthorization` 和 `resolvedReadScope` 遵循 [Agent 章节读取范围与委托需求](./chapter-read-scope-delegation-requirements.md)，不得塞进单个 `kind` 字段后丢失授权语义。
+- 章节邻接按整本小说的 `volume.order -> chapter.order` 计算。卷只用于组织和展示，不是相邻读取边界。
+- 明确范围必须全部读取；委托范围可以根据证据缺口自适应扩展，不设置固定同卷或前后 N 章的语义硬上限。
+- `ChapterScopeBundle` 必须区分目标章节和只读上下文章节，并记录全局顺序指纹、选择理由、内容模式与实际 coverage。
+- 只读上下文可以支撑修改计划，但不能自动进入 `writeScope`、批次草稿或正文提交。
 
 ## 5. 共享章节上下文
 
@@ -126,12 +136,14 @@ type ChapterScopeBundle = {
 
 1. 人物、物品、地图、世界观规则和生效情节线。
 2. 小说级摘要、当前卷摘要和长期叙事状态。
-3. 目标章节之前最多 8 章的章节摘要，允许配置，硬上限 20 章。
-4. 目标章节之前最近 2 章全文，允许配置为 1 至 3 章。
+3. 单次模型投影中装配目标章节之前最多 8 章的章节摘要，允许配置，单窗口硬上限 20 章。
+4. 单次模型投影中装配目标章节之前最近 2 章全文，允许配置为 1 至 3 章。
 5. 当前编辑器内容；未保存内容以编辑器缓冲区快照为准。
 6. 用户批准的整批章节节拍和每章交付目标。
 7. 相关人物、伏笔、设定和 RAG 证据。
 8. 当前会话中已经确认的创作要求。
+
+这里的 1 至 3 章全文和最多 20 章摘要都是单次模型投影窗口，不是读取授权或任务总覆盖上限。更早或更多章节可由前序读取批次、带版本摘要和状态台账承接；证据仍不足时继续下一批，并在 Artifact 中保留完整 resolved scope 与 coverage。
 
 每次生成保存 `ContinuationContextSnapshot`，至少记录：
 
@@ -234,7 +246,7 @@ type ChapterScopeBundle = {
 - 全文、摘要覆盖率和可能省略范围。
 - 多章写作的整批节拍。
 
-范围扩大、目标变化、处理模式变化或批次节拍修改都必须重新审批。
+目标范围、写入范围、处理模式或批次节拍变化都必须重新审批。用户已经委托的只读上下文自适应扩展只更新 coverage 和活动记录；超出用户授权语义时才重新询问。
 
 ### 10.2 报告审批
 
@@ -295,6 +307,8 @@ type FindingDecision = {
 - 显示“当前章”“已选 6 章”“第 3–8 章”“当前卷”等状态。
 - 支持章节树复选、连续区间选择和清除。
 - 多选顺序固定为作品顺序，不允许拖动。
+- 显示“用户明确选择”“AI 自适应选择”和“实际已读取”的区别；跨卷邻接章节显示卷名，但不要求用户按卷重新授权。
+- AI 范围选项必须能展开真实章节标题或自适应策略，选择后产生真实正文读取记录，不能只改变 `rag.ask` 提示词。
 
 ### 11.2 执行过程
 
@@ -325,11 +339,132 @@ type FindingDecision = {
 - 小范围可逆草稿以“修改选中项”作为执行授权；跨多章结构调整、主线重排、大段删除或范围不明确时必须额外确认修订方案。
 - 所有正文写回仍必须经过最终草稿或 diff 审核。
 
+#### 11.4.1 批量改写的章节拍检查点与状态可达性
+
+“修改选中项”只免除通用形式化计划审批，不免除多章节正文生成前的章节拍检查点。`chapter.batch_rewrite` 创建 `DraftBatchRecord` 并生成逐章节拍后，必须以 `waiting_approval / chapter_beats` 暂停；该检查点属于同一 `RevisionWorkBatch` 进度，不得显示为另一张普通计划卡。
+
+| Runtime / 批次阶段 | 对话中的稳定状态 | 可执行操作 |
+| --- | --- | --- |
+| 尚未创建 Run 或正在生成章节拍 | `正在准备修订` / `正在生成 N 章节拍` | 展开修订事项；其他写操作禁用 |
+| `waiting_approval / chapter_beats` | `待确认 · N 章节拍`，并明确“正文尚未生成” | 查看节拍、提交调整、确认并生成、取消任务 |
+| `running / waiting_operation` 且批次未完成 | `正在生成正文 · X/N` | 查看生成进度；已有内容只读预览 |
+| 已生成部分子草稿后失败或取消 | `生成未完成 · 已生成 X/N` | 查看已生成内容；由现有进度卡提供续跑或重试 |
+| `ready_for_review` 或存在正式 `chapter_draft_batch` Artifact | `N 章待审核` | 打开批次审核、差异对比和现有审核操作 |
+| `stale / failed / discarded` | 对应只读终态 | 查看已有内容和失败原因，不得把残缺结果表现为正式报告或完整批次 |
+
+- `RevisionWorkBatch` 进度卡从创建到最终草稿就绪始终占据同一位置；章节拍确认卡作为该位置下的当前决策区显示，确认后原地切换为生成进度。
+- `draftBatchId` 一经创建，对话就必须提供唯一的当前批次主卡；可读节拍就绪后显示“查看章节拍”，生成中显示“查看生成进度”，部分完成显示“查看已生成内容”，正式产物就绪后才称为“打开批次审核”。
+- 任何当前 Run 进入 `waiting_approval` 时，对话中必须存在且只能存在一个可提交该 checkpoint 的操作入口。Inspector 折叠、刷新、Runtime 重启或修订批次专用 Renderer 均不得使该入口不可达。
+- Inspector 可以在正文生成前只读预览节拍和子项状态，但确认动作必须留在会话；生成期间打开的详情需要跟随批次状态刷新，不能让用户误判为停止或无产物。
+- 正文是否已经生成必须使用明确文案表达，不能仅通过按钮出现或消失让用户推断。
+
+#### 11.4.2 单一稳定卡片与章节拍历史
+
+##### 11.4.2.1 渲染归属
+
+- 每个 `Run + draftBatchId` 在会话中只能有一个当前批次主卡。该卡在 `DraftBatchRecord` 创建后出现，并持续到批次提交、丢弃或进入不可恢复终态；状态变化只能更新原卡，不得在其下方追加另一张同级“章节拍”“生成详情”或“批次审核”卡。
+- 对 `RevisionWorkBatch`，当前批次主卡属于原位修订进度的当前工作区；对 `chapter.sequence_continuation`，它属于对应 Run 的稳定执行区。两种入口共用相同状态机和文案，不因 Toolchain 来源不同产生两套卡片。
+- `waiting_approval / chapter_beats` 的章节拍检查点必须嵌入当前批次主卡。章节列表摘要、调整输入、唯一的“确认并生成”、取消任务和当前阶段唯一的查看入口都由该卡提供；不得同时渲染独立 `ChapterBeatConfirmationCard` 与独立 `DraftBatchCard`。
+- `draftBatchId`、`operationId`、调用次数和原始错误栈只进入“活动详情”或诊断视图，默认卡片不显示裸 UUID。用户可见标题只描述创作阶段和进度。
+
+##### 11.4.2.2 卡片结构
+
+当前批次主卡固定包含以下区域，未满足显示条件的区域不占位：
+
+1. 状态头：阶段标题、业务状态徽标、折叠按钮，以及当前阶段唯一的查看动作。
+2. 阶段摘要：明确正文是否尚未开始、正在生成、已部分生成或已经可审核。
+3. 当前决策区：仅在存在活动 checkpoint 时显示调整、确认和取消；同一时刻只能绑定最新活动 `checkpointId`。
+4. 业务进度：按章节显示 `待生成 / 排队中 / 生成中 / 已生成 / 失败 / 已过期`，技术调用放入更深一层活动详情。
+5. 节拍记录：默认折叠，保存已替代和已确认的节拍版本入口，不与当前状态争夺主操作层级。
+
+##### 11.4.2.3 阶段、文案与动作
+
+| 归一化 UI 阶段 | 主标题 | 必须显示的摘要 | 唯一主查看动作 | Inspector 模式 |
+| --- | --- | --- | --- | --- |
+| `preparing_outline` | `正在生成 N 章节拍` | `正在准备生成前检查点，正文尚未生成。` | 无；存在可读快照后才出现入口 | 无 |
+| `awaiting_outline` | `章节拍待确认 · N 章` | `正文尚未生成。确认章节拍后才会开始生成正文。` | `查看章节拍` | 指定 revision 的只读快照 |
+| `starting_generation` | `节拍已确认 · 正在启动正文生成` | `已确认节拍 vR，正文任务正在排队。` | `查看生成进度` | 当前批次实时状态 |
+| `generating` 且 `X = 0` | `正在生成正文 · 0/N` | `正文草稿正在生成中。` | `查看生成进度` | 当前批次实时状态 |
+| `generating` 且 `0 < X < N` | `已生成 X/N · 继续生成中` | `已有内容可只读查看，其余章节仍在生成。` | `查看已生成内容` | 当前批次实时状态 |
+| `interrupted` 且 `X = 0` | `章节生成未完成` | 显示失败、取消或需恢复的业务原因，不得暗示已有正文 | `查看失败原因` | 当前批次实时状态与恢复操作 |
+| `interrupted` 且 `X > 0` | `生成未完成 · 已生成 X/N` | `已生成内容仍可查看；后续章节尚未完成。` | `查看已生成内容` | 当前批次实时状态与恢复操作 |
+| `ready_for_review` | `N 章待审核` | `正文草稿已生成，尚未写回正式章节。` | `打开批次审核` | 正式批次审核 |
+| `committed / discarded / stale` | 对应明确终态 | 显示写回、丢弃或过期结果 | 仅提供与终态一致的只读入口 | 对应历史批次 |
+
+- `queued`、`leased`、`running` 和可恢复的 `waiting_operation` 都属于启动中或生成中，不得仅因 Run 暂时没有新事件就归类为 `interrupted` 或显示“多章节生成未完成”。
+- `interrupted` 只能由持久批次或 Operation 的失败、取消、对账阻断等终态事实推导；Renderer 不得只用 `Run.status in completed/failed/cancelled` 且没有 Artifact 这一条件猜测批次失败。
+- 确认请求被持久接受后，原卡立即退出可提交态并进入 `starting_generation`；不得继续展示可点击的“确认并生成”，也不得等待首个正文事件后才切换文案。
+- 主查看动作在任一阶段只能出现一次。卡片头、决策区和卡片底部不得重复提供指向同一对象的“查看节拍 / 查看章节拍”。
+
+##### 11.4.2.4 节拍版本与历史回看
+
+- 当前待确认 revision 是唯一可调整和确认的版本。提交调整后，原卡保持位置不变，新 revision 替换当前决策区，旧 revision 移入折叠的“节拍记录”。
+- “节拍记录”按 revision 倒序显示 `vR · 已确认 / 已替代 / 调整已提交`。历史版本只能使用“查看 vR 节拍”打开只读快照，不提供确认、再次提交或写回动作。
+- 确认后，`已确认节拍 vR` 作为当前主卡的次级元数据保留；其查看入口收在“节拍记录”内，不继续保留一张同级“确认 N 章节拍 · 已确认”大卡片。
+- 历史快照以 `runId + checkpointId + draftBatchId + outlineRevision` 标识，显示该 checkpoint 发布时的不可变节拍。若标识与批次当前 revision 不一致，必须按历史版本展示，不得静默替换成最新节拍。
+- 当前待确认节拍以活动 approval payload 为提交边界，同时校验 `draftBatchId` 和 `outlineRevision`；批次实时读取只用于生成进度和草稿状态，不得在用户确认前悄悄改变屏幕上的待确认内容。
+
+##### 11.4.2.5 Inspector 选择与标题
+
+Inspector 的审核选择必须使用互斥模式，不得依赖“是否恰好存在 beatPreview”之类的隐式优先级：
+
+| 选择模式 | 数据源 | Inspector 标题 | 刷新行为 |
+| --- | --- | --- | --- |
+| `chapter_beat_snapshot` | 指定 checkpoint 的节拍快照 | `章节节拍预览 · vR` | 不轮询；始终保持所选 revision |
+| `draft_batch_progress`，尚无正文 | 当前 `DraftBatchRecord` 与 Operation 状态 | `章节生成进度` | 订阅事件并轮询恢复，直到离开活动状态 |
+| `draft_batch_progress`，已有部分正文 | 当前批次及已生成子草稿 | `已生成内容 · X/N` | 实时刷新，不允许编辑或提交残缺批次 |
+| `draft_batch_interrupted` | 当前批次、Operation 和失败/对账信息 | `章节生成未完成` | 提供与状态匹配的恢复或重试入口 |
+| `draft_batch_review` | 正式 `chapter_draft_batch` Artifact 与 DraftSession | `多章节草稿审核` | 使用既有审核和版本冲突规则 |
+
+- Inspector 外壳只显示一次当前模式标题；内容区不得再次重复同名主标题。内容区可以显示版本、批次状态和章节计数等次级信息。
+- 节拍快照始终只读，并明确“确认和调整请在会话中完成”。实时生成视图不得出现章节拍确认按钮。
+- 点击历史节拍不会改变当前批次状态，也不会停止实时任务；关闭 Inspector 后，会话主卡仍保持当前阶段。用户再次点击主卡动作时，应切回当前批次实时模式。
+- 打开、关闭、折叠或刷新 Inspector 均不得自动提交 checkpoint、丢失未提交的调整文字或自动展开 Inspector。窄窗口沿用覆盖抽屉，不增加新的一级页面。
+
+##### 11.4.2.6 恢复与一致性
+
+- 刷新或 Runtime 重启后，Renderer 必须根据活动 `pendingApproval`、最新 checkpoint、`DraftBatchRecord`、子草稿和持久 Operation 状态重建同一张主卡，不依赖组件内临时状态判断阶段。
+- 多个重复的 `approval_required` 或恢复事件按 `checkpointId + outlineRevision` 去重；任何时刻只允许最新活动 checkpoint 进入当前决策区，其余版本进入“节拍记录”。
+- 批次实时状态优先于会话事件数量推导的 `X/N`；事件流只用于活动展示，不能把重放的 `draft_created` 重复计数。
+- 若 checkpoint 可提交但批次暂时读取失败，确认入口仍按持久 checkpoint 保持可达，预览区显示可恢复错误；不得因为 Inspector 或批次读取失败隐藏唯一确认入口。
+
+##### 11.4.2.7 Renderer 投影契约
+
+Renderer 应通过一个无副作用投影统一生成当前主卡，例如 `projectDraftBatchConversationState`，输出至少包含：
+
+```ts
+type DraftBatchConversationState = {
+  stableKey: string; // runId + draftBatchId
+  stage: 'preparing_outline' | 'awaiting_outline' | 'starting_generation'
+    | 'generating' | 'interrupted' | 'ready_for_review'
+    | 'committed' | 'discarded' | 'stale';
+  generatedCount: number;
+  totalCount: number;
+  activeCheckpoint: ChapterBeatCheckpointSnapshot | null;
+  beatHistory: ChapterBeatCheckpointSnapshot[];
+  primaryView: 'none' | 'chapter_beat_snapshot' | 'draft_batch_progress'
+    | 'draft_batch_interrupted' | 'draft_batch_review';
+};
+```
+
+投影按以下事实优先级决策，排在前面的已成立事实不得被后面的弱信号覆盖：
+
+1. 正式 `chapter_draft_batch` Artifact 或批次 `ready_for_review / committed` 状态。
+2. 持久 `DraftBatchRecord` 状态、子项状态和有效 DraftSession。
+3. 持久 Operation 的 `queued / leased / running / succeeded / failed / cancelled / reconciliation_required` 状态。
+4. 当前 `pendingApproval` 与最新章节拍 checkpoint。
+5. Run 事件和 Run 顶层状态，仅用于补充活动说明与无批次记录时的降级。
+
+- `generatedCount` 按批次中已绑定有效 DraftSession 的唯一 `childIndex` 计算，不能直接统计 `draft_created` 事件数；`totalCount` 使用批次 children 数，批次暂不可读时才退化为当前节拍数。
+- `activeCheckpoint` 仅在它与当前 Run 的 `pendingApproval.checkpointId` 一致时非空。其余章节拍 checkpoint 去重后进入 `beatHistory`，已确认版本也不能作为第二个根级时间线卡片返回。
+- `stableKey` 在同一批次全生命周期内不得随 stage、revision 或 Operation attempt 改变，以保证原位更新、折叠状态和滚动锚点稳定。
+- Inspector 选择使用显式判别联合：节拍快照必须携带 `runId + checkpointId + draftBatchId + outlineRevision + beats`；实时模式只携带 `runId + draftBatchId + mode` 并从持久批次读取。打开任一模式时必须整体替换旧选择，不能同时保留快照和实时选择再靠渲染顺序决定标题。
+
 ### 11.5 可逆草稿与低打扰执行
 
 - DraftSession 继续保存原文、草稿、来源版本和批次快照；默认审核视图改为修改摘要与逐处高亮 diff，完整左右对照按需切换。
 - 单章写回补齐与多章批次一致的版本/内容哈希冲突保护；写回后提供带版本校验的一次操作级撤销。
-- 一次审核到修订只在对话保留综合报告卡、原位修订进度和最终草稿卡，`draft_created` 不自动展开 Inspector。
+- 一次审核到修订只在对话保留综合报告卡、原位修订进度和最终草稿卡；章节拍确认与生成状态属于原位修订进度的子状态，不增加普通计划卡，`draft_created` 不自动展开 Inspector。
 - 专注执行可以自动读取、分析和生成固定范围的可逆草稿，并合并必要确认；正文写回、版本冲突和未知副作用对账仍为硬阻断。
 - 智能视角后续复用 IntentService `suggestedRole` 和 Capability Matcher，不增加独立分类调用，也不阻塞本节其他改造。
 
@@ -398,8 +533,11 @@ type FindingDecision = {
 
 - 覆盖当前章、多选、区间、卷、全书和非连续章节。
 - 验证模型不能越权扩大 Renderer 指定范围。
-- 20 章以内逐章有结果；超过 20 章显示完整覆盖统计。
-- 验证最近 2 章使用全文，更早章节使用摘要。
+- 验证当前卷卷首的“上一章”解析为上一卷卷尾，卷重排后旧顺序指纹失效。
+- 验证用户读取委托允许跨卷自适应扩展，且不会扩大草稿或写回目标。
+- 验证用户自定义范围覆盖 AI 推荐选项，并在内容选项或计划生成前完成正文读取。
+- 单批 20 章以内逐章有结果；超过单批阈值时显示完整覆盖统计并可继续后续批次。
+- 验证单次模型投影中最近 2 章使用全文、更早章节使用摘要，但实际读取 coverage 不被该投影窗口截断。
 - 验证未保存编辑内容进入上下文快照。
 - 验证过期摘要不会被静默使用。
 - 验证综合协作视角只读取一次基础 Bundle。
@@ -417,6 +555,10 @@ type FindingDecision = {
 ### 14.3 多章草稿
 
 - 验证整批节拍审批和固定 revision。
+- 验证一个 `Run + draftBatchId` 只投影一张稳定主卡；活动章节拍 checkpoint 嵌入该卡，确认前不存在第二张批次卡或第二个当前节拍查看入口。
+- 验证节拍调整只替换当前决策区，旧 revision 进入卡内历史；确认后原卡立即进入启动或生成阶段，已确认 revision 不形成同级大卡。
+- 验证 Inspector 的节拍快照与批次实时模式互斥，标题、revision、轮询行为和数据源不会串用。
+- 验证 `generatedCount` 来自批次唯一子项和有效 DraftSession，重复 `draft_created` 事件不会重复计数。
 - 验证每生成一章都会更新摘要和状态台账，并影响下一章。
 - 验证顺序生成、部分失败、继续生成和前缀提交。
 - 验证一次发送会包含分布在多个章节上的全部审批意见；“仅重写有意见的章节”会保留其他草稿并统一执行连续性复核，通过时不传播过期，发现跨章冲突时只传播到受影响后续章。
@@ -427,16 +569,18 @@ type FindingDecision = {
 ### 14.4 恢复与回归
 
 - 覆盖取消、Runtime 重启、SSE 重放、部分失败和调用账本对账。
+- 覆盖 Operation 停留在 `queued / leased / running / waiting_operation` 后刷新和重放，确认仍恢复为启动中或生成中，不会仅凭 Run 顶层终态误报“生成未完成”。
+- 覆盖 checkpoint 可提交但 DraftBatch 临时读取失败，确认唯一提交入口仍可达，恢复读取后仍是同一稳定卡片。
 - 验证桌面与窄窗口下的范围选择、专家切换、章节矩阵和审核操作。
 - 现有单章续写、一致性审核、情节线分析和创作素材草稿不得回归。
 
 ## 15. 已确认默认决策
 
 - V1 覆盖团队、作者、编辑、读者、世界观和考据。
-- 详细逐章处理最多 20 章，默认批次 4 章。
+- 详细逐章处理单批阈值为 20 章，默认批次 4 章；自适应读取可以继续分批，不以 20 章作为授权上限。
 - 多章写作默认 2 章，最多 5 章。
-- 最近全文窗口默认 2 章，可配置为 1 至 3 章。
-- 前文章节摘要默认 8 章，硬上限 20 章。
+- 单次模型投影的最近全文窗口默认 2 章，可配置为 1 至 3 章；不构成读取授权上限。
+- 单次模型投影的前文章节摘要默认 8 章，单窗口硬上限 20 章；任务可通过后续批次继续覆盖。
 - 综合协作视角采用共享读取、专家并行、Supervisor 汇总。
 - 读者采用严格顺序盲读。
 - 多章节流程包含计划、报告和草稿三层审批。
@@ -532,7 +676,7 @@ type FindingDecision = {
 
 - 新增稳定 Intent Operation 与 Toolchain `editor.range_review@1.0.0`，默认产物为 `expert_report`，只允许编辑或团队角色调用。
 - 审核链复用 `chapter.scope_context.build + rag.ask` 共享读取，只装配一次已批准范围，再执行一次编辑模型综合；不调用草稿或正文写入能力。
-- 支持当前章、选择章节、章节区间、当前卷和整本小说，沿用详细处理最多 20 章、超限分批摘要、覆盖率和来源快照契约。
+- 支持当前章、选择章节、章节区间、当前卷和整本小说；当前实现以 20 章作为单批详细处理阈值，超限使用分批摘要、覆盖率和来源快照契约，不把阈值作为读取授权上限。
 - 结构化审核覆盖结构、节奏、人物动机、文字质量和跨章连续性，发布 `chapter_range_review` Artifact，并在 `metadata.expertReport` 中保存可逐条审批的 finding。
 - Runtime 发布前校验 finding 的目标章节和 evidence 来源；模型返回的越权章节、伪造 ID 或无法核验的证据会被移除并写入 warning。
 - Intent Target 新增 `chapter_scope`，当前章节选择可以作为范围锚点；显式“多章节编辑审核”优先路由到范围链，不再退化为单章一致性审核。
@@ -545,7 +689,7 @@ type FindingDecision = {
 - 每次模型请求只包含当前章正文/摘要和前一章产出的有界 `readerStateSummary`，不携带任务原文、未来章节、人物卡、世界观后台、情节线、RAG 证据或其他专家结论。
 - 逐章输出理解度、情绪强度、悬念、追更动力、弃读风险、困惑点、出戏点、有效钩子和后续期待；Runtime 确定性汇总为 `reader_journey` Artifact。
 - 每个 finding 在发布前强制收敛到当前章；模型返回的未来章节 ID、非当前章 evidence 和越权引用会被移除并记录 warning。
-- 详细处理最多 20 章，对摘要或摘录章节仍可评估但会显示可信度警告；报告保存完整范围快照、覆盖率、逐章状态和可审批 finding。
+- 当前实现单批详细处理最多 20 章，对摘要或摘录章节仍可评估但会显示可信度警告；报告保存完整范围快照、覆盖率、逐章状态和可审批 finding，后续批次可以继续扩展实际覆盖。
 - 自动化使用未来章节专属关键词验证前序请求零泄漏，并覆盖严格调用顺序、读者状态滚动、后台知识隔离、无 RAG、无草稿与无正文写入；本增量不包含专用 Reader Renderer。
 
 已完成第十增量（世界观多章节一致性审核）：
@@ -635,6 +779,14 @@ type FindingDecision = {
 - `DraftBatchRecord.mode=batch_rewrite` 固定目标顺序与每章 `version + contentHash` 快照；Electron Store 即使绕过 Runtime 也会拒绝重复目标、目标数量不匹配和缺失快照。
 - 批次审核复用现有宽幅原文/草稿对照、逐章编辑、连续前缀提交和整批丢弃；事务提交前校验未提交目标快照，任一冲突整次零写入，不自动合并或强制覆盖。
 - 改写批次支持从首个失败/过期章节重新生成，保留可审核前缀和原节拍；恢复前重新读取范围并核对原快照，未知副作用仍必须先人工对账。
+
+已完成第十九增量（章节拍与批次单一稳定主卡）：
+
+- `chapter.batch_rewrite` 与 `chapter.sequence_continuation` 共用 `projectDraftBatchConversationState`，按 Artifact、持久批次、Operation、checkpoint 和 Run 降级信号投影同一张批次主卡；生成数只按绑定有效 DraftSession 的唯一子项计算。
+- 会话不再并列渲染章节拍确认卡和批次状态卡。确认、调整、取消、生成进度、部分失败、审核入口、修订建议、活动详情和折叠节拍历史均在 `DraftBatchProgressCard` 原位更新，默认界面不显示裸 `draftBatchId`。
+- 批次摘要通过现有 `draft.batch.get` 缓存；活动批次每 1.5 秒刷新，Run/SSE 与 Operation version 变化时立即重读，Inspector 的实时读取结果同步回主卡。批次读取暂时失败不影响 checkpoint 确认入口恢复。
+- Inspector 改为 `chapter_beat_snapshot / draft_batch_progress / draft_batch_interrupted / draft_batch_review` 显式互斥选择；历史快照固定 revision 且不轮询，生成中内容只读，完整审核仅在批次进入审核模式后开放。
+- 已新增纯投影和 Renderer 契约测试，覆盖排队与生成、部分结果、失败/取消/对账、终态、重复 checkpoint、稳定 key、单查看动作、无裸 UUID、标题矩阵和实时只读边界。
 
 仍待实现：
 

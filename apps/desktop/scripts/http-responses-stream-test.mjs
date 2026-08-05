@@ -34,11 +34,15 @@ const response = streamResponse([
     }),
     'data: [DONE]\n\n',
 ]);
-const result = await consumeResponsesStream(response);
+let activityCount = 0;
+const result = await consumeResponsesStream(response, {
+    onActivity: () => { activityCount += 1; },
+});
 assert.equal(result.text, '{"summary":"完成"}');
 assert.equal(result.model, 'gpt-test');
 assert.equal(result.responseId, 'resp_1');
 assert.equal(result.eventCount, 4);
+assert.equal(activityCount, 5);
 
 const completedOnly = await consumeResponsesStream(streamResponse([
     eventData({

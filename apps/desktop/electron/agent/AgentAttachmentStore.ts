@@ -183,9 +183,21 @@ function toRecord(row: AttachmentRow): AgentAttachmentRecord {
 }
 
 export class AgentAttachmentStore {
+    private schemaReady: Promise<void> | null = null;
+
     constructor(private readonly db: PrismaClientType) {}
 
     async ensureSchema(): Promise<void> {
+        if (!this.schemaReady) {
+            this.schemaReady = this.initializeSchema().catch((error) => {
+                this.schemaReady = null;
+                throw error;
+            });
+        }
+        return this.schemaReady;
+    }
+
+    private async initializeSchema(): Promise<void> {
         await this.db.$executeRawUnsafe(`
             CREATE TABLE IF NOT EXISTS AgentAttachment (
                 id TEXT PRIMARY KEY, novelId TEXT NOT NULL, conversationId TEXT NOT NULL,

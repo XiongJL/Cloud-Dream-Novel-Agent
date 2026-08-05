@@ -58,6 +58,24 @@ export interface ExpertReportPayload {
     generatedAt: string;
 }
 
+export function normalizeExpertReportFindingIds(report: ExpertReportPayload): ExpertReportPayload {
+    const seen = new Set<string>();
+    const findings = report.findings.map((finding, index) => {
+        const baseId = finding.findingId.trim() || `finding-auto-${index + 1}`;
+        let findingId = baseId;
+        let suffix = 2;
+        while (seen.has(findingId)) {
+            findingId = `${baseId}__${suffix}`;
+            suffix += 1;
+        }
+        seen.add(findingId);
+        return findingId === finding.findingId ? finding : { ...finding, findingId };
+    });
+    return findings.every((finding, index) => finding === report.findings[index])
+        ? report
+        : { ...report, findings };
+}
+
 export interface FindingDecision {
     findingId: string;
     status: FindingDecisionStatus;

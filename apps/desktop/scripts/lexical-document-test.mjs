@@ -11,6 +11,8 @@ const {
     createLexicalDocumentFromPlainText,
     ensureLexicalDocument,
     extractReadableText,
+    normalizeChapterDraftText,
+    restoreReadableTextStructure,
 } = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 
 const lexical = JSON.stringify({
@@ -25,6 +27,8 @@ const lexical = JSON.stringify({
 });
 
 assert.equal(extractReadableText(lexical), '第一段。\n第二段。');
+assert.equal(restoreReadableTextStructure('第一段。 第二段。', lexical), '第一段。\n第二段。');
+assert.equal(restoreReadableTextStructure('第一段已修改。 第二段。', lexical), '第一段已修改。 第二段。');
 assert.equal(extractReadableText(`${lexical}旧的尾部正文。`), '第一段。\n第二段。\n\n旧的尾部正文。');
 
 const appended = appendPlainTextToLexical(`${lexical}旧的尾部正文。`, '新增第一段。\n\n新增第二段。');
@@ -38,5 +42,17 @@ const created = createLexicalDocumentFromPlainText('新章第一段。\n\n新章
 assert.equal(extractReadableText(created), '新章第一段。\n新章第二段。');
 assert.equal(extractReadableText(ensureLexicalDocument('待规范化纯文本。')), '待规范化纯文本。');
 assert.equal(ensureLexicalDocument(created), created);
+assert.equal(
+    normalizeChapterDraftText('第一章 雨夜来电\n\n雨下了一整夜。', '雨夜来电'),
+    '雨下了一整夜。',
+);
+assert.equal(
+    normalizeChapterDraftText('第一章 雨夜来电\n\n雨下了一整夜。', '第一章 雨夜来电'),
+    '雨下了一整夜。',
+);
+assert.equal(
+    normalizeChapterDraftText('雨下了一整夜。', '雨夜来电'),
+    '雨下了一整夜。',
+);
 
 console.log('Lexical document parsing and append tests passed.');

@@ -45,7 +45,9 @@ export class AutomationServer {
             'creative_assets.revise_draft',
             'creative_assets.validate_draft',
             'outline.generate_draft',
-            'chapter.generate_draft',
+            'chapter.draft.start',
+            'chapter.draft.cancel',
+            'chapter.draft.retry',
             'chapter.revise_draft',
             'draft.update',
             'draft.commit',
@@ -168,6 +170,8 @@ export class AutomationServer {
                             source: 'http',
                             origin: payload.origin ?? 'mcp-bridge',
                             requestId,
+                            parentRequestId: typeof payload.parentRequestId === 'string' ? payload.parentRequestId : undefined,
+                            deadlineAt: typeof payload.deadlineAt === 'string' ? payload.deadlineAt : undefined,
                             signal: controller.signal,
                         });
                     } finally {
@@ -233,6 +237,7 @@ export class AutomationServer {
     }
 
     async stop(): Promise<void> {
+        await this.automationService.shutdown();
         for (const controller of this.activeRequests.values()) {
             controller.abort(new Error('Automation server stopped'));
         }

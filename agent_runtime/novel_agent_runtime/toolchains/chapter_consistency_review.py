@@ -5,13 +5,22 @@ from typing import Any
 from .schemas import ContextBundle, ReviewArtifact, ReviewIssue
 
 
-def review_request(goal: str, locale: str, context: ContextBundle, dimensions: list[str]) -> dict[str, Any]:
-    return {
+def review_request(
+    goal: str,
+    locale: str,
+    context: ContextBundle,
+    dimensions: list[str],
+    agent_skill: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request = {
         "goal": goal,
         "locale": locale,
         "dimensions": dimensions,
         "contextBundle": context.model_dump(),
     }
+    if agent_skill:
+        request["agentSkill"] = agent_skill
+    return request
 
 
 def normalize_review(value: Any, context: ContextBundle) -> ReviewArtifact:

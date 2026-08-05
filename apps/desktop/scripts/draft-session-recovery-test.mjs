@@ -3,7 +3,27 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
+import { PrismaClient } from '@novel-editor/core';
 import ts from 'typescript';
+
+function splitSqlStatements(sql) {
+    const statements = [];
+    let current = '';
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    for (const char of sql) {
+        if (char === "'" && !inDoubleQuote) inSingleQuote = !inSingleQuote;
+        if (char === '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
+        if (char === ';' && !inSingleQuote && !inDoubleQuote) {
+            if (current.trim()) statements.push(current.trim());
+            current = '';
+        } else {
+            current += char;
+        }
+    }
+    if (current.trim()) statements.push(current.trim());
+    return statements;
+}
 
 const source = await readFile(new URL('../electron/automation/DraftSessionStore.ts', import.meta.url), 'utf8');
 const output = ts.transpileModule(source, {
@@ -13,16 +33,19 @@ const { DraftSessionStore } = await import(`data:text/javascript;base64,${Buffer
 
 const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'novel-editor-draft-recovery-'));
 assert.equal(path.dirname(tempRoot), os.tmpdir());
+const dbPath = path.join(tempRoot, 'draft-session-recovery.db').replaceAll('\\', '/');
+const client = new PrismaClient({ datasources: { db: { url: `file:${dbPath}` } } });
 
 try {
-    await fs.mkdir(path.join(tempRoot, 'automation'), { recursive: true });
-    await fs.writeFile(
-        path.join(tempRoot, 'automation', 'draft-sessions.json'),
-        JSON.stringify({ sessions: [] }),
+    const schemaSql = await readFile(
+        new URL('../../../packages/core/generated/client/schema-init.sql', import.meta.url),
         'utf8',
     );
+    for (const statement of splitSqlStatements(schemaSql)) {
+        await client.$executeRawUnsafe(statement);
+    }
 
-    const store = new DraftSessionStore(() => tempRoot);
+    const store = new DraftSessionStore(client);
     const created = await store.create({
         workspace: 'chapter-editor',
         type: 'chapter-draft',
@@ -49,7 +72,7 @@ try {
     }));
     assert.equal(edited.version, 2);
 
-    const afterRefresh = new DraftSessionStore(() => tempRoot);
+    const afterRefresh = new DraftSessionStore(client);
     const restored = await afterRefresh.getById(created.draftSessionId);
     assert.equal(restored?.version, 2);
     assert.equal(restored?.payload.generatedText, '审核后草稿。');
@@ -65,7 +88,7 @@ try {
     }));
     assert.equal(committed.status, 'committed');
 
-    const finalReload = new DraftSessionStore(() => tempRoot);
+    const finalReload = new DraftSessionStore(client);
     assert.equal((await finalReload.getById(created.draftSessionId))?.status, 'committed');
     assert.deepEqual(await finalReload.list({ novelId: 'novel-1' }), []);
     assert.equal((await finalReload.list({ novelId: 'novel-1', includeInactive: true })).length, 1);
@@ -277,7 +300,7 @@ try {
     assert.equal(staleBatch.stateLedger.timeline.length, 0);
     assert.equal(staleBatch.stateLedger.stateDeltas.length, 0);
 
-    const batchReload = new DraftSessionStore(() => tempRoot);
+    const batchReload = new DraftSessionStore(client);
     const restoredBatch = await batchReload.getBatchById(batch.draftBatchId);
     assert.equal(restoredBatch?.status, 'stale');
     assert.equal(restoredBatch?.stateLedger.timeline.length, 0);
@@ -506,7 +529,7 @@ try {
     assert.equal(reversibleUndone.batch.sourceSnapshot[0].version, 9);
     assert.equal(reversibleUndone.writeback.status, 'undone');
     assert.equal((await batchReload.getById(reversibleAttached.session.draftSessionId))?.status, 'draft');
-    const writebackReload = new DraftSessionStore(() => tempRoot);
+    const writebackReload = new DraftSessionStore(client);
     assert.equal((await writebackReload.getBatchById(reversibleBatch.draftBatchId))?.writebacks?.[0].status, 'undone');
 
     let unknownBatch = await batchReload.createBatch({
@@ -621,10 +644,11 @@ try {
     assert.equal(afterAbsentRegeneration.batch.children[0].generationRevision, 2);
     assert.equal(afterAbsentRegeneration.batch.children[0].reconciliation, undefined);
 
-    const persisted = JSON.parse(await fs.readFile(path.join(tempRoot, 'automation', 'draft-sessions.json'), 'utf8'));
-    assert.ok(Array.isArray(persisted.sessions));
-    assert.ok(Array.isArray(persisted.batches));
-    console.log('Draft session and draft batch persistence/recovery tests passed.');
+    await assert.rejects(fs.access(path.join(tempRoot, 'automation', 'draft-sessions.json')));
+    assert.ok((await client.$queryRawUnsafe('SELECT 1 FROM "DraftSession" LIMIT 1')).length > 0);
+    assert.ok((await client.$queryRawUnsafe('SELECT 1 FROM "DraftBatch" LIMIT 1')).length > 0);
+    console.log('Draft session and draft batch SQLite persistence/recovery tests passed.');
 } finally {
+    await client.$disconnect();
     await fs.rm(tempRoot, { recursive: true, force: true });
 }

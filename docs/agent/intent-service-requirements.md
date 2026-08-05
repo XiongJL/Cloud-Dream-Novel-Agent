@@ -1,8 +1,8 @@
 # Agent IntentService 需求
 
-版本：v0.2  
-日期：2026-07-15  
-状态：IS-0 / IS-1 / IS-2 首版已完成  
+版本：v0.3
+日期：2026-07-28
+状态：IS-0 / IS-1 / IS-2 与 Intent 优先读取修订已完成
 适用范围：CloudDream Novel Agent 内置 Python Agent Runtime、Electron AiService、Planner、Toolchain 路由和 Agent UI 会话状态。
 
 ## 1. 背景
@@ -59,7 +59,7 @@ IntentService 的输出是路由建议和结构化语义，不是权限凭证。
 - 不让 IntentService 直接执行 Tool、Toolchain 或数据写入。
 - 不让 IntentService 直接访问 Prisma 或小说业务 SQLite。
 - 不用置信度、`safe=true` 或模型判断替代 Runtime 权限校验。
-- 不自动执行识别出的任务；现有计划审核和 interrupt 边界保持不变。
+- 不自动执行副作用任务；低成本稳定只读 Toolchain 可以创建内部免确认 Plan/Run，执行前仍由 Runtime 策略复核。
 - 不把角色选择、Planner、上下文装配和安全策略全部塞入一个万能 Service。
 - 不持久化或展示模型隐藏思维链。
 
@@ -74,11 +74,10 @@ Renderer Agent Workspace
       -> IntentService.preflight
           -> 解析产品入口、工作模式、当前选择和会话状态
           -> 生成 IntentPreflight 约束
-      -> LangGraph Exploration
-          -> agent.generate_chat（沿用当前唯一一次模型调用）
+      -> agent.generate_chat（无正文的轻量语义调用）
           -> SemanticProposal
-          -> 有只读 toolCalls：tools -> agent.generate_chat -> ...
-          -> 无 toolCalls：结束探索
+          -> 明确 plan：不读取正文，直接 finalize
+          -> respond/clarify 需要项目证据：LangGraph tools -> agent.generate_chat -> ...
       -> IntentService.finalize
           -> Rules / Context / Semantic / Capability / Risk 融合
           -> 最终 IntentDecision
@@ -93,10 +92,10 @@ Renderer Agent Workspace
 调用时序要求：
 
 1. `preflight` 不调用模型，只形成确定性约束，不能执行 Tool。
-2. 当前 `agent.generate_chat` 的首次结果被解析为 `SemanticProposal`，同时保留回复正文和只读 `toolCalls`。
-3. 需要项目事实时，`SemanticProposal.toolCalls` 驱动现有探索图；探索完成前不生成最终 IntentDecision。
+2. 首次 `agent.generate_chat` 不携带正文，只携带用户请求、角色、历史摘要和选择范围元数据，并解析为 `SemanticProposal`。
+3. 明确计划语义不得为了生成说明或计划而读取项目正文；需要直接回答或生成证据型问题时，`SemanticProposal.toolCalls` 才驱动现有探索图。
 4. 最后一轮没有 `toolCalls` 的 SemanticProposal 交给 `finalize`，形成唯一最终 IntentDecision。
-5. `finalize` 不再调用模型，因此第一版不会增加额外模型请求。
+5. `finalize` 不调用模型；无需证据的任务仍只有一次轻量语义请求，需要证据的回答沿用既有探索追加调用。
 
 架构边界：
 
@@ -106,7 +105,7 @@ Renderer Agent Workspace
 - `agent.revise_plan`、`agent.execute_plan` 和 `agent.submit_approval` 继续使用现有结构化 API，不经过普通聊天 IntentService。
 - 用户在普通输入框中对审批卡作自由文本回答时，第一阶段只提示其使用当前审批卡，不自动转换或提交审批。
 - 后续确有必要时可增加 `agent.classify_intent` Automation 能力，但不能形成第二套决策标准或额外的最终决策者。
-- IntentService 只读取会话、当前选择、角色和工作模式等已传入上下文；小说事实由探索阶段的只读 Tool 获取。
+- IntentService 只读取会话、当前选择、角色和工作模式等轻量上下文；小说正文不得作为首轮路由输入，事实只由明确触发的探索或正式 Toolchain 执行获取。
 
 ## 6. 模块划分
 
@@ -516,7 +515,7 @@ class IntentOperation(BaseModel):
 
 1. 所有普通 Agent 聊天输入在模型调用前形成 IntentPreflight，在进入 Planner 前形成唯一、可校验的最终 IntentDecision。
 2. 当前寒暄、咨询、明确任务和澄清行为不发生产品回归。
-3. 第一版不增加额外模型请求。
+3. 无需项目证据的路由不增加额外模型请求，计划路由不携带正文。
 4. `chat_only`、待审批和快捷入口优先级由确定性规则保证。
 5. IntentService 不执行 Tool、不授予权限、不直接访问业务数据库。
 6. 决策日志只包含输入摘要、reason codes 和结构化结果，不包含密钥或隐藏思维链。
@@ -541,12 +540,14 @@ IS-0、IS-1 与 IS-2 首版已落地：
 
 后续增强不再阻塞 IS-2 首版：跨多个历史 Run 的命名引用、运行时配置中心动态开关 Toolchain，以及更细的数据写入 Operation。当前会话最近 Intent、静态启停元数据和副作用降级已经形成稳定边界。
 
+2026-07-28 修订：稳定 Toolchain 由 IntentDecision 确定性构造正式 Plan，不再先调用模型 Planner 再替换步骤。单 Operation、单专家、当前章或显式 1–3 章的 `auto_small_scope` 只读链允许内部 `requiresApproval=false` Plan 自动启动；高成本只读和全部副作用任务继续确认。详见 [Intent 优先与正文按需读取 Bugfix](./intent-first-retrieval-bugfix-2026-07-28.md)。
+
 ## 21. 默认设计决策
 
 - 使用独立 IntentService，但保持轻量，不引入独立分类模型。
 - Python Runtime 持有 IntentPreflight 和最终 IntentDecision；Electron AiService 提供 SemanticProposal 和用户可见回复候选。
 - IntentService 支持多操作，不采用单一 intent enum 表达完整任务。
-- 第一版采用 `preflight -> 现有探索循环 -> finalize`，不额外增加一次分类请求。
+- 采用 `preflight -> 无正文语义判断 -> 按需探索 -> finalize`，不增加独立分类模型。
 - `explore` 是决策中间过程，最终路由只有 `respond`、`clarify` 和 `plan`。
 - 审批、计划修改和执行继续走现有结构化 API，不由普通聊天意图自动提交。
 - Context 模块只处理会话和选择状态，不替代 AgentContextAssembler 或章节上下文 Toolchain。

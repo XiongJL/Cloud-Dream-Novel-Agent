@@ -440,8 +440,9 @@
       },
       "baseUrl": "接口地址",
       "modelPreset": "常用文本模型（可选）",
-      "modelPresetHint": "选择预设模型会自动填充输入框，也可手动输入",
-      "model": "文本模型",
+      "modelPresetHint": "直接输入模型 ID；建议列表中的供应商、名称和容量不会写入模型值",
+      "model": "文本模型 ID",
+      "modelNoResults": "未找到建议项，按 Enter 或移开焦点即可使用当前模型 ID",
       "imageModelPreset": "常用生图模型（可选）",
       "imageModelPresetHint": "选择预设模型会自动填充输入框，也可手动输入",
       "imageModel": "生图模型",
@@ -451,9 +452,23 @@
       "timeoutMs": "请求超时（毫秒）",
       "maxTokens": "单次最大输出 Token",
       "maxTokensHint": "控制单层回复的最大长度限制（调小可能造成输出截断）",
-      "contextWindowTokens": "模型上下文窗口 Token",
-      "contextWindowTokensHint": "填写模型实际支持的上下文窗口（至少 8192）；0 表示按模型名称自动采用保守预算",
-      "contextWindowTokensMcpHint": "MCP CLI 可能无法报告底层模型窗口；0 表示使用保守的 32768 Token 预算",
+      "contextWindowTokens": "上下文容量",
+      "contextWindowTokensHint": "通常保持自动即可；切换模型后会重新采用该模型的推荐能力档案",
+      "contextWindowTokensMcpHint": "通常保持自动即可；只有明确知道外部 CLI 的模型容量时才需要调整",
+      "contextWindowAutoProfile": "自动推荐（{{tokens}}）",
+      "contextWindowAutoFallback": "自动保守（{{tokens}}）",
+      "contextWindowAutoMcp": "自动（{{tokens}}）",
+      "contextWindowCustom": "高级自定义",
+      "contextWindowDetectionProfile": "已识别 {{model}}，自动使用 {{tokens}}",
+      "contextWindowDetectionFallback": "未收录 {{model}}，暂按 {{tokens}} 保守处理；也可选择其他容量",
+      "contextWindowPreset": {
+        "basic": "测试 / 小窗口 8K",
+        "standard": "基础 32K",
+        "long": "长对话 64K",
+        "novel": "长篇 128K",
+        "extended": "常用 258K",
+        "million": "百万上下文 1M"
+      },
       "cliPath": "CLI 可执行路径",
       "workingDir": "工作目录",
       "argsTemplate": "启动参数模板",
@@ -591,8 +606,7 @@
       "capabilityCoverage": "能力覆盖矩阵",
       "capabilityCoverageResult": "能力覆盖矩阵结果",
       "capabilityCoverageComplete": "无缺失 action",
-      "testOpenclawMcpSmoke": "冒烟 OpenClaw MCP",
-      "testOpenclawSkillSmoke": "冒烟 OpenClaw Skill"
+      "testOpenclawMcpSmoke": "冒烟 OpenClaw MCP"
     }
   },
   "backup": {
@@ -796,6 +810,7 @@
       "characters": "角色",
       "items": "物品",
       "skills": "技能",
+      "worldSettings": "世界设定",
       "maps": "地图"
     },
     "generateDraft": "生成草稿",
@@ -824,6 +839,7 @@
     "countCharacters": "角色",
     "countItems": "物品",
     "countSkills": "技能",
+    "countWorldSettings": "世界设定",
     "countMaps": "地图",
     "countMapImages": "地图图片",
     "warningsTitle": "提示",
@@ -842,6 +858,7 @@
     "sectionCharacters": "角色",
     "sectionItems": "物品",
     "sectionSkills": "技能",
+    "sectionWorldSettings": "世界设定",
     "sectionMaps": "地图",
     "placeholderPlotLineName": "主线名",
     "placeholderPlotLineDescription": "主线描述",
@@ -855,6 +872,8 @@
     "placeholderItemDescription": "物品描述",
     "placeholderSkillName": "技能名",
     "placeholderSkillDescription": "技能描述",
+    "placeholderWorldSettingName": "设定名",
+    "placeholderWorldSettingContent": "设定内容",
     "placeholderMapName": "地图名",
     "placeholderMapDescription": "地图描述",
     "placeholderMapImagePrompt": "图片提示词（imagePrompt）",
@@ -862,6 +881,12 @@
     "itemTypeItem": "物品",
     "itemTypeSkill": "技能",
     "itemTypeLocation": "地点",
+    "worldSettingTypeHistory": "历史",
+    "worldSettingTypeGeography": "地理",
+    "worldSettingTypeMagicSystem": "魔法体系",
+    "worldSettingTypeFaction": "阵营",
+    "worldSettingTypeTechnology": "科技体系",
+    "worldSettingTypeOther": "其他",
     "mapTypeWorld": "世界",
     "mapTypeRegion": "区域",
     "mapTypeScene": "场景",
@@ -953,6 +978,17 @@
         "medium": "中置信度",
         "low": "低置信度"
       }
+    }
+  },
+  "agentWorkspace": {
+    "inspector": {
+      "title": "检查器",
+      "open": "打开检查器",
+      "close": "关闭检查器",
+      "collapse": "收起检查器",
+      "resize": "调整检查器宽度",
+      "restoreSidebar": "恢复检查器侧栏",
+      "enlarge": "放大检查器"
     }
   },
   "aiError": {

@@ -1,4 +1,37 @@
 import type { AiProviderType } from '../types';
+import {
+    MAXIMUM_AGENT_CONTEXT_WINDOW_TOKENS,
+    MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS,
+    resolveAgentModelContextCapability,
+    type AgentModelCapabilitySource,
+} from '../../../shared/agentModelContextCapabilities';
+import { AgentContextTokenCounter, type AgentTokenCountMethod } from './AgentContextTokenCounter';
+import {
+    normalizeAgentConversationSummaryV2,
+    validateAgentConversationSummaryCoverageV2,
+    type AgentConversationSummaryV2,
+    type SummaryMessageSource,
+} from './AgentConversationSummaryV2';
+import type { AgentContextCompressionCoordinatorDiagnostics } from './AgentContextCompressionCoordinator';
+import { microcompressAgentContextValue } from './AgentContextMicrocompressor';
+
+export type AgentContextErrorCode =
+    | 'CONTEXT_INPUT_TOO_LARGE'
+    | 'CONTEXT_PROTECTED_INPUT_TOO_LARGE'
+    | 'CONTEXT_CURRENT_REQUEST_IDENTITY_MISMATCH'
+    | 'CONTEXT_TOKEN_COUNTER_UNAVAILABLE'
+    | 'CONTEXT_BUDGET_UNSATISFIABLE';
+
+export class AgentContextError extends Error {
+    constructor(
+        public readonly code: AgentContextErrorCode,
+        message: string,
+        public readonly details?: Record<string, unknown>,
+    ) {
+        super(message);
+        this.name = 'AgentContextError';
+    }
+}
 
 export type AgentContextPriority = 'required' | 'high' | 'normal' | 'low';
 export type AgentContextSectionKind =
@@ -15,6 +48,7 @@ export interface AgentContextMessage {
     createdAt?: string;
     messageId?: string;
     sourceMessageIndex?: number;
+    sequence?: number;
 }
 
 export interface AgentContextArtifact {
@@ -82,18 +116,22 @@ export interface AgentContextAssemblerInput {
     safetyTokens?: number;
     systemPrompt?: string;
     currentRequest: unknown;
+    protectedContext?: unknown;
     history?: AgentContextMessage[];
     sections?: AgentContextSection[];
-    persistentSummary?: AgentConversationSummary | Record<string, unknown> | null;
+    persistentSummary?: AgentConversationSummary | AgentConversationSummaryV2 | Record<string, unknown> | null;
     artifacts?: AgentContextArtifact[];
+    toolSchema?: string;
+    requireHardTokenCount?: boolean;
+    compressionDiagnostics?: AgentContextCompressionCoordinatorDiagnostics;
 }
 
 export interface AgentContextDiagnostics {
-    contextVersion: 'agent-context-v1';
+    contextVersion: 'agent-context-v1' | 'agent-context-v2';
     providerType: AiProviderType;
     model: string;
     contextWindowTokens: number;
-    contextWindowSource: 'configured' | 'model-profile';
+    contextWindowSource: 'configured' | AgentModelCapabilitySource;
     outputTokens: number;
     safetyTokens: number;
     systemTokens: number;
@@ -128,6 +166,25 @@ export interface AgentContextDiagnostics {
     compressedSectionIds: string[];
     omittedSectionIds: string[];
     warnings: string[];
+    compressionMode?: 'none' | 'projection' | 'micro' | 'semantic' | 'degraded';
+    hardTokenCountMethod?: AgentTokenCountMethod;
+    tokenCounterProfileId?: string;
+    contextTokens?: number;
+    providerInputTokens?: number;
+    hardContextBudget?: number;
+    hardProviderInputLimit?: number;
+    providerReserveTokens?: number;
+    fixedProviderInputTokens?: number;
+    triggerContextBudget?: number;
+    targetContextBudget?: number;
+    nextTurnReserveTokens?: number;
+    projectedNextTurnContextTokens?: number;
+    wouldRetriggerNextTurn?: boolean;
+    semanticSummaryVersion?: 2;
+    semanticSummaryDependencyStatus?: 'none' | 'valid' | 'stale';
+    sourceIndexLedgerEntries?: number;
+    sourceIndexBytes?: number;
+    coordinator?: AgentContextCompressionCoordinatorDiagnostics;
 }
 
 export interface AgentContextAssembly {
@@ -168,22 +225,15 @@ export function resolveAgentContextWindow(
     providerType: AiProviderType,
     model = '',
     configuredTokens = 0,
-): { tokens: number; source: 'configured' | 'model-profile' } {
-    if (Number.isFinite(configuredTokens) && configuredTokens >= 8192) {
+): { tokens: number; source: 'configured' | AgentModelCapabilitySource } {
+    if (Number.isFinite(configuredTokens) && configuredTokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS) {
         return {
-            tokens: Math.min(2_000_000, Math.floor(configuredTokens)),
+            tokens: Math.min(MAXIMUM_AGENT_CONTEXT_WINDOW_TOKENS, Math.floor(configuredTokens)),
             source: 'configured',
         };
     }
-
-    const normalizedModel = model.trim().toLowerCase();
-    let tokens = providerType === 'mcp-cli' ? 32_768 : 65_536;
-    if (/gemini|qwen-long/.test(normalizedModel)) tokens = 262_144;
-    else if (/claude/.test(normalizedModel)) tokens = 180_000;
-    else if (/gpt-5|gpt-4\.1/.test(normalizedModel)) tokens = 262_144;
-    else if (/gpt-4o|\bo[134](?:-|$)/.test(normalizedModel)) tokens = 98_304;
-    else if (/deepseek|qwen|glm|doubao/.test(normalizedModel)) tokens = 65_536;
-    return { tokens, source: 'model-profile' };
+    const capability = resolveAgentModelContextCapability(providerType, model);
+    return { tokens: capability.defaultContextWindowTokens, source: capability.source };
 }
 
 function safeStringify(value: unknown): string {
@@ -195,25 +245,33 @@ function safeStringify(value: unknown): string {
     }
 }
 
-function truncateToTokens(value: string, maxTokens: number): string {
+function truncateToTokens(
+    value: string,
+    maxTokens: number,
+    countTokens: (serialized: string) => number = estimateAgentContextTokens,
+): string {
     const normalized = value.trim();
     if (!normalized || maxTokens <= 0) return '';
-    if (estimateAgentContextTokens(normalized) <= maxTokens) return normalized;
+    if (countTokens(normalized) <= maxTokens) return normalized;
 
     let low = 0;
     let high = normalized.length;
     while (low < high) {
         const middle = Math.ceil((low + high) / 2);
-        if (estimateAgentContextTokens(normalized.slice(0, middle)) <= Math.max(1, maxTokens - 12)) low = middle;
+        if (countTokens(normalized.slice(0, middle)) <= Math.max(1, maxTokens - 12)) low = middle;
         else high = middle - 1;
     }
     const omitted = Math.max(0, normalized.length - low);
     return `${normalized.slice(0, low).trimEnd()}\n[compressed: ${omitted} chars omitted]`;
 }
 
-function compactValue(value: unknown, maxTokens: number): unknown {
+function compactValue(
+    value: unknown,
+    maxTokens: number,
+    countTokens: (serialized: string) => number = estimateAgentContextTokens,
+): unknown {
     const serialized = safeStringify(value);
-    if (estimateAgentContextTokens(serialized) <= maxTokens) return value;
+    if (countTokens(serialized) <= maxTokens) return value;
     if (Array.isArray(value) && value.length > 0) {
         const buildArrayExcerpt = (sampleCount: number): Record<string, unknown> => {
             const headCount = Math.ceil(sampleCount / 2);
@@ -222,25 +280,28 @@ function compactValue(value: unknown, maxTokens: number): unknown {
             return {
                 compressed: true,
                 totalItems: value.length,
-                head: value.slice(0, headCount).map((item) => compactValue(item, itemBudget)),
+                head: value.slice(0, headCount).map((item) => compactValue(item, itemBudget, countTokens)),
                 tail: tailCount > 0
-                    ? value.slice(Math.max(headCount, value.length - tailCount)).map((item) => compactValue(item, itemBudget))
+                    ? value.slice(Math.max(headCount, value.length - tailCount)).map((item) => compactValue(item, itemBudget, countTokens))
                     : [],
             };
         };
         const broadExcerpt = buildArrayExcerpt(Math.min(6, value.length));
-        if (estimateAgentContextTokens(safeStringify(broadExcerpt)) <= maxTokens) return broadExcerpt;
+        if (countTokens(safeStringify(broadExcerpt)) <= maxTokens) return broadExcerpt;
         const narrowExcerpt = buildArrayExcerpt(Math.min(2, value.length));
-        if (estimateAgentContextTokens(safeStringify(narrowExcerpt)) <= maxTokens) return narrowExcerpt;
+        if (countTokens(safeStringify(narrowExcerpt)) <= maxTokens) return narrowExcerpt;
     }
     return {
         compressed: true,
-        excerpt: truncateToTokens(serialized, Math.max(32, maxTokens - 16)),
+        excerpt: truncateToTokens(serialized, Math.max(32, maxTokens - 16), countTokens),
     };
 }
 
 function isCompressedValue(value: unknown): boolean {
-    return Boolean(value && typeof value === 'object' && (value as { compressed?: unknown }).compressed === true);
+    if (!value || typeof value !== 'object') return false;
+    if ((value as { compressed?: unknown }).compressed === true) return true;
+    if (Array.isArray(value)) return value.some(isCompressedValue);
+    return Object.values(value as Record<string, unknown>).some(isCompressedValue);
 }
 
 function stableHash(value: string): string {
@@ -265,9 +326,51 @@ function normalizeHistory(history: AgentContextMessage[] | undefined): AgentCont
             content,
             messageId,
             sourceMessageIndex,
+            sequence: Number.isSafeInteger(message.sequence) && Number(message.sequence) > 0
+                ? Number(message.sequence)
+                : sourceMessageIndex + 1,
             ...(createdAt ? { createdAt } : {}),
         }];
     });
+}
+
+function requestMessageId(value: unknown): string {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+    return String((value as { messageId?: unknown }).messageId || '').trim();
+}
+
+function requestContent(value: unknown): string {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+    const record = value as { content?: unknown; message?: unknown };
+    return String(record.content ?? record.message ?? '');
+}
+
+function countMessageIdOccurrences(value: unknown, messageId: string): number {
+    if (!messageId || !value || typeof value !== 'object') return 0;
+    if (Array.isArray(value)) {
+        return value.reduce((total, item) => total + countMessageIdOccurrences(item, messageId), 0);
+    }
+    let total = 0;
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+        if (key === 'messageId' && String(item || '') === messageId) total += 1;
+        if (item && typeof item === 'object') total += countMessageIdOccurrences(item, messageId);
+    }
+    return total;
+}
+
+function validatedSummaryV2(
+    value: unknown,
+    history: AgentContextMessage[],
+): AgentConversationSummaryV2 | null {
+    const summary = normalizeAgentConversationSummaryV2(value);
+    if (!summary) return null;
+    const sources: SummaryMessageSource[] = history.slice(0, summary.coverage.messageCount).map((message, index) => ({
+        messageId: String(message.messageId || ''),
+        sequence: Number(message.sequence || index + 1),
+        role: message.role,
+        content: message.content,
+    }));
+    return validateAgentConversationSummaryCoverageV2(summary, sources) ? summary : null;
 }
 
 function normalizeSummaryEntry(value: unknown): AgentConversationSummaryEntry | null {
@@ -562,6 +665,62 @@ function recallSummaryMessages(
     });
 }
 
+function recallSummaryMessagesV2(
+    summary: AgentConversationSummaryV2 | null,
+    history: AgentContextMessage[],
+    currentRequest: unknown,
+): Array<Record<string, unknown>> {
+    if (!summary) return [];
+    const query = safeStringify(currentRequest).toLowerCase();
+    const terms = recallTerms(query);
+    const projectionEntries = [
+        ...summary.semanticProjection.activeIntent,
+        ...summary.semanticProjection.hardConstraints,
+        ...summary.semanticProjection.confirmedDecisions,
+        ...summary.semanticProjection.canonFacts,
+        ...summary.semanticProjection.creativeContinuity,
+        ...summary.semanticProjection.unresolvedQuestions,
+        ...summary.semanticProjection.completedOutcomes,
+        ...summary.semanticProjection.pendingWork,
+    ];
+    const scores = new Map<string, number>();
+    for (const entry of projectionEntries) {
+        const score = recallScore(query, terms, entry.text, [entry.id, ...(entry.sourceMessageIds || [])]);
+        if (score <= 0) continue;
+        for (const messageId of entry.sourceMessageIds || []) {
+            scores.set(messageId, Math.max(scores.get(messageId) || 0, score + 10));
+        }
+    }
+    for (const ledger of summary.sourceIndex.userMessageLedger) {
+        const score = recallScore(query, terms, ledger.gist, [ledger.messageId]);
+        if (score > 0) scores.set(ledger.messageId, Math.max(scores.get(ledger.messageId) || 0, score + 5));
+    }
+    const coveredHistory = history.slice(0, summary.coverage.messageCount);
+    for (let index = 0; index < coveredHistory.length; index += 1) {
+        const message = coveredHistory[index];
+        const score = recallScore(query, terms, message.content, [String(message.messageId || '')]);
+        if (score > 0) scores.set(String(message.messageId), Math.max(scores.get(String(message.messageId)) || 0, score));
+    }
+    if (!scores.size && VAGUE_RECALL_PATTERN.test(query)) {
+        for (const message of coveredHistory.slice(-3)) scores.set(String(message.messageId), 1);
+    }
+    const historyById = new Map(history.map((message) => [String(message.messageId), message]));
+    return [...scores.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 6)
+        .flatMap(([messageId]) => {
+            const message = historyById.get(messageId);
+            if (!message) return [];
+            return [{
+                messageId,
+                role: message.role,
+                content: truncateToTokens(message.content, 420),
+                ...(message.createdAt ? { createdAt: message.createdAt } : {}),
+                sourceRef: `agent-message:${messageId}`,
+            }];
+        });
+}
+
 function recallSummaryArtifacts(
     summary: AgentConversationSummary | null,
     artifacts: AgentContextArtifact[],
@@ -712,6 +871,94 @@ function historyContext(
     };
 }
 
+function historyContextV2(
+    history: AgentContextMessage[],
+    budget: number,
+    countSerialized: (value: string) => number,
+): {
+    recentHistory: Array<Record<string, unknown>>;
+    rollingSummary: Array<Record<string, unknown>>;
+    summarizedCount: number;
+    omittedCount: number;
+} {
+    if (!history.length || budget < 64) {
+        return { recentHistory: [], rollingSummary: [], summarizedCount: 0, omittedCount: history.length };
+    }
+    const units: AgentContextMessage[][] = [];
+    let current: AgentContextMessage[] = [];
+    let hasAssistant = false;
+    const flush = () => {
+        if (current.length) units.push(current);
+        current = [];
+        hasAssistant = false;
+    };
+    for (const message of history) {
+        if (message.role === 'user' && hasAssistant) flush();
+        current.push(message);
+        if (message.role === 'assistant') hasAssistant = true;
+    }
+    flush();
+
+    const recentBudget = Math.max(64, Math.floor(budget * 0.72));
+    const recentUnits: AgentContextMessage[][] = [];
+    let recentUsed = 0;
+    let firstRecentUnit = units.length;
+    for (let index = units.length - 1; index >= 0; index -= 1) {
+        const unit = units[index];
+        const unitId = `turn:${unit[0]?.messageId || index}:${unit[unit.length - 1]?.messageId || index}`;
+        const entries = unit.map((message) => ({
+            sourceMessageIndex: Number(message.sourceMessageIndex ?? 0),
+            atomicUnitId: unitId,
+            ...message,
+        }));
+        const cost = countSerialized(safeStringify(entries));
+        if (recentUsed + cost > recentBudget) break;
+        recentUnits.unshift(unit);
+        firstRecentUnit = index;
+        recentUsed += cost;
+    }
+    const recentHistory = recentUnits.flatMap((unit, unitOffset) => {
+        const absoluteUnit = firstRecentUnit + unitOffset;
+        const unitId = `turn:${unit[0]?.messageId || absoluteUnit}:${unit[unit.length - 1]?.messageId || absoluteUnit}`;
+        return unit.map((message) => ({
+            sourceMessageIndex: Number(message.sourceMessageIndex ?? 0),
+            atomicUnitId: unitId,
+            ...message,
+        }));
+    });
+    const summaryBudget = Math.max(0, budget - countSerialized(safeStringify(recentHistory)));
+    const rollingSummary: Array<Record<string, unknown>> = [];
+    let summaryUsed = 0;
+    let summarizedCount = 0;
+    for (let index = firstRecentUnit - 1; index >= 0; index -= 1) {
+        const unit = units[index];
+        const sourceIndexes = unit.map((message) => Number(message.sourceMessageIndex ?? 0));
+        const summary = summarizeHistoryRange(
+            history,
+            Math.max(0, history.indexOf(unit[0])),
+            Math.max(0, history.indexOf(unit[unit.length - 1])),
+        );
+        const cost = countSerialized(safeStringify(summary));
+        if (summaryUsed + cost > summaryBudget) continue;
+        rollingSummary.unshift({
+            ...summary,
+            sourceRange: {
+                startMessageIndex: Math.min(...sourceIndexes),
+                endMessageIndex: Math.max(...sourceIndexes),
+            },
+        });
+        summaryUsed += cost;
+        summarizedCount += unit.length;
+    }
+    const olderCount = units.slice(0, firstRecentUnit).reduce((total, unit) => total + unit.length, 0);
+    return {
+        recentHistory,
+        rollingSummary,
+        summarizedCount,
+        omittedCount: Math.max(0, olderCount - summarizedCount),
+    };
+}
+
 function collapseHistorySourceIndexes(
     indexes: number[],
     mode: HistorySourceMode,
@@ -737,28 +984,106 @@ function collapseHistorySourceIndexes(
 export class AgentContextAssembler {
     assemble(input: AgentContextAssemblerInput): AgentContextAssembly {
         const model = String(input.model || (input.providerType === 'mcp-cli' ? 'mcp-cli' : 'unknown-model'));
-        const contextWindow = resolveAgentContextWindow(input.providerType, model, input.contextWindowTokens);
         const outputTokens = Math.max(128, Math.floor(input.outputTokens || 0));
-        const safetyTokens = Number.isFinite(input.safetyTokens) && Number(input.safetyTokens) > 0
-            ? Math.floor(Number(input.safetyTokens))
-            : Math.max(2048, Math.min(16_384, Math.floor(contextWindow.tokens * 0.1)));
-        const systemTokens = estimateAgentContextTokens(String(input.systemPrompt || ''));
-        const inputBudgetTokens = Math.max(128, contextWindow.tokens - outputTokens - safetyTokens - systemTokens);
+        const tokenCounter = new AgentContextTokenCounter();
+        const hardBudget = tokenCounter.budget({
+            providerType: input.providerType,
+            model,
+            configuredContextWindowTokens: input.contextWindowTokens,
+            outputReserveTokens: outputTokens,
+            systemPrompt: String(input.systemPrompt || ''),
+            toolSchema: input.toolSchema,
+            safetyReserveTokens: input.safetyTokens,
+        });
+        if (input.requireHardTokenCount && !hardBudget) {
+            throw new AgentContextError(
+                'CONTEXT_TOKEN_COUNTER_UNAVAILABLE',
+                'No hard-safe token counter is available for this model.',
+                { providerType: input.providerType, model },
+            );
+        }
+        const resolvedWindow = resolveAgentContextWindow(input.providerType, model, input.contextWindowTokens);
+        const contextWindow = hardBudget
+            ? {
+                tokens: hardBudget.contextWindowTokens,
+                source: input.contextWindowTokens && input.contextWindowTokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+                    ? 'configured' as const
+                    : hardBudget.profile.source,
+            }
+            : resolvedWindow;
+        const safetyTokens = hardBudget?.safetyReserveTokens ?? (
+            Number.isFinite(input.safetyTokens) && Number(input.safetyTokens) > 0
+                ? Math.floor(Number(input.safetyTokens))
+                : Math.max(2048, Math.min(16_384, Math.floor(contextWindow.tokens * 0.1)))
+        );
+        const emptyCount = hardBudget ? tokenCounter.count({
+            providerType: input.providerType,
+            model,
+            configuredContextWindowTokens: input.contextWindowTokens,
+            systemPrompt: String(input.systemPrompt || ''),
+            prompt: '',
+            toolSchema: input.toolSchema,
+        }) : null;
+        const systemTokens = emptyCount?.systemTokens
+            ?? estimateAgentContextTokens(String(input.systemPrompt || ''));
+        const inputBudgetTokens = Math.max(0, hardBudget?.hardContextBudget
+            ?? (contextWindow.tokens - outputTokens - safetyTokens - systemTokens));
+        const countContextTokens = (prompt: string): number => {
+            if (!hardBudget) return estimateAgentContextTokens(prompt);
+            const count = tokenCounter.count({
+                providerType: input.providerType,
+                model,
+                configuredContextWindowTokens: input.contextWindowTokens,
+                systemPrompt: String(input.systemPrompt || ''),
+                prompt,
+                toolSchema: input.toolSchema,
+            });
+            if (!count) throw new AgentContextError(
+                'CONTEXT_TOKEN_COUNTER_UNAVAILABLE',
+                'No hard-safe token counter is available for this model.',
+            );
+            return count.contextTokens;
+        };
         const warnings: string[] = [];
-        if (contextWindow.tokens <= outputTokens + safetyTokens + systemTokens) {
+        if (inputBudgetTokens <= 0) {
             warnings.push('Configured context window is smaller than the reserved system, output, and safety budgets.');
         }
 
-        const history = normalizeHistory(input.history);
+        const normalizedHistory = normalizeHistory(input.history);
+        const currentRequestMessageId = requestMessageId(input.currentRequest);
+        const currentRequestContent = requestContent(input.currentRequest);
+        const currentRequestHistoryMatches = currentRequestMessageId
+            ? normalizedHistory.filter((message) => message.messageId === currentRequestMessageId)
+            : [];
+        if (currentRequestHistoryMatches.length > 1 || currentRequestHistoryMatches.some((message) => (
+            message.role !== 'user' || message.content !== currentRequestContent
+        ))) {
+            throw new AgentContextError(
+                'CONTEXT_CURRENT_REQUEST_IDENTITY_MISMATCH',
+                'Current request history identity is duplicated or does not match the persisted user message.',
+                { messageId: currentRequestMessageId, matches: currentRequestHistoryMatches.length },
+            );
+        }
+        const history = currentRequestMessageId
+            ? normalizedHistory.filter((message) => message.messageId !== currentRequestMessageId)
+            : normalizedHistory;
         const persistentSummary = normalizeAgentConversationSummary(input.persistentSummary);
+        const rawSummaryV2 = normalizeAgentConversationSummaryV2(input.persistentSummary);
+        const persistentSummaryV2 = validatedSummaryV2(input.persistentSummary, history);
+        if (rawSummaryV2 && !persistentSummaryV2) {
+            warnings.push('Persisted v2 coverage failed source, ledger, or authority validation and was not used to filter history.');
+        }
         const artifacts = normalizeArtifacts(input.artifacts);
-        const coveredMessageIds = new Set(persistentSummary?.coveredMessageIds || []);
-        const historyForAssembly = history.filter((message) => !coveredMessageIds.has(String(message.messageId)));
-        const recalledMessages = recallSummaryMessages(persistentSummary, history, input.currentRequest);
+        // v1 coverage came from a lossy keyword projection and is not a trusted filtering boundary.
+        const historyForAssembly = persistentSummaryV2
+            ? history.slice(persistentSummaryV2.coverage.messageCount)
+            : history;
+        const recalledMessages = persistentSummaryV2
+            ? recallSummaryMessagesV2(persistentSummaryV2, history, input.currentRequest)
+            : recallSummaryMessages(persistentSummary, history, input.currentRequest);
         const recalledArtifacts = recallSummaryArtifacts(persistentSummary, artifacts, input.currentRequest);
-        const requestBudget = Math.max(256, Math.floor(inputBudgetTokens * 0.28));
         const persistentConstraints = extractPersistentConstraints(
-            history,
+            historyForAssembly,
             Math.max(128, Math.floor(inputBudgetTokens * 0.12)),
         );
         const normalizedSections: NormalizedSection[] = (input.sections || [])
@@ -767,27 +1092,78 @@ export class AgentContextAssembler {
             .sort((left, right) => PRIORITY_ORDER[left.priority] - PRIORITY_ORDER[right.priority]);
 
         const payload: Record<string, unknown> = {
-            contextVersion: 'agent-context-v1',
-            currentRequest: compactValue(input.currentRequest, requestBudget),
+            contextVersion: persistentSummaryV2 ? 'agent-context-v2' : 'agent-context-v1',
+            currentRequest: input.currentRequest,
+            protectedContext: input.protectedContext ?? null,
             persistentConstraints,
-            persistentSummary: persistentSummary
-                ? compactValue(persistentSummary, Math.max(256, Math.floor(inputBudgetTokens * 0.18)))
-                : null,
-            recalledMessages: compactValue(recalledMessages, Math.max(128, Math.floor(inputBudgetTokens * 0.1))),
-            recalledArtifacts: compactValue(recalledArtifacts, Math.max(128, Math.floor(inputBudgetTokens * 0.12))),
+            persistentSummary: persistentSummaryV2?.semanticProjection
+                ?? (persistentSummary
+                    ? compactValue(persistentSummary, Math.max(256, Math.floor(inputBudgetTokens * 0.18)))
+                    : null),
+            recalledMessages,
+            recalledArtifacts,
             rollingSummary: [],
             recentHistory: [],
             sections: [],
         };
+        const requestTokens = countContextTokens(safeStringify({
+            contextVersion: payload.contextVersion,
+            currentRequest: payload.currentRequest,
+        }));
+        if (requestTokens > inputBudgetTokens) {
+            throw new AgentContextError(
+                'CONTEXT_INPUT_TOO_LARGE',
+                'Current request exceeds the model input budget.',
+                { currentTokens: requestTokens, maximumTokens: inputBudgetTokens },
+            );
+        }
+        const protectedTokens = countContextTokens(safeStringify({
+            contextVersion: payload.contextVersion,
+            currentRequest: payload.currentRequest,
+            protectedContext: payload.protectedContext,
+        }));
+        if (protectedTokens > inputBudgetTokens) {
+            throw new AgentContextError(
+                'CONTEXT_PROTECTED_INPUT_TOO_LARGE',
+                'Protected conversation state exceeds the model input budget.',
+                { currentTokens: protectedTokens, maximumTokens: inputBudgetTokens },
+            );
+        }
+        const countSerialized = (value: string) => hardBudget
+            ? Buffer.byteLength(value, 'utf8')
+            : estimateAgentContextTokens(value);
         const omittedSectionIds: string[] = [];
+        const microcompressedSectionIds = new Set<string>();
         const sectionOutput: Array<Record<string, unknown>> = [];
-        const sectionBudget = Math.max(128, Math.floor(inputBudgetTokens * 0.42));
+        const baseBeforeSections = countContextTokens(safeStringify(payload));
+        const remainingAfterBase = Math.max(0, inputBudgetTokens - baseBeforeSections);
+        const recentHistoryFloor = Math.min(
+            remainingAfterBase,
+            persistentSummaryV2
+                ? Math.max(512, Math.floor(inputBudgetTokens * 0.22))
+                : Math.max(256, Math.floor(inputBudgetTokens * 0.15)),
+        );
+        const sectionBudget = Math.max(0, remainingAfterBase - recentHistoryFloor);
         let sectionUsed = 0;
         for (let index = 0; index < normalizedSections.length; index += 1) {
             const section = normalizedSections[index];
             const remainingCount = normalizedSections.length - index;
             const defaultCap = Math.max(96, Math.floor((sectionBudget - sectionUsed) / Math.max(1, remainingCount)));
-            const cap = Math.max(64, Math.min(section.maxTokens || defaultCap, sectionBudget - sectionUsed));
+            const requiredRemaining = normalizedSections.slice(index)
+                .filter((candidate) => candidate.priority === 'required').length;
+            const requiredAvailable = Math.max(
+                0,
+                sectionBudget - sectionUsed - Math.max(0, requiredRemaining - 1) * 64,
+            );
+            const microcompressed = microcompressAgentContextValue(section.value, {
+                sectionKind: section.kind,
+                ...(section.sourceRef ? { sourceRef: section.sourceRef } : {}),
+            });
+            if (microcompressed.applied) microcompressedSectionIds.add(section.id);
+            const rawValueCost = countSerialized(safeStringify(microcompressed.value));
+            const cap = section.priority === 'required'
+                ? Math.max(64, Math.min(section.maxTokens || rawValueCost + 24, requiredAvailable))
+                : Math.max(64, Math.min(section.maxTokens || defaultCap, sectionBudget - sectionUsed));
             if (cap < 64 && section.priority !== 'required') {
                 omittedSectionIds.push(section.id);
                 continue;
@@ -797,9 +1173,9 @@ export class AgentContextAssembler {
                 kind: section.kind,
                 priority: section.priority,
                 ...(section.sourceRef ? { sourceRef: section.sourceRef } : {}),
-                value: compactValue(section.value, Math.max(32, cap - 24)),
+                value: compactValue(microcompressed.value, Math.max(32, cap - 24), countSerialized),
             };
-            const cost = estimateAgentContextTokens(safeStringify(entry));
+            const cost = countSerialized(safeStringify(entry));
             if (sectionUsed + cost > sectionBudget && section.priority !== 'required') {
                 omittedSectionIds.push(section.id);
                 continue;
@@ -809,53 +1185,77 @@ export class AgentContextAssembler {
         }
         payload.sections = sectionOutput;
 
-        const baseTokens = estimateAgentContextTokens(safeStringify(payload));
+        const baseTokens = countContextTokens(safeStringify(payload));
         const historyBudget = Math.max(0, inputBudgetTokens - baseTokens - 32);
-        const assembledHistory = historyContext(historyForAssembly, historyBudget);
+        const assembledHistory = persistentSummaryV2
+            ? historyContextV2(historyForAssembly, historyBudget, countSerialized)
+            : historyContext(historyForAssembly, historyBudget);
         payload.rollingSummary = assembledHistory.rollingSummary;
         payload.recentHistory = assembledHistory.recentHistory;
 
         let prompt = safeStringify(payload);
-        let estimatedInputTokens = estimateAgentContextTokens(prompt);
+        let finalContextTokens = countContextTokens(prompt);
         const rollingSummary = payload.rollingSummary as Array<Record<string, unknown>>;
         const recentHistory = payload.recentHistory as Array<Record<string, unknown>>;
-        while (estimatedInputTokens > inputBudgetTokens && rollingSummary.length) {
-            rollingSummary.shift();
-            prompt = safeStringify(payload);
-            estimatedInputTokens = estimateAgentContextTokens(prompt);
-        }
-        while (estimatedInputTokens > inputBudgetTokens && recentHistory.length > 1) {
-            recentHistory.shift();
-            prompt = safeStringify(payload);
-            estimatedInputTokens = estimateAgentContextTokens(prompt);
-        }
-        while (estimatedInputTokens > inputBudgetTokens && sectionOutput.some((section) => section.priority !== 'required')) {
+        while (finalContextTokens > inputBudgetTokens && sectionOutput.some((section) => section.priority !== 'required')) {
             let removableIndex = sectionOutput.length - 1;
             while (removableIndex >= 0 && sectionOutput[removableIndex].priority === 'required') removableIndex -= 1;
             const [removed] = sectionOutput.splice(removableIndex, 1);
             omittedSectionIds.push(String(removed.id));
             prompt = safeStringify(payload);
-            estimatedInputTokens = estimateAgentContextTokens(prompt);
+            finalContextTokens = countContextTokens(prompt);
         }
-        while (estimatedInputTokens > inputBudgetTokens && persistentConstraints.length) {
+        while (finalContextTokens > inputBudgetTokens && rollingSummary.length) {
+            rollingSummary.shift();
+            prompt = safeStringify(payload);
+            finalContextTokens = countContextTokens(prompt);
+        }
+        while (finalContextTokens > inputBudgetTokens && recentHistory.length > 1) {
+            const atomicUnitId = recentHistory[0].atomicUnitId;
+            if (persistentSummaryV2 && atomicUnitId) {
+                while (recentHistory[0]?.atomicUnitId === atomicUnitId) recentHistory.shift();
+            } else {
+                recentHistory.shift();
+            }
+            prompt = safeStringify(payload);
+            finalContextTokens = countContextTokens(prompt);
+        }
+        const recalledArtifactOutput = payload.recalledArtifacts as Array<Record<string, unknown>>;
+        while (finalContextTokens > inputBudgetTokens && recalledArtifactOutput.length) {
+            recalledArtifactOutput.pop();
+            prompt = safeStringify(payload);
+            finalContextTokens = countContextTokens(prompt);
+        }
+        const recalledMessageOutput = payload.recalledMessages as Array<Record<string, unknown>>;
+        while (finalContextTokens > inputBudgetTokens && recalledMessageOutput.length) {
+            recalledMessageOutput.pop();
+            prompt = safeStringify(payload);
+            finalContextTokens = countContextTokens(prompt);
+        }
+        while (finalContextTokens > inputBudgetTokens && persistentConstraints.length) {
             persistentConstraints.shift();
             prompt = safeStringify(payload);
-            estimatedInputTokens = estimateAgentContextTokens(prompt);
+            finalContextTokens = countContextTokens(prompt);
         }
-        if (estimatedInputTokens > inputBudgetTokens) {
-            payload.currentRequest = compactValue(input.currentRequest, Math.max(64, Math.floor(requestBudget / 2)));
-            prompt = safeStringify(payload);
-            estimatedInputTokens = estimateAgentContextTokens(prompt);
+        if (finalContextTokens > inputBudgetTokens) {
+            throw new AgentContextError(
+                'CONTEXT_BUDGET_UNSATISFIABLE',
+                'Required context cannot fit within the model input budget.',
+                { currentTokens: finalContextTokens, maximumTokens: inputBudgetTokens },
+            );
         }
+        const estimatedInputTokens = estimateAgentContextTokens(prompt);
 
         const historyIndexById = new Map(history.map((message, index) => [
             String(message.messageId),
             Number(message.sourceMessageIndex ?? index),
         ]));
         const summaryIndexes = new Set<number>();
-        for (const messageId of persistentSummary?.coveredMessageIds || []) {
-            const index = historyIndexById.get(messageId);
-            if (typeof index === 'number') summaryIndexes.add(index);
+        if (persistentSummaryV2) {
+            for (const message of history.slice(0, persistentSummaryV2.coverage.messageCount)) {
+                const index = historyIndexById.get(String(message.messageId));
+                if (typeof index === 'number') summaryIndexes.add(index);
+            }
         }
         for (const summary of rollingSummary) {
             const sourceMessageIds = Array.isArray(summary.sourceMessageIds)
@@ -882,15 +1282,21 @@ export class AgentContextAssembler {
         const historyMessagesCompacted = recentHistory.filter((message) => message.compressed === true).length;
         const currentRequestCompressed = isCompressedValue(payload.currentRequest);
         const compressedSectionIds = sectionOutput
-            .filter((section) => isCompressedValue(section.value))
+            .filter((section) => isCompressedValue(section.value)
+                || microcompressedSectionIds.has(String(section.id)))
             .map((section) => String(section.id));
+        const coordinatorMode = input.compressionDiagnostics?.mode;
         const compressionApplied = currentRequestCompressed
             || representedSummaryCount > 0
             || historyMessagesOmitted > 0
             || historyMessagesCompacted > 0
             || compressedSectionIds.length > 0
-            || omittedSectionIds.length > 0;
-        if (persistentSummary && persistentSummary.coveredMessageIds.length) {
+            || omittedSectionIds.length > 0
+            || coordinatorMode === 'semantic'
+            || coordinatorMode === 'degraded';
+        if (persistentSummaryV2) {
+            warnings.push('Older conversation messages were represented by a validated v2 semantic projection.');
+        } else if (persistentSummary && persistentSummary.coveredMessageIds.length) {
             warnings.push('Older conversation messages were represented by a persisted, traceable summary.');
         } else if (representedSummaryCount > 0) {
             warnings.push('Older conversation messages were represented by traceable rolling summaries.');
@@ -911,20 +1317,10 @@ export class AgentContextAssembler {
             ...collapseHistorySourceIndexes([...summaryIndexes], 'summary'),
             ...collapseHistorySourceIndexes(omittedIndexes, 'omitted'),
         ].sort((left, right) => left.startMessageIndex - right.startMessageIndex);
-        const historyByIndex = new Map(history.map((message, index) => [
-            Number(message.sourceMessageIndex ?? index),
-            message,
-        ]));
-        const newlyCoveredMessageIds = [...new Set([...summaryIndexes, ...omittedIndexes]
-            .sort((left, right) => left - right)
-            .flatMap((index) => {
-                const messageId = historyByIndex.get(index)?.messageId;
-                return messageId ? [String(messageId)] : [];
-            }))];
-        const summaryUpdate = advanceAgentConversationSummary({
+        const summaryUpdate = persistentSummaryV2 ? undefined : advanceAgentConversationSummary({
             previous: persistentSummary,
             history,
-            newlyCoveredMessageIds,
+            newlyCoveredMessageIds: [],
             artifacts,
         });
         const omittedSectionSet = new Set(omittedSectionIds);
@@ -944,12 +1340,57 @@ export class AgentContextAssembler {
             };
         });
 
+        const hardCount = hardBudget ? tokenCounter.count({
+            providerType: input.providerType,
+            model,
+            configuredContextWindowTokens: input.contextWindowTokens,
+            systemPrompt: String(input.systemPrompt || ''),
+            prompt,
+            toolSchema: input.toolSchema,
+        }) : null;
+        if (hardBudget && (!hardCount || hardCount.contextTokens > hardBudget.hardContextBudget
+            || hardCount.providerInputTokens + outputTokens + hardBudget.safetyReserveTokens
+                + hardBudget.providerReserveTokens > hardBudget.contextWindowTokens)) {
+            throw new AgentContextError(
+                'CONTEXT_BUDGET_UNSATISFIABLE',
+                'Final provider payload failed the hard token budget check.',
+                {
+                    contextTokens: hardCount?.contextTokens,
+                    hardContextBudget: hardBudget.hardContextBudget,
+                    providerInputTokens: hardCount?.providerInputTokens,
+                    hardProviderInputLimit: hardBudget.hardProviderInputLimit,
+                },
+            );
+        }
+        const nextTurnHealth = hardBudget && hardCount
+            ? tokenCounter.wouldRetriggerNextTurn(hardCount.contextTokens, hardBudget)
+            : null;
+        const compressionMode = coordinatorMode === 'semantic' || coordinatorMode === 'degraded'
+            ? coordinatorMode
+            : persistentSummaryV2 ? 'projection'
+                : compressionApplied ? 'micro'
+                    : 'none';
+        const sourceIndexBytes = persistentSummaryV2
+            ? Buffer.byteLength(safeStringify(persistentSummaryV2.sourceIndex), 'utf8')
+            : 0;
+        const currentRequestPayloadOccurrences = countMessageIdOccurrences(payload, currentRequestMessageId);
+        if (currentRequestMessageId && currentRequestPayloadOccurrences !== 1) {
+            throw new AgentContextError(
+                'CONTEXT_CURRENT_REQUEST_IDENTITY_MISMATCH',
+                'Current request must appear exactly once in the final provider payload.',
+                { messageId: currentRequestMessageId, occurrences: currentRequestPayloadOccurrences },
+            );
+        }
+        const coordinatorDiagnostics = input.compressionDiagnostics ? {
+            ...input.compressionDiagnostics,
+            currentRequestPayloadOccurrences,
+        } : undefined;
         return {
             prompt,
             payload,
             ...(summaryUpdate ? { summaryUpdate } : {}),
             diagnostics: {
-                contextVersion: 'agent-context-v1',
+                contextVersion: payload.contextVersion as 'agent-context-v1' | 'agent-context-v2',
                 providerType: input.providerType,
                 model,
                 contextWindowTokens: contextWindow.tokens,
@@ -967,16 +1408,39 @@ export class AgentContextAssembler {
                 historyMessagesOmitted,
                 historyMessagesCompacted,
                 persistentConstraintsCount: persistentConstraints.length,
-                persistentSummaryRevision: persistentSummary?.revision || 0,
-                persistentSummaryMessageCount: persistentSummary?.coveredMessageIds.length || 0,
-                recalledMessageIds: recalledMessages.map((item) => String(item.messageId || '')).filter(Boolean),
-                recalledArtifactIds: recalledArtifacts.map((item) => String(item.artifactId || '')).filter(Boolean),
+                persistentSummaryRevision: persistentSummaryV2?.revision || persistentSummary?.revision || 0,
+                persistentSummaryMessageCount: persistentSummaryV2?.coverage.messageCount || persistentSummary?.coveredMessageIds.length || 0,
+                recalledMessageIds: recalledMessageOutput.map((item) => String(item.messageId || '')).filter(Boolean),
+                recalledArtifactIds: recalledArtifactOutput.map((item) => String(item.artifactId || '')).filter(Boolean),
                 currentRequestMode: currentRequestCompressed ? 'compressed' : 'raw',
                 historySources,
                 sectionSources,
                 compressedSectionIds,
                 omittedSectionIds: [...new Set(omittedSectionIds)],
                 warnings,
+                compressionMode,
+                ...(hardCount && hardBudget ? {
+                    hardTokenCountMethod: hardCount.method,
+                    tokenCounterProfileId: hardCount.profileId,
+                    contextTokens: hardCount.contextTokens,
+                    providerInputTokens: hardCount.providerInputTokens,
+                    hardContextBudget: hardBudget.hardContextBudget,
+                    hardProviderInputLimit: hardBudget.hardProviderInputLimit,
+                    providerReserveTokens: hardBudget.providerReserveTokens,
+                    fixedProviderInputTokens: hardBudget.fixedProviderInputTokens,
+                    triggerContextBudget: hardBudget.triggerContextBudget,
+                    targetContextBudget: hardBudget.targetContextBudget,
+                    nextTurnReserveTokens: hardBudget.nextTurnReserveTokens,
+                    projectedNextTurnContextTokens: nextTurnHealth?.projectedNextTurnContextTokens,
+                    wouldRetriggerNextTurn: nextTurnHealth?.wouldRetriggerNextTurn,
+                } : {}),
+                ...(persistentSummaryV2 ? {
+                    semanticSummaryVersion: 2 as const,
+                    semanticSummaryDependencyStatus: input.compressionDiagnostics?.dependencyHashStatus || 'valid' as const,
+                    sourceIndexLedgerEntries: persistentSummaryV2.sourceIndex.userMessageLedger.length,
+                    sourceIndexBytes,
+                } : {}),
+                ...(coordinatorDiagnostics ? { coordinator: coordinatorDiagnostics } : {}),
             },
         };
     }

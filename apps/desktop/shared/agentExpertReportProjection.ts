@@ -4,6 +4,7 @@ import type {
     ExpertFindingSeverity,
     ExpertReportPayload,
 } from './expertReport';
+import { normalizeExpertReportFindingIds } from './expertReport';
 
 export const EXPERT_REPORT_TYPES = new Set([
     'writer_revision_plan',
@@ -50,7 +51,7 @@ export function getExpertReport(artifact: ExpertArtifactLike | null | undefined)
     if (!report || typeof report !== 'object') return null;
     const candidate = report as Partial<ExpertReportPayload>;
     if (!Array.isArray(candidate.findings) || !candidate.scope || !Array.isArray(candidate.scope.chapterIds)) return null;
-    return candidate as ExpertReportPayload;
+    return normalizeExpertReportFindingIds(candidate as ExpertReportPayload);
 }
 
 export function selectConsolidatedReportArtifact<T extends ExpertArtifactLike>(artifacts: T[]): T | null {

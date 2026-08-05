@@ -41,6 +41,13 @@ export type DraftSkill = {
     profile?: Record<string, string>;
 };
 
+export type DraftWorldSetting = {
+    name: string;
+    type?: 'history' | 'geography' | 'magic_system' | 'faction' | 'technology' | 'other';
+    content?: string;
+    icon?: string;
+};
+
 export type DraftMap = {
     name: string;
     type?: 'world' | 'region' | 'scene';
@@ -57,10 +64,11 @@ export type CreativeAssetsDraft = {
     characters?: DraftCharacter[];
     items?: DraftItem[];
     skills?: DraftSkill[];
+    worldSettings?: DraftWorldSetting[];
     maps?: DraftMap[];
 };
 
-export type CreativeSection = 'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'maps';
+export type CreativeSection = 'plotLines' | 'plotPoints' | 'characters' | 'items' | 'skills' | 'worldSettings' | 'maps';
 
 export type DraftSelection = {
     plotLines: boolean[];
@@ -68,6 +76,7 @@ export type DraftSelection = {
     characters: boolean[];
     items: boolean[];
     skills: boolean[];
+    worldSettings: boolean[];
     maps: boolean[];
 };
 

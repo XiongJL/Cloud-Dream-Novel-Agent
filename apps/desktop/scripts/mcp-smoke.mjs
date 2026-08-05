@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
   const options = {
     command: 'node',
-    args: [path.resolve('apps/desktop/scripts/novel-editor-mcp.mjs')],
+    args: [path.join(scriptDir, 'novel-editor-mcp.mjs')],
     tool: 'draft.list',
     toolArgs: {},
     name: 'novel-editor',

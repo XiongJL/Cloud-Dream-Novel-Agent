@@ -5,6 +5,7 @@ export type CreativeAssetWritebackEntityKind =
     | 'plotPoint'
     | 'character'
     | 'item'
+    | 'worldSetting'
     | 'mapCanvas';
 
 export interface CreativeAssetWritebackEntitySnapshot {

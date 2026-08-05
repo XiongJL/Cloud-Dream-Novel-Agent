@@ -13,6 +13,9 @@ from .schemas import (
 )
 
 
+MAX_CHAPTER_BEAT_REVISIONS = 10
+
+
 def sequence_context_params(input_data: ChapterSequenceContinuationInput) -> dict[str, Any]:
     params: dict[str, Any] = {
         "novelId": input_data.novelId,
@@ -40,6 +43,19 @@ def beat_generation_params(
         "chapterCount": input_data.chapterCount,
         "locale": input_data.locale,
         "context": continuation_context,
+    }
+
+
+def beat_revision_params(
+    input_data: ChapterSequenceContinuationInput,
+    continuation_context: dict[str, Any],
+    previous_beats: list[ChapterBeatInput],
+    revision_instruction: str,
+) -> dict[str, Any]:
+    return {
+        **beat_generation_params(input_data, continuation_context),
+        "previousBeats": [beat.model_dump() for beat in previous_beats],
+        "revisionInstruction": revision_instruction,
     }
 
 
@@ -172,24 +188,36 @@ def normalize_draft_batch(value: Any, node_id: str) -> DraftBatchRecord:
         ) from error
 
 
-def chapter_beats_checkpoint(step_id: str, batch: DraftBatchRecord) -> dict[str, Any]:
+def chapter_beats_checkpoint(
+    step_id: str,
+    batch: DraftBatchRecord,
+    *,
+    revision_error: str | None = None,
+) -> dict[str, Any]:
     beat_lines = [
         f"{index + 1}. {beat.title}：{beat.chapterGoal}；冲突：{beat.coreConflict}；钩子：{beat.endingHook}"
         for index, beat in enumerate(batch.outline.beats)
     ]
-    return {
+    revision_count = max(0, batch.outline.revision - 1)
+    checkpoint = {
         "checkpointId": f"batch-beats:{batch.draftBatchId}:{batch.outline.revision}",
         "checkpointType": "chapter_beats",
         "title": f"确认 {len(batch.outline.beats)} 章节拍",
         "question": "确认以下整批章节节拍后，将按顺序生成正文：\n" + "\n".join(beat_lines),
         "reason": "后续章节依赖前序草稿；节拍确认后才允许开始正文生成。",
         "options": [{"id": "approve_beats", "label": "确认并生成"}],
-        "allowFreeText": False,
+        "allowFreeText": revision_count < MAX_CHAPTER_BEAT_REVISIONS,
+        "freeTextPlaceholder": "告诉我如何调整这些章节节拍……",
         "stepId": step_id,
         "draftBatchId": batch.draftBatchId,
         "outlineRevision": batch.outline.revision,
+        "revisionCount": revision_count,
+        "maxRevisionCount": MAX_CHAPTER_BEAT_REVISIONS,
         "beats": [beat.model_dump() for beat in batch.outline.beats],
     }
+    if revision_error:
+        checkpoint["revisionError"] = revision_error[:1000]
+    return checkpoint
 
 
 def sequence_child_params(

@@ -2,10 +2,20 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
+const expertReportSource = await readFile(new URL('../shared/expertReport.ts', import.meta.url), 'utf8');
+const expertReportOutput = ts.transpileModule(expertReportSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const expertReportModule = await import(`data:text/javascript;base64,${Buffer.from(expertReportOutput).toString('base64')}`);
+globalThis.__normalizeExpertReportFindingIds = expertReportModule.normalizeExpertReportFindingIds;
+
 const source = await readFile(new URL('../shared/agentExpertReportProjection.ts', import.meta.url), 'utf8');
 const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText;
+}).outputText.replace(
+    /import \{ normalizeExpertReportFindingIds \} from ['"]\.\/expertReport['"];/,
+    'const normalizeExpertReportFindingIds = globalThis.__normalizeExpertReportFindingIds;',
+);
 const module = await import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 
 const report = {
@@ -74,5 +84,25 @@ assert.deepEqual(
 );
 assert.deepEqual(module.getFindingSourceExperts(scopeArtifact, scopeReport.findings[1]), ['editor', 'reader']);
 assert.deepEqual(module.getFindingSourceExperts(artifact, report.findings[0]), ['editor']);
+
+const duplicateIdArtifact = {
+    ...artifact,
+    artifactId: 'artifact-duplicate-ids',
+    metadata: {
+        expertReport: {
+            ...report,
+            artifactId: 'artifact-duplicate-ids',
+            findings: [
+                report.findings[0],
+                { ...report.findings[1], findingId: 'finding-1' },
+                { ...report.findings[1], findingId: '' },
+            ],
+        },
+    },
+};
+assert.deepEqual(
+    module.getExpertReport(duplicateIdArtifact).findings.map((finding) => finding.findingId),
+    ['finding-1', 'finding-1__2', 'finding-auto-3'],
+);
 
 console.log('Agent expert report projection tests passed.');

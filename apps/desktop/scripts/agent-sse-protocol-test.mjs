@@ -56,6 +56,7 @@ assert.equal(protocol.shouldApplyRunSequence(6, 7), false);
 
 assert.equal(protocol.shouldResubscribeRun('running', 12, 12), true);
 assert.equal(protocol.shouldResubscribeRun('waiting_approval', 12, 12), true);
+assert.equal(protocol.shouldResubscribeRun('waiting_user_input', 12, 12), true);
 assert.equal(protocol.shouldResubscribeRun('completed', 11, 12), true);
 assert.equal(protocol.shouldResubscribeRun('failed', 11, 12), true);
 assert.equal(protocol.shouldResubscribeRun('completed', 12, 12), false);

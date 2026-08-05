@@ -3,18 +3,20 @@ import { BookOpen, Check, ChevronDown, ListChecks, Users, X } from 'lucide-react
 import { clsx } from 'clsx';
 import type { Volume } from '../../types';
 import {
+  chapterScopeChapterTitle,
   chapterScopeLabel,
+  chapterScopeVolumeTitle,
   type AgentChapterScopeSelection,
   type AgentScopeExpert,
 } from '../../../shared/agentChapterScopeSelection';
 import type { AgentChapterScopeKind } from '../../../shared/agentChapterScope';
 
 const SCOPE_OPTIONS: Array<{ kind: AgentChapterScopeKind; label: string; description: string }> = [
-  { kind: 'current_chapter', label: '当前章', description: '只处理编辑器当前章节' },
-  { kind: 'selected_chapters', label: '选择章节', description: '可选择不连续章节' },
-  { kind: 'chapter_range', label: '章节区间', description: '按作品顺序处理连续区间' },
-  { kind: 'current_volume', label: '当前卷', description: '处理当前章节所在卷' },
-  { kind: 'novel', label: '整本小说', description: '超过 20 章自动分批摘要' },
+  { kind: 'current_chapter', label: '当前章', description: '首先参考编辑器当前章节' },
+  { kind: 'selected_chapters', label: '选择章节', description: '首先参考选中的不连续章节' },
+  { kind: 'chapter_range', label: '章节区间', description: '首先参考连续章节区间' },
+  { kind: 'current_volume', label: '当前卷', description: '首先参考编辑器当前卷' },
+  { kind: 'novel', label: '整本小说', description: '以整本目录和分批摘要为起点' },
 ];
 
 const EXPERTS: Array<{ id: AgentScopeExpert; label: string }> = [
@@ -50,10 +52,15 @@ export function ChapterScopeSelector({
   onClose: () => void;
 }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const chapters = useMemo(() => volumes.flatMap((volume) => (
+  const chapters = useMemo(() => volumes.flatMap((volume, volumeIndex) => (
     [...volume.chapters]
       .sort((a, b) => a.order - b.order)
-      .map((chapter) => ({ ...chapter, volumeId: volume.id, volumeTitle: volume.title }))
+      .map((chapter, chapterIndex) => ({
+        ...chapter,
+        displayTitle: chapterScopeChapterTitle(chapter.title, chapter.order, chapterIndex),
+        volumeId: volume.id,
+        volumeTitle: chapterScopeVolumeTitle(volume.title, volumeIndex),
+      }))
   )), [volumes]);
   const chapterIndex = useMemo(() => new Map(chapters.map((chapter, index) => [chapter.id, index])), [chapters]);
   const selected = new Set(value.chapterIds);
@@ -61,12 +68,14 @@ export function ChapterScopeSelector({
   const rangeEnd = value.kind === 'chapter_range' ? value.chapterIds[1] ?? '' : '';
 
   const selectKind = (kind: AgentChapterScopeKind) => {
+    const usesCurrentChapter = kind === 'current_chapter';
+    const usesCurrentVolume = kind === 'current_volume';
     const next: AgentChapterScopeSelection = {
       ...value,
       kind,
-      volumeId: kind === 'current_volume' || kind === 'current_chapter' ? currentVolumeId : value.volumeId,
-      chapterIds: kind === 'current_chapter' && currentChapterId ? [currentChapterId] : [],
-      anchorChapterId: kind === 'current_chapter' ? currentChapterId : value.anchorChapterId,
+      volumeId: usesCurrentVolume || usesCurrentChapter ? currentVolumeId : undefined,
+      chapterIds: usesCurrentChapter && currentChapterId ? [currentChapterId] : [],
+      anchorChapterId: usesCurrentChapter || usesCurrentVolume ? currentChapterId : undefined,
       processingMode: kind === 'novel' || kind === 'current_volume' ? 'batched' : 'detailed',
     };
     onChange(next);
@@ -126,7 +135,7 @@ export function ChapterScopeSelector({
           'h-8 max-w-[136px] rounded-md border px-2 inline-flex items-center gap-1.5 text-xs disabled:opacity-40',
           isDark ? 'border-white/10 bg-black/20 hover:bg-white/5' : 'border-[var(--ui-border)] bg-white hover:bg-[var(--ui-surface-subtle)]',
         )}
-        title="选择 Agent 处理的章节范围"
+        title="选择 Agent 首先参考的章节范围"
       >
         <ListChecks className="h-4 w-4 shrink-0 text-[#2f80ed]" />
         <span className="truncate">{chapterScopeLabel(value)}</span>
@@ -141,7 +150,7 @@ export function ChapterScopeSelector({
           <div className="flex items-center justify-between gap-3 border-b border-inherit px-3 py-2.5">
             <div>
               <div className="text-sm font-semibold">章节范围</div>
-              <div className={clsx('mt-0.5 text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>显式选择优先于模型推断</div>
+              <div className={clsx('mt-0.5 text-[11px]', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>初始上下文；Agent 可按任务需要申请补读其他章节</div>
             </div>
             <button type="button" onClick={onClose} className={clsx('grid h-7 w-7 place-items-center rounded-md', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')} title="关闭">
               <X className="h-4 w-4" />
@@ -173,26 +182,34 @@ export function ChapterScopeSelector({
 
             <div className="min-w-0 overflow-y-auto p-3">
               {value.kind === 'current_chapter' && (
-                <ScopeNotice icon={<BookOpen className="h-4 w-4" />} title="当前章节" description={chapters.find((chapter) => chapter.id === currentChapterId)?.title || '尚未选择章节'} isDark={isDark} />
+                <ScopeNotice icon={<BookOpen className="h-4 w-4" />} title="当前章节" description={chapters.find((chapter) => chapter.id === currentChapterId)?.displayTitle || '尚未选择章节'} isDark={isDark} />
               )}
               {value.kind === 'current_volume' && (
-                <ScopeNotice icon={<BookOpen className="h-4 w-4" />} title="当前卷" description={volumes.find((volume) => volume.id === currentVolumeId)?.title || '当前章节不属于可用卷'} isDark={isDark} />
+                <ScopeNotice
+                  icon={<BookOpen className="h-4 w-4" />}
+                  title="当前卷"
+                  description={(() => {
+                    const index = volumes.findIndex((volume) => volume.id === currentVolumeId);
+                    return index >= 0 ? chapterScopeVolumeTitle(volumes[index].title, index) : '当前章节不属于可用卷';
+                  })()}
+                  isDark={isDark}
+                />
               )}
               {value.kind === 'novel' && (
                 <ScopeNotice icon={<BookOpen className="h-4 w-4" />} title="整本小说" description={`共 ${chapters.length} 章；超过 20 章时按批次装配摘要上下文`} isDark={isDark} />
               )}
               {value.kind === 'selected_chapters' && (
                 <div className="space-y-3">
-                  {volumes.map((volume) => (
+                  {volumes.map((volume, volumeIndex) => (
                     <div key={volume.id}>
-                      <div className={clsx('sticky top-0 py-1 text-[11px] font-medium', isDark ? 'bg-[#17171c] text-neutral-400' : 'bg-white text-[var(--ui-text-secondary)]')}>{volume.title}</div>
+                      <div className={clsx('sticky top-0 py-1 text-[11px] font-medium', isDark ? 'bg-[#17171c] text-neutral-400' : 'bg-white text-[var(--ui-text-secondary)]')}>{chapterScopeVolumeTitle(volume.title, volumeIndex)}</div>
                       <div className="space-y-0.5">
-                        {[...volume.chapters].sort((a, b) => a.order - b.order).map((chapter) => (
+                        {[...volume.chapters].sort((a, b) => a.order - b.order).map((chapter, chapterIndex) => (
                           <button key={chapter.id} type="button" onClick={() => toggleChapter(chapter.id)} className={clsx('w-full rounded px-2 py-1.5 flex items-center gap-2 text-left text-xs', isDark ? 'hover:bg-white/5' : 'hover:bg-[var(--ui-surface-muted)]')}>
                             <span className={clsx('grid h-4 w-4 place-items-center rounded-sm border', selected.has(chapter.id) ? 'border-[#2f80ed] bg-[#2f80ed] text-white' : isDark ? 'border-white/20' : 'border-[var(--ui-border-strong)]')}>
                               {selected.has(chapter.id) && <Check className="h-3 w-3" />}
                             </span>
-                            <span className="min-w-0 flex-1 truncate">{chapter.title}</span>
+                            <span className="min-w-0 flex-1 truncate">{chapterScopeChapterTitle(chapter.title, chapter.order, chapterIndex)}</span>
                           </button>
                         ))}
                       </div>
@@ -206,14 +223,14 @@ export function ChapterScopeSelector({
                     <span className={isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]'}>起始章节</span>
                     <select value={rangeStart} onChange={(event) => setRange(event.target.value, rangeEnd)} className={clsx('mt-1.5 h-9 w-full rounded-md border px-2 outline-none', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
                       <option value="">请选择</option>
-                      {chapters.map((chapter) => <option key={chapter.id} value={chapter.id}>{chapter.volumeTitle} · {chapter.title}</option>)}
+                      {chapters.map((chapter) => <option key={chapter.id} value={chapter.id}>{chapter.volumeTitle} · {chapter.displayTitle}</option>)}
                     </select>
                   </label>
                   <label className="block text-xs">
                     <span className={isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]'}>结束章节</span>
                     <select value={rangeEnd} onChange={(event) => setRange(rangeStart, event.target.value)} className={clsx('mt-1.5 h-9 w-full rounded-md border px-2 outline-none', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
                       <option value="">请选择</option>
-                      {chapters.map((chapter) => <option key={chapter.id} value={chapter.id}>{chapter.volumeTitle} · {chapter.title}</option>)}
+                      {chapters.map((chapter) => <option key={chapter.id} value={chapter.id}>{chapter.volumeTitle} · {chapter.displayTitle}</option>)}
                     </select>
                   </label>
                 </div>

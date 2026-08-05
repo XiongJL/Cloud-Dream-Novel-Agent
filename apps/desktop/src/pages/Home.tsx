@@ -8,6 +8,7 @@ import SettingsModal from '../components/SettingsModal';
 import { useEditorPreferences } from '../hooks/useEditorPreferences';
 
 const ACTIVE_NOVEL_STORAGE_KEY = 'novel_editor_active_novel_id';
+const LAST_SELECTED_NOVEL_STORAGE_KEY = 'novel_editor_last_selected_novel_id';
 const VISIBLE_STACK_COUNT = 5;
 const WHEEL_THRESHOLD = 90;
 const ANIMATION_DURATION_MS = 700;
@@ -125,6 +126,33 @@ function readNovelAuthor(novel?: any): string {
     if (!novel) return '';
     const formatting = parseFormatting(novel.formatting);
     return typeof formatting.author === 'string' ? formatting.author : '';
+}
+
+function readLastSelectedNovelId(): string | null {
+    try {
+        return localStorage.getItem(LAST_SELECTED_NOVEL_STORAGE_KEY);
+    } catch {
+        return null;
+    }
+}
+
+function rememberSelectedNovel(novelId?: string | null) {
+    if (!novelId) return;
+    try {
+        localStorage.setItem(LAST_SELECTED_NOVEL_STORAGE_KEY, novelId);
+    } catch (error) {
+        console.warn('[Home] failed to persist last selected novel id', error);
+    }
+}
+
+function forgetSelectedNovel(novelId: string) {
+    try {
+        if (localStorage.getItem(LAST_SELECTED_NOVEL_STORAGE_KEY) === novelId) {
+            localStorage.removeItem(LAST_SELECTED_NOVEL_STORAGE_KEY);
+        }
+    } catch (error) {
+        console.warn('[Home] failed to clear last selected novel id', error);
+    }
 }
 
 export default function Home() {
@@ -313,6 +341,8 @@ export default function Home() {
         const normalizedTarget = normalizeIndex(targetIndex, novels.length);
         if (normalizedTarget === activeDeckIndex) return;
 
+        rememberSelectedNovel(novels[normalizedTarget]?.id);
+
         cancelAnimation();
         setIsDeckAnimating(true);
 
@@ -379,7 +409,7 @@ export default function Home() {
         };
 
         animationFrameRef.current = window.requestAnimationFrame(frame);
-    }, [activeDeckIndex, buildIdleStateMap, cancelAnimation, getVisibleIndices, isDeckAnimating, novels.length]);
+    }, [activeDeckIndex, buildIdleStateMap, cancelAnimation, getVisibleIndices, isDeckAnimating, novels]);
 
     const goNext = useCallback(() => {
         if (!novels.length || isDeletingNovel) return;
@@ -393,6 +423,7 @@ export default function Home() {
 
     const startOpenNovel = useCallback(() => {
         if (!activeNovel || isDeckAnimating || isEditorOpen || isLibrarySearchOpen || isDeleteConfirmOpen || isDeletingNovel) return;
+        rememberSelectedNovel(activeNovel.id);
         setSelectedNovelId(activeNovel.id);
     }, [activeNovel, isDeckAnimating, isDeleteConfirmOpen, isDeletingNovel, isEditorOpen, isLibrarySearchOpen]);
 
@@ -434,8 +465,9 @@ export default function Home() {
         try {
             const data = await window.db.getNovels();
             setNovels(data);
-            if (!selectedNovelId && options?.preserveFrontNovelId) {
-                const nextFrontIndex = data.findIndex((novel) => novel.id === options.preserveFrontNovelId);
+            if (!selectedNovelId) {
+                const frontNovelId = options?.preserveFrontNovelId || readLastSelectedNovelId();
+                const nextFrontIndex = data.findIndex((novel) => novel.id === frontNovelId);
                 if (nextFrontIndex >= 0) {
                     setActiveDeckIndex(nextFrontIndex);
                 }
@@ -555,6 +587,7 @@ export default function Home() {
             });
 
             await window.db.deleteNovel(targetNovelId);
+            forgetSelectedNovel(targetNovelId);
             const data = await window.db.getNovels();
             setNovels(data);
 
@@ -591,6 +624,7 @@ export default function Home() {
         try {
             if (selectedNovelId) {
                 sessionStorage.setItem(ACTIVE_NOVEL_STORAGE_KEY, selectedNovelId);
+                rememberSelectedNovel(selectedNovelId);
             } else {
                 sessionStorage.removeItem(ACTIVE_NOVEL_STORAGE_KEY);
             }

@@ -38,7 +38,7 @@ def normalize_reader_chapter_evaluation(
     evaluation = ReaderChapterEvaluation.model_validate(value)
     dropped_refs = 0
     normalized_findings = []
-    for finding in evaluation.findings:
+    for finding_index, finding in enumerate(evaluation.findings, start=1):
         chapter_ids = [chapter.chapterId] if chapter.chapterId in finding.chapterIds else []
         dropped_refs += len(finding.chapterIds) - len(chapter_ids)
         evidence = [
@@ -49,6 +49,7 @@ def normalize_reader_chapter_evaluation(
         dropped_refs += len(finding.evidence) - len(evidence)
         dropped_refs += len(finding.evidenceRefs) - len(evidence_refs)
         normalized_findings.append(finding.model_copy(update={
+            "findingId": f"reader:{chapter.chapterId}:{finding_index}:{finding.findingId.strip()}",
             "chapterIds": chapter_ids,
             "evidence": evidence,
             "evidenceRefs": evidence_refs,
@@ -95,7 +96,7 @@ def build_reader_journey_artifact(
         trends.append(f"追更动力最高为《{strongest.chapterTitle}》，最低为《{weakest.chapterTitle}》。")
     warnings = [*bundle.warnings, *(warning for item in evaluations for warning in item.warnings)]
     summarized = [
-        item.chapterTitle for item in bundle.chapters
+        item.title for item in bundle.chapters
         if item.target and item.contentMode in {"summary", "excerpt"}
     ]
     if summarized:

@@ -7,10 +7,22 @@ import { readFile } from 'node:fs/promises';
 import { PrismaClient } from '@novel-editor/core';
 import ts from 'typescript';
 
+const expertReportSource = await readFile(new URL('../shared/expertReport.ts', import.meta.url), 'utf8');
+const expertReportOutput = ts.transpileModule(expertReportSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const expertReportModule = await import(`data:text/javascript;base64,${Buffer.from(expertReportOutput).toString('base64')}`);
+globalThis.__normalizeExpertReportFindingIds = expertReportModule.normalizeExpertReportFindingIds;
+
 const source = await readFile(new URL('../electron/agent/AgentReviewStore.ts', import.meta.url), 'utf8');
 const transpiled = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
-}).outputText.replace("import { db } from '@novel-editor/core';", 'const db = undefined;');
+}).outputText
+    .replace("import { db } from '@novel-editor/core';", 'const db = undefined;')
+    .replace(
+        /import \{ normalizeExpertReportFindingIds \} from ['"]\.\.\/\.\.\/shared\/expertReport['"];/,
+        'const normalizeExpertReportFindingIds = globalThis.__normalizeExpertReportFindingIds;',
+    );
 const { AgentReviewStore } = await import(
     `data:text/javascript;base64,${Buffer.from(transpiled).toString('base64')}`
 );
@@ -113,6 +125,32 @@ try {
     assert.equal(retry.revisionTasks.length, 1);
     assert.equal(retry.revisionTasks[0].revisionTaskId, revisionTaskId);
     assert.equal((await store.listRevisionTasks({ novelId: 'novel-1', chapterId: 'chapter-1' })).length, 1);
+
+    const legacyDuplicateReport = {
+        ...report,
+        artifactId: 'artifact-legacy-duplicates',
+        findings: [
+            report.findings[0],
+            { ...report.findings[0], findingId: 'finding-1', title: '第二条旧建议' },
+        ],
+    };
+    await client.$executeRawUnsafe(`
+        INSERT INTO AgentArtifact (
+            artifactId, conversationId, runId, novelId, planId, type, title, status, metadataJson
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, 'artifact-legacy-duplicates', 'conversation-1', 'run-1', 'novel-1', 'plan-1', report.type, report.title, 'ready',
+    JSON.stringify({ expertReport: legacyDuplicateReport }));
+    const legacyDuplicateReview = await store.submitArtifactReview({
+        artifactId: 'artifact-legacy-duplicates', expectedReviewRevision: 0, createRevisionTasks: false,
+        decisions: [
+            { findingId: 'finding-1', status: 'accepted' },
+            { findingId: 'finding-1__2', status: 'accepted' },
+        ],
+    });
+    assert.deepEqual(
+        legacyDuplicateReview.review.decisions.map((decision) => decision.findingId),
+        ['finding-1', 'finding-1__2'],
+    );
 
     const deferredReport = {
         ...report,

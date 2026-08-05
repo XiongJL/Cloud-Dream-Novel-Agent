@@ -3,6 +3,11 @@ from __future__ import annotations
 import pytest
 
 from novel_agent_runtime.intent.operations import INTENT_OPERATION_REGISTRY
+from novel_agent_runtime.intent.rules import (
+    detect_explicit_operations,
+    requested_continuation_chapter_count,
+    requested_created_chapter_count,
+)
 from novel_agent_runtime.intent.schemas import (
     FailedRunRef,
     IntentConversationState,
@@ -13,6 +18,7 @@ from novel_agent_runtime.intent.schemas import (
     SemanticProposal,
 )
 from novel_agent_runtime.intent.service import IntentService
+from novel_agent_runtime.intent.targets import resolve_intent_chapter_target
 
 
 def request(
@@ -405,3 +411,252 @@ def test_explicit_review_then_draft_remains_a_compound_task() -> None:
     ]
     assert decision.requestedEffect == "draft_write"
     assert decision.deliverable == "creative_assets_draft"
+
+
+def test_last_chapter_is_a_target_not_a_sequence_count() -> None:
+    assert requested_continuation_chapter_count("帮我续写最后一章。") is None
+    assert detect_explicit_operations("帮我续写最后一章。") == ["chapter.continuation"]
+    assert requested_continuation_chapter_count("帮我续写三章。") == 3
+    assert detect_explicit_operations("帮我续写三章。") == ["chapter.sequence_continuation"]
+
+
+def test_last_chapter_target_resolves_against_novel_order() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章。",
+        [
+            {"chapterId": "chapter-2", "title": "白色房间", "chapterOrder": 2, "volumeId": "volume-1", "volumeTitle": "第一卷", "volumeOrder": 1},
+            {"chapterId": "chapter-1", "title": "雨夜来电", "chapterOrder": 1, "volumeId": "volume-1", "volumeTitle": "第一卷", "volumeOrder": 1},
+            {"chapterId": "chapter-9", "title": "终局", "chapterOrder": 3, "volumeId": "volume-3", "volumeTitle": "第三卷", "volumeOrder": 3},
+        ],
+        editor_chapter_id="chapter-2",
+        editor_volume_id="volume-1",
+    )
+
+    assert target is not None
+    assert target.selector == "last_in_novel"
+    assert target.chapterId == "chapter-9"
+    assert target.label == "第三卷 · 终局"
+
+
+def test_semantic_single_continuation_wins_over_misclassified_sequence_candidate() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章。",
+        [
+            {"chapterId": "chapter-2", "title": "白色房间", "chapterOrder": 2, "volumeOrder": 1},
+            {"chapterId": "chapter-9", "title": "终局", "chapterOrder": 1, "volumeOrder": 3},
+        ],
+        editor_chapter_id="chapter-2",
+    )
+    intent_request = request("帮我续写最后一章。")
+    intent_request = intent_request.model_copy(update={"requestedTarget": target})
+    decision = decide(
+        intent_request,
+        proposal(
+            "准备续写全书最后一章。",
+            should_plan=True,
+            operations=["chapter.sequence_continuation", "chapter.continuation"],
+            deliverable="chapter_draft",
+        ),
+    )
+
+    assert [item.type for item in decision.operations] == ["chapter.continuation"]
+    assert decision.operations[0].target.id == "chapter-9"
+    assert decision.operations[0].target.selector == "last_in_novel"
+    assert decision.deliverable == "chapter_draft"
+    assert "MUTUALLY_EXCLUSIVE_OPERATION_NORMALIZED" in decision.reasonCodes
+
+
+def test_ambiguous_last_chapter_continuation_allows_model_to_choose_create() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章。",
+        [
+            {"chapterId": "chapter-2", "title": "白色房间", "chapterOrder": 2, "volumeOrder": 1},
+            {"chapterId": "chapter-9", "title": "终局", "chapterOrder": 1, "volumeOrder": 3},
+        ],
+        editor_chapter_id="chapter-2",
+    )
+    decision = decide(
+        request("帮我续写最后一章。").model_copy(update={"requestedTarget": target}),
+        proposal(
+            "准备续写全书最后一章。",
+            should_plan=True,
+            operations=["chapter.create"],
+            deliverable="chapter_draft_batch",
+        ),
+    )
+
+    assert [item.type for item in decision.operations] == ["chapter.create"]
+    assert decision.operations[0].target.id == "chapter-9"
+    assert decision.deliverable == "chapter_draft_batch"
+    assert "MUTUALLY_EXCLUSIVE_OPERATION_NORMALIZED" in decision.reasonCodes
+
+
+def test_create_next_chapter_is_distinct_from_appending_existing_chapter() -> None:
+    assert detect_explicit_operations("在第三章后新增一章") == ["chapter.create"]
+    target = resolve_intent_chapter_target(
+        "在第三章后新增一章",
+        [
+            {"chapterId": "chapter-1", "title": "一", "chapterOrder": 1, "volumeOrder": 1},
+            {"chapterId": "chapter-2", "title": "二", "chapterOrder": 2, "volumeOrder": 1},
+            {"chapterId": "chapter-3", "title": "三", "chapterOrder": 3, "volumeOrder": 1},
+        ],
+        editor_chapter_id="chapter-1",
+    )
+    assert target is not None
+    assert target.chapterId == "chapter-3"
+    decision = decide(
+        request("在第三章后新增一章").model_copy(update={"requestedTarget": target}),
+        proposal("将生成一个新章节草稿。", should_plan=True, operations=["chapter.continuation"]),
+    )
+    assert [item.type for item in decision.operations] == ["chapter.create"]
+    assert decision.operations[0].suggestedToolchainId == "chapter.sequence_continuation"
+    assert decision.operations[0].target.id == "chapter-3"
+    assert decision.deliverable == "chapter_draft_batch"
+
+
+def test_explicit_chapter_range_routes_to_batch_rewrite_with_exact_targets() -> None:
+    catalog = [
+        {"chapterId": f"chapter-{index}", "title": f"第{index}章", "chapterOrder": index, "volumeId": "volume-1", "volumeOrder": 1}
+        for index in range(1, 6)
+    ]
+    target = resolve_intent_chapter_target("改写第二到第四章", catalog, editor_chapter_id="chapter-1")
+    assert target is not None
+    assert target.selector == "novel_chapter_range"
+    assert target.chapterIds == ["chapter-2", "chapter-3", "chapter-4"]
+    assert detect_explicit_operations("改写第二到第四章") == ["chapter.batch_rewrite"]
+
+    decision = decide(
+        request("改写第二到第四章").model_copy(update={"requestedTarget": target}),
+        proposal("将改写三章。", should_plan=True, operations=["chapter.rewrite"], deliverable="chapter_draft_batch"),
+    )
+    assert [item.type for item in decision.operations] == ["chapter.batch_rewrite"]
+    assert decision.operations[0].target.kind == "chapter_scope"
+    assert decision.operations[0].target.ids == ["chapter-2", "chapter-3", "chapter-4"]
+    assert decision.operations[0].suggestedToolchainId == "chapter.batch_rewrite"
+
+
+def test_create_multiple_chapters_uses_explicit_count() -> None:
+    assert requested_created_chapter_count("在第三章后新增两章") == 2
+    assert detect_explicit_operations("在第三章后新增两章") == ["chapter.create"]
+    assert detect_explicit_operations("再写两章") == ["chapter.sequence_continuation"]
+
+
+def test_unresolved_explicit_target_never_falls_back_to_open_editor_chapter_or_fake_user_decision() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章",
+        [],
+        editor_chapter_id="chapter-white-room",
+        editor_volume_id="volume-1",
+    )
+    assert target is not None
+    assert target.selector == "last_in_novel"
+    assert target.chapterId is None
+
+    decision = decide(
+        request("帮我续写最后一章").model_copy(update={"requestedTarget": target}),
+        proposal("准备续写。", should_plan=True, operations=["chapter.continuation"], deliverable="chapter_draft"),
+    )
+    assert decision.route == "respond"
+    assert decision.needsClarification is False
+    assert decision.operations[0].target.id is None
+    assert "CHAPTER_TARGET_UNRESOLVED" in decision.reasonCodes
+    assert "PROJECT_CATALOG_UNAVAILABLE" in decision.reasonCodes
+
+
+def test_last_chapter_target_accepts_nested_volume_list_result() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章",
+        [
+            {
+                "id": "volume-1",
+                "title": "第一卷",
+                "order": 1,
+                "chapters": [
+                    {"id": "chapter-1", "title": "雨夜来电", "order": 1},
+                    {"id": "chapter-2", "title": "白色房间", "order": 2},
+                ],
+            },
+            {
+                "id": "volume-3",
+                "title": "第三卷",
+                "order": 3,
+                "chapters": [{"id": "chapter-9", "title": "终局", "order": 1}],
+            },
+        ],
+        editor_chapter_id="chapter-2",
+        editor_volume_id="volume-1",
+    )
+
+    assert target is not None
+    assert target.chapterId == "chapter-9"
+    assert target.volumeId == "volume-3"
+    assert target.selector == "last_in_novel"
+
+
+def test_last_chapter_target_exposes_structural_written_and_empty_tail_candidates() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章",
+        [
+            {
+                "id": "volume-1",
+                "title": "第一卷",
+                "order": 1,
+                "chapters": [
+                    {"id": "chapter-1", "title": "雨夜来电", "order": 1, "wordCount": 2100, "hasContent": True},
+                    {"id": "chapter-2", "title": "残响觉醒", "order": 2, "wordCount": 3600, "hasContent": True},
+                ],
+            },
+            {
+                "id": "volume-2",
+                "title": "第二卷",
+                "order": 2,
+                "chapters": [
+                    {"id": "chapter-3", "title": "", "order": 1, "wordCount": 0, "hasContent": False},
+                ],
+            },
+            {
+                "id": "volume-3",
+                "title": "第三卷",
+                "order": 3,
+                "chapters": [
+                    {"id": "chapter-4", "title": "待写终章", "order": 1, "wordCount": 0, "hasContent": False},
+                ],
+            },
+        ],
+    )
+
+    assert target is not None
+    assert target.chapterId == "chapter-4"
+    assert target.hasContent is False
+    assert target.structuralLast is not None
+    assert target.structuralLast.chapterId == "chapter-4"
+    assert target.lastWritten is not None
+    assert target.lastWritten.chapterId == "chapter-2"
+    assert target.lastWritten.wordCount == 3600
+    assert [item.chapterId for item in target.trailingEmptyChapters] == ["chapter-3", "chapter-4"]
+
+
+def test_model_write_mode_selects_structural_empty_or_last_written_anchor() -> None:
+    target = resolve_intent_chapter_target(
+        "帮我续写最后一章",
+        [
+            {"chapterId": "chapter-written", "title": "残响觉醒", "chapterOrder": 1, "volumeOrder": 1, "wordCount": 3600, "hasContent": True},
+            {"chapterId": "chapter-empty", "title": "待写终章", "chapterOrder": 1, "volumeOrder": 2, "wordCount": 0, "hasContent": False},
+        ],
+    )
+    assert target is not None
+
+    continuation = decide(
+        request("帮我续写最后一章").model_copy(update={"requestedTarget": target}),
+        proposal("填写已有空章。", should_plan=True, operations=["chapter.continuation"], deliverable="chapter_draft"),
+    )
+    assert continuation.operations[0].target.id == "chapter-empty"
+    assert continuation.operations[0].target.hasContent is False
+
+    creation = decide(
+        request("帮我续写最后一章").model_copy(update={"requestedTarget": target}),
+        proposal("以最后有正文章为锚点新建下一章。", should_plan=True, operations=["chapter.create"], deliverable="chapter_draft_batch"),
+    )
+    assert creation.operations[0].target.id == "chapter-written"
+    assert creation.operations[0].target.selector == "last_written_in_novel"
+    assert creation.operations[0].target.hasContent is True

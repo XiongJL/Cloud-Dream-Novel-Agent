@@ -27,10 +27,11 @@ const EMPTY_DRAFT: CreativeAssetsDraft = {
   characters: [],
   items: [],
   skills: [],
+  worldSettings: [],
   maps: [],
 };
 
-const ALL_SECTIONS: CreativeSection[] = ['plotLines', 'plotPoints', 'characters', 'items', 'skills', 'maps'];
+const ALL_SECTIONS: CreativeSection[] = ['plotLines', 'plotPoints', 'characters', 'items', 'skills', 'worldSettings', 'maps'];
 
 function normalizeDraft(input: unknown): CreativeAssetsDraft {
   if (!input || typeof input !== 'object') return { ...EMPTY_DRAFT };
@@ -41,6 +42,7 @@ function normalizeDraft(input: unknown): CreativeAssetsDraft {
     characters: Array.isArray(asDraft.characters) ? asDraft.characters : [],
     items: Array.isArray(asDraft.items) ? asDraft.items : [],
     skills: Array.isArray(asDraft.skills) ? asDraft.skills : [],
+    worldSettings: Array.isArray(asDraft.worldSettings) ? asDraft.worldSettings : [],
     maps: Array.isArray(asDraft.maps) ? asDraft.maps : [],
   };
 }
@@ -52,6 +54,7 @@ function createSelection(draft: CreativeAssetsDraft): DraftSelection {
     characters: (draft.characters ?? []).map(() => true),
     items: (draft.items ?? []).map(() => true),
     skills: (draft.skills ?? []).map(() => true),
+    worldSettings: (draft.worldSettings ?? []).map(() => true),
     maps: (draft.maps ?? []).map(() => true),
   };
 }
@@ -69,6 +72,7 @@ function sanitizeGeneratedDraft(
     characters: keepNonEmpty(draft.characters, 'name'),
     items: keepNonEmpty(draft.items, 'name'),
     skills: keepNonEmpty(draft.skills, 'name'),
+    worldSettings: keepNonEmpty(draft.worldSettings, 'name'),
     maps: keepNonEmpty(draft.maps, 'name'),
   };
   const beforeCount = (draft.plotLines?.length ?? 0)
@@ -76,12 +80,14 @@ function sanitizeGeneratedDraft(
     + (draft.characters?.length ?? 0)
     + (draft.items?.length ?? 0)
     + (draft.skills?.length ?? 0)
+    + (draft.worldSettings?.length ?? 0)
     + (draft.maps?.length ?? 0);
   const afterCount = (clean.plotLines?.length ?? 0)
     + (clean.plotPoints?.length ?? 0)
     + (clean.characters?.length ?? 0)
     + (clean.items?.length ?? 0)
     + (clean.skills?.length ?? 0)
+    + (clean.worldSettings?.length ?? 0)
     + (clean.maps?.length ?? 0);
   return { draft: clean, dropped: Math.max(0, beforeCount - afterCount) };
 }
@@ -133,6 +139,7 @@ export default function AIWorkbenchPanel({
       characters: countSelected(selection.characters),
       items: countSelected(selection.items),
       skills: countSelected(selection.skills),
+      worldSettings: countSelected(selection.worldSettings),
       maps: countSelected(selection.maps),
     }),
     [selection],
@@ -145,6 +152,7 @@ export default function AIWorkbenchPanel({
       + (draft.characters?.length ?? 0)
       + (draft.items?.length ?? 0)
       + (draft.skills?.length ?? 0)
+      + (draft.worldSettings?.length ?? 0)
       + (draft.maps?.length ?? 0),
     [draft],
   );
@@ -155,6 +163,7 @@ export default function AIWorkbenchPanel({
       { key: 'characters', label: t('aiWorkbench.countCharacters'), value: selectedCounts.characters },
       { key: 'items', label: t('aiWorkbench.countItems'), value: selectedCounts.items },
       { key: 'skills', label: t('aiWorkbench.countSkills'), value: selectedCounts.skills },
+      { key: 'worldSettings', label: t('aiWorkbench.countWorldSettings'), value: selectedCounts.worldSettings },
       { key: 'maps', label: t('aiWorkbench.countMaps'), value: selectedCounts.maps },
     ],
     [selectedCounts, t],
@@ -384,7 +393,7 @@ export default function AIWorkbenchPanel({
       }
 
       const createdCounts = result.created || {};
-      const hasWorldUpdates = (createdCounts.characters || 0) > 0 || (createdCounts.items || 0) > 0 || (createdCounts.skills || 0) > 0;
+      const hasWorldUpdates = (createdCounts.characters || 0) > 0 || (createdCounts.items || 0) > 0 || (createdCounts.skills || 0) > 0 || (createdCounts.worldSettings || 0) > 0;
       const hasMapUpdates = (createdCounts.maps || 0) > 0 || (createdCounts.mapImages || 0) > 0;
       const hasPlotUpdates = (createdCounts.plotLines || 0) > 0 || (createdCounts.plotPoints || 0) > 0;
 
@@ -403,8 +412,8 @@ export default function AIWorkbenchPanel({
 
       // 入库成功后清空草稿
       onDraftSessionChange(null);
-      onDraftChange({ plotLines: [], plotPoints: [], characters: [], items: [], skills: [], maps: [] });
-      onSelectionChange({ plotLines: [], plotPoints: [], characters: [], items: [], skills: [], maps: [] });
+      onDraftChange({ plotLines: [], plotPoints: [], characters: [], items: [], skills: [], worldSettings: [], maps: [] });
+      onSelectionChange({ plotLines: [], plotPoints: [], characters: [], items: [], skills: [], worldSettings: [], maps: [] });
 
       setFlowStatus('success', 'success', t('aiWorkbench.persistSuccess'));
     } catch (error) {
@@ -675,6 +684,7 @@ export default function AIWorkbenchPanel({
               <span>{t('aiWorkbench.countCharacters')}: {created.characters || 0}</span>
               <span>{t('aiWorkbench.countItems')}: {created.items || 0}</span>
               <span>{t('aiWorkbench.countSkills')}: {created.skills || 0}</span>
+              <span>{t('aiWorkbench.countWorldSettings')}: {created.worldSettings || 0}</span>
               <span>{t('aiWorkbench.countMaps')}: {created.maps || 0}</span>
               <span>{t('aiWorkbench.countMapImages')}: {created.mapImages || 0}</span>
             </div>

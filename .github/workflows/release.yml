@@ -98,6 +98,9 @@ jobs:
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
+      - name: Type-check Desktop
+        run: pnpm --filter novel-editor-desktop run typecheck
+
       - name: Build Windows artifacts
         run: pnpm --filter novel-editor-desktop run build:win
 
@@ -225,6 +228,9 @@ jobs:
 
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
+
+      - name: Type-check Desktop
+        run: pnpm --filter novel-editor-desktop run typecheck
 
       - name: Build macOS artifact
         run: pnpm --filter novel-editor-desktop run build:mac:${{ matrix.arch }}

@@ -6,6 +6,7 @@ export const EMPTY_CREATIVE_DRAFT: CreativeAssetsDraft = {
     characters: [],
     items: [],
     skills: [],
+    worldSettings: [],
     maps: [],
 };
 
@@ -15,5 +16,6 @@ export const EMPTY_DRAFT_SELECTION: DraftSelection = {
     characters: [],
     items: [],
     skills: [],
+    worldSettings: [],
     maps: [],
 };

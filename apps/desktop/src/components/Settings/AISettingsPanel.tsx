@@ -3,20 +3,18 @@ import { clsx } from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { formatAiError, formatAiErrorFromUnknown } from '../../utils/aiError';
 import { Combobox } from '../ui/Combobox';
+import { ModelIdCombobox, type ModelIdOption } from './ModelIdCombobox';
+import {
+    AGENT_CONTEXT_WINDOW_PRESETS,
+    AGENT_TEXT_MODEL_CAPABILITY_CATALOG,
+    MAXIMUM_AGENT_CONTEXT_WINDOW_TOKENS,
+    MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS,
+    resolveAgentModelContextCapability,
+} from '../../../shared/agentModelContextCapabilities';
 
 type Props = {
     isDark: boolean;
 };
-
-const TEXT_MODELS = [
-    'doubao-seed-2-0-pro-260215',
-    'doubao-1-5-pro-32k-250115',
-    'gemini-2.5-pro',
-    'gemini-2.0-flash',
-    'gpt-4.1-mini',
-    'gpt-4.1',
-    'gpt-4o-mini',
-];
 
 const IMAGE_MODELS = [
     'doubao-seedream-5-0-260128',
@@ -27,6 +25,7 @@ const IMAGE_MODELS = [
 type CreativityLevel = 'safe' | 'balanced' | 'creative';
 type StatusTone = 'neutral' | 'error' | 'success';
 type CopyTone = 'neutral' | 'error' | 'success';
+type ContextWindowTarget = 'http' | 'mcpCli';
 
 type SettingFieldProps = {
     label: string;
@@ -46,6 +45,40 @@ function creativityLevelToTemperature(level: CreativityLevel): number {
     if (level === 'creative') return 1.0;
     return 0.7;
 }
+
+function isCustomContextWindow(tokens: number): boolean {
+    return tokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+        && !AGENT_CONTEXT_WINDOW_PRESETS.some((preset) => preset.tokens === tokens);
+}
+
+function formatContextWindow(tokens: number): string {
+    if (tokens === 1_000_000 || tokens === 1_048_576) return '1M';
+    if (tokens === 258_000) return '258K';
+    if (tokens === 256_000 || tokens === 262_144) return '256K';
+    if (tokens === 500_000) return '500K';
+    if (tokens === 200_000) return '200K';
+    if (tokens === 131_072) return '128K';
+    if (tokens === 65_536) return '64K';
+    if (tokens === 32_768) return '32K';
+    if (tokens === 8_192) return '8K';
+    return tokens.toLocaleString();
+}
+
+function normalizeCustomContextWindowDraft(value: string, fallback: number): number {
+    const parsed = Math.floor(Number(value));
+    if (!value.trim() || !Number.isFinite(parsed)) return fallback;
+    return Math.min(
+        MAXIMUM_AGENT_CONTEXT_WINDOW_TOKENS,
+        Math.max(MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS, parsed),
+    );
+}
+
+const TEXT_MODEL_OPTIONS: ModelIdOption[] = AGENT_TEXT_MODEL_CAPABILITY_CATALOG.map((entry) => ({
+    modelId: entry.modelId,
+    displayName: entry.displayName,
+    providerName: entry.providerName,
+    contextLabel: formatContextWindow(entry.contextWindowTokens),
+}));
 
 function SettingField({ label, hint, children, className }: SettingFieldProps) {
     return (
@@ -71,6 +104,14 @@ export function AISettingsPanel({ isDark }: Props) {
     const [mcpSetup, setMcpSetup] = useState<McpCliSetupPayload | null>(null);
     const [copyStatus, setCopyStatus] = useState('');
     const [copyTone, setCopyTone] = useState<CopyTone>('neutral');
+    const [customContextWindow, setCustomContextWindow] = useState<Record<ContextWindowTarget, boolean>>({
+        http: false,
+        mcpCli: false,
+    });
+    const [customContextWindowDraft, setCustomContextWindowDraft] = useState<Record<ContextWindowTarget, string>>({
+        http: '',
+        mcpCli: '',
+    });
     const [expandedCards, setExpandedCards] = useState({
         httpAdvanced: false,
         summary: false,
@@ -112,6 +153,18 @@ export function AISettingsPanel({ isDark }: Props) {
                 } as AISettings;
                 setSettings(merged);
                 setCreativityLevel(temperatureToCreativityLevel(merged.http.temperature));
+                setCustomContextWindow({
+                    http: isCustomContextWindow(merged.http.contextWindowTokens),
+                    mcpCli: isCustomContextWindow(merged.mcpCli.contextWindowTokens),
+                });
+                setCustomContextWindowDraft({
+                    http: isCustomContextWindow(merged.http.contextWindowTokens)
+                        ? String(merged.http.contextWindowTokens)
+                        : '',
+                    mcpCli: isCustomContextWindow(merged.mcpCli.contextWindowTokens)
+                        ? String(merged.mcpCli.contextWindowTokens)
+                        : '',
+                });
             })
             .catch((error) => {
                 console.error('[AISettingsPanel] load failed:', error);
@@ -162,6 +215,35 @@ export function AISettingsPanel({ isDark }: Props) {
         setSettings({ ...settings, providerType });
     };
 
+    const updateCustomContextWindowDraft = (target: ContextWindowTarget, value: string) => {
+        if (!/^\d*$/.test(value)) return;
+        setCustomContextWindowDraft((current) => ({ ...current, [target]: value }));
+        if (!value) return;
+        const parsed = Math.floor(Number(value));
+        if (!Number.isFinite(parsed)
+            || parsed < MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+            || parsed > MAXIMUM_AGENT_CONTEXT_WINDOW_TOKENS) return;
+        setSettings((current) => current ? {
+            ...current,
+            [target]: {
+                ...current[target],
+                contextWindowTokens: parsed,
+            },
+        } : current);
+    };
+
+    const commitCustomContextWindowDraft = (target: ContextWindowTarget, fallback: number) => {
+        const committed = normalizeCustomContextWindowDraft(customContextWindowDraft[target], fallback);
+        setCustomContextWindowDraft((current) => ({ ...current, [target]: String(committed) }));
+        setSettings((current) => current ? {
+            ...current,
+            [target]: {
+                ...current[target],
+                contextWindowTokens: committed,
+            },
+        } : current);
+    };
+
     const updateCreativityLevel = (level: CreativityLevel) => {
         if (!settings) return;
         setCreativityLevel(level);
@@ -176,6 +258,8 @@ export function AISettingsPanel({ isDark }: Props) {
 
     const applyPreset = (preset: 'doubao-ark' | 'openai-compatible' | 'openai-responses' | 'gemini-openai-compatible') => {
         if (!settings) return;
+        setCustomContextWindow((current) => ({ ...current, http: false }));
+        setCustomContextWindowDraft((current) => ({ ...current, http: '' }));
 
         if (preset === 'doubao-ark') {
             setCreativityLevel(temperatureToCreativityLevel(0.7));
@@ -187,6 +271,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     apiMode: 'chat-completions',
                     baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
                     model: 'doubao-seed-2-0-pro-260215',
+                    contextWindowTokens: 0,
                     imageModel: 'doubao-seedream-5-0-260128',
                     imageSize: '2K',
                     imageOutputFormat: 'png',
@@ -211,6 +296,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     apiMode: 'chat-completions',
                     baseUrl: 'https://api.openai.com/v1',
                     model: 'gpt-4.1-mini',
+                    contextWindowTokens: 0,
                     imageModel: 'gpt-image-1',
                     imageSize: '1024x1024',
                     imageOutputFormat: 'png',
@@ -235,6 +321,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     apiMode: 'responses',
                     baseUrl: 'https://api.openai.com/v1',
                     model: 'gpt-4.1-mini',
+                    contextWindowTokens: 0,
                     imageModel: 'gpt-image-1',
                     imageSize: '1024x1024',
                     imageOutputFormat: 'png',
@@ -258,6 +345,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 apiMode: 'chat-completions',
                 baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
                 model: 'gemini-2.5-pro',
+                contextWindowTokens: 0,
                 imageModel: 'imagen-3.0-generate-002',
                 imageSize: '1024x1024',
                 imageOutputFormat: 'png',
@@ -360,6 +448,19 @@ export function AISettingsPanel({ isDark }: Props) {
         return <div className={clsx('text-sm', isDark ? 'text-neutral-400' : 'text-gray-500')}>{t('common.loading')}</div>;
     }
 
+    const httpContextCapability = resolveAgentModelContextCapability('http', settings.http.model);
+    const mcpContextCapability = resolveAgentModelContextCapability('mcp-cli', 'mcp-cli');
+    const httpContextWindowMode = customContextWindow.http
+        ? 'custom'
+        : AGENT_CONTEXT_WINDOW_PRESETS.some((preset) => preset.tokens === settings.http.contextWindowTokens)
+            ? String(settings.http.contextWindowTokens)
+            : 'auto';
+    const mcpContextWindowMode = customContextWindow.mcpCli
+        ? 'custom'
+        : AGENT_CONTEXT_WINDOW_PRESETS.some((preset) => preset.tokens === settings.mcpCli.contextWindowTokens)
+            ? String(settings.mcpCli.contextWindowTokens)
+            : 'auto';
+
     const inputClass = clsx('w-full border rounded-xl px-4 py-3 outline-none focus:border-indigo-500 transition-colors text-sm', isDark ? 'bg-[#0a0a0f] border-white/10 text-white' : 'bg-white border-gray-200 text-gray-900');
     const textareaClass = clsx('w-full border rounded-xl px-4 py-3 outline-none focus:border-indigo-500 transition-colors text-sm resize-y', isDark ? 'bg-[#0a0a0f] border-white/10 text-white placeholder:text-neutral-600' : 'bg-white border-gray-200 text-gray-900 placeholder:text-gray-400');
     const statusClass = statusTone === 'error' ? (isDark ? 'border-rose-400/30 bg-rose-400/10 text-rose-300' : 'border-rose-200 bg-rose-50 text-rose-700') : statusTone === 'success' ? (isDark ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300' : 'border-emerald-200 bg-emerald-50 text-emerald-700') : (isDark ? 'border-white/10 bg-white/5 text-neutral-300' : 'border-gray-200 bg-gray-50 text-gray-600');
@@ -426,21 +527,96 @@ export function AISettingsPanel({ isDark }: Props) {
                         <div className={clsx('p-4 rounded-xl border', isDark ? 'bg-white/5 border-white/5' : 'bg-gray-50/50 border-gray-100')}>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <SettingField label={t('settings.ai.model')} hint={t('settings.ai.modelPresetHint')} className="md:col-span-2">
-                                    <Combobox
-                                        options={TEXT_MODELS.map(m => ({ id: m, name: m }))}
+                                    <ModelIdCombobox
+                                        options={TEXT_MODEL_OPTIONS}
                                         value={settings.http.model}
-                                        onChange={(val) => setSettings({ ...settings, http: { ...settings.http, model: val } })}
+                                        onCommit={(modelId) => {
+                                            if (modelId === settings.http.model) return;
+                                            setCustomContextWindow((current) => ({ ...current, http: false }));
+                                            setCustomContextWindowDraft((current) => ({ ...current, http: '' }));
+                                            setSettings({ ...settings, http: { ...settings.http, model: modelId, contextWindowTokens: 0 } });
+                                        }}
                                         placeholder="gpt-4.1-mini"
-                                        creatable={true}
+                                        noResultsLabel={t('settings.ai.modelNoResults')}
                                         theme={isDark ? 'dark' : 'light'}
-                                        t={t as any}
                                     />
                                 </SettingField>
                                 <SettingField label={t('settings.ai.maxTokens')} hint={t('settings.ai.maxTokensHint')}>
                                     <input type="number" value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || 4096 } })} placeholder="4096" className={inputClass} />
                                 </SettingField>
-                                <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensHint')}>
-                                    <input type="number" min={0} value={settings.http.contextWindowTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, contextWindowTokens: Math.max(0, Number(e.target.value) || 0) } })} placeholder="0" className={inputClass} />
+                                <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensHint')} className="md:col-span-2">
+                                    <select
+                                        value={httpContextWindowMode}
+                                        onChange={(event) => {
+                                            const value = event.target.value;
+                                            if (value === 'custom') {
+                                                const initialValue = settings.http.contextWindowTokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+                                                    ? settings.http.contextWindowTokens
+                                                    : httpContextCapability.defaultContextWindowTokens;
+                                                setCustomContextWindow((current) => ({ ...current, http: true }));
+                                                setCustomContextWindowDraft((current) => ({ ...current, http: String(initialValue) }));
+                                                setSettings({
+                                                    ...settings,
+                                                    http: { ...settings.http, contextWindowTokens: initialValue },
+                                                });
+                                                return;
+                                            }
+                                            setCustomContextWindow((current) => ({ ...current, http: false }));
+                                            setCustomContextWindowDraft((current) => ({ ...current, http: '' }));
+                                            setSettings({
+                                                ...settings,
+                                                http: {
+                                                    ...settings.http,
+                                                    contextWindowTokens: value === 'auto' ? 0 : Number(value),
+                                                },
+                                            });
+                                        }}
+                                        className={inputClass}
+                                    >
+                                        <option value="auto">
+                                            {t(httpContextCapability.source === 'compatibility-fallback'
+                                                ? 'settings.ai.contextWindowAutoFallback'
+                                                : 'settings.ai.contextWindowAutoProfile', {
+                                                tokens: formatContextWindow(httpContextCapability.defaultContextWindowTokens),
+                                            })}
+                                        </option>
+                                        {AGENT_CONTEXT_WINDOW_PRESETS.map((preset) => (
+                                            <option key={preset.id} value={preset.tokens}>
+                                                {t(`settings.ai.contextWindowPreset.${preset.id}`)}
+                                            </option>
+                                        ))}
+                                        <option value="custom">{t('settings.ai.contextWindowCustom')}</option>
+                                    </select>
+                                    {httpContextWindowMode === 'auto' ? (
+                                        <p className={clsx('text-xs px-1', isDark ? 'text-neutral-500' : 'text-gray-500')}>
+                                            {t(httpContextCapability.source === 'compatibility-fallback'
+                                                ? 'settings.ai.contextWindowDetectionFallback'
+                                                : 'settings.ai.contextWindowDetectionProfile', {
+                                                model: settings.http.model,
+                                                tokens: formatContextWindow(httpContextCapability.defaultContextWindowTokens),
+                                            })}
+                                        </p>
+                                    ) : null}
+                                    {customContextWindow.http ? (
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            pattern="[0-9]*"
+                                            value={customContextWindowDraft.http}
+                                            onChange={(event) => updateCustomContextWindowDraft('http', event.target.value)}
+                                            onBlur={() => commitCustomContextWindowDraft(
+                                                'http',
+                                                settings.http.contextWindowTokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+                                                    ? settings.http.contextWindowTokens
+                                                    : httpContextCapability.defaultContextWindowTokens,
+                                            )}
+                                            onKeyDown={(event) => {
+                                                if (event.key === 'Enter') event.currentTarget.blur();
+                                            }}
+                                            placeholder="258000"
+                                            className={inputClass}
+                                        />
+                                    ) : null}
                                 </SettingField>
                                 <SettingField label={t('settings.ai.creativity.label')}>
                                     <select value={creativityLevel} onChange={(e) => updateCreativityLevel(e.target.value as CreativityLevel)} className={inputClass}>
@@ -639,7 +815,66 @@ export function AISettingsPanel({ isDark }: Props) {
                                 <p className={clsx('text-xs leading-5', isDark ? 'text-neutral-400' : 'text-gray-600')}>{t('settings.ai.mcpCopy.desc')}</p>
                             </div>
                             <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensMcpHint')}>
-                                <input type="number" min={0} value={settings.mcpCli.contextWindowTokens} onChange={(e) => setSettings({ ...settings, mcpCli: { ...settings.mcpCli, contextWindowTokens: Math.max(0, Number(e.target.value) || 0) } })} placeholder="0" className={inputClass} />
+                                <select
+                                    value={mcpContextWindowMode}
+                                    onChange={(event) => {
+                                    const value = event.target.value;
+                                    if (value === 'custom') {
+                                        const initialValue = settings.mcpCli.contextWindowTokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+                                            ? settings.mcpCli.contextWindowTokens
+                                            : mcpContextCapability.defaultContextWindowTokens;
+                                        setCustomContextWindow((current) => ({ ...current, mcpCli: true }));
+                                        setCustomContextWindowDraft((current) => ({ ...current, mcpCli: String(initialValue) }));
+                                        setSettings({
+                                            ...settings,
+                                            mcpCli: { ...settings.mcpCli, contextWindowTokens: initialValue },
+                                        });
+                                        return;
+                                    }
+                                    setCustomContextWindow((current) => ({ ...current, mcpCli: false }));
+                                    setCustomContextWindowDraft((current) => ({ ...current, mcpCli: '' }));
+                                        setSettings({
+                                            ...settings,
+                                            mcpCli: {
+                                                ...settings.mcpCli,
+                                                contextWindowTokens: value === 'auto' ? 0 : Number(value),
+                                            },
+                                        });
+                                    }}
+                                    className={inputClass}
+                                >
+                                    <option value="auto">
+                                        {t('settings.ai.contextWindowAutoMcp', {
+                                            tokens: formatContextWindow(mcpContextCapability.defaultContextWindowTokens),
+                                        })}
+                                    </option>
+                                    {AGENT_CONTEXT_WINDOW_PRESETS.map((preset) => (
+                                        <option key={preset.id} value={preset.tokens}>
+                                            {t(`settings.ai.contextWindowPreset.${preset.id}`)}
+                                        </option>
+                                    ))}
+                                    <option value="custom">{t('settings.ai.contextWindowCustom')}</option>
+                                </select>
+                                {customContextWindow.mcpCli ? (
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        pattern="[0-9]*"
+                                        value={customContextWindowDraft.mcpCli}
+                                        onChange={(event) => updateCustomContextWindowDraft('mcpCli', event.target.value)}
+                                        onBlur={() => commitCustomContextWindowDraft(
+                                            'mcpCli',
+                                            settings.mcpCli.contextWindowTokens >= MINIMUM_AGENT_CONTEXT_WINDOW_TOKENS
+                                                ? settings.mcpCli.contextWindowTokens
+                                                : mcpContextCapability.defaultContextWindowTokens,
+                                        )}
+                                        onKeyDown={(event) => {
+                                            if (event.key === 'Enter') event.currentTarget.blur();
+                                        }}
+                                        placeholder="32768"
+                                        className={inputClass}
+                                    />
+                                ) : null}
                             </SettingField>
                             <SettingField label={t('settings.ai.mcpCopy.codexLabel')} hint={t('settings.ai.mcpCopy.codexHint')}>
                                 <textarea value={mcpSetup?.codexToml || ''} readOnly placeholder={t('settings.ai.mcpCopy.loading')} rows={5} className={textareaClass} />

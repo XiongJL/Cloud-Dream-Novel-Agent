@@ -3,7 +3,7 @@ import * as searchIndex from '../search/searchIndex';
 import { AiActionError, normalizeAiError } from './errors';
 import { scheduleChapterSummaryRebuild } from './summary/chapterSummary';
 import type { AgentChapterScopeBuildPayload, ChapterScopeBundle } from '../../shared/agentChapterScope';
-import type { ContinueWritingContext } from './context/ContextBuilder';
+import { extractPlainTextFromLexical, type ContinueWritingContext } from './context/ContextBuilder';
 import type { ContinueWritingPayload } from './types';
 
 export type CapabilityPermission = 'read' | 'write' | 'destructive';
@@ -84,16 +84,24 @@ export function createCapabilityDefinitions(deps: CapabilityDeps): CapabilityDef
                     throw new AiActionError('INVALID_INPUT', 'novelId is required');
                 }
 
-                return db.volume.findMany({
-                    where: { novelId: input.novelId },
+                const volumes = await db.volume.findMany({
+                    where: { novelId: input.novelId, deleted: false },
                     include: {
                         chapters: {
-                            select: { id: true, title: true, order: true, wordCount: true, updatedAt: true },
+                            where: { deleted: false },
+                            select: { id: true, title: true, order: true, wordCount: true, content: true, updatedAt: true },
                             orderBy: { order: 'asc' },
                         },
                     },
                     orderBy: { order: 'asc' },
                 });
+                return volumes.map((volume) => ({
+                    ...volume,
+                    chapters: volume.chapters.map(({ content, ...chapter }) => ({
+                        ...chapter,
+                        hasContent: extractPlainTextFromLexical(content).trim().length > 0,
+                    })),
+                }));
             },
         },
         {

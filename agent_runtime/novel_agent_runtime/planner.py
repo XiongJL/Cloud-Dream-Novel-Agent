@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from .roles import ALLOWED_AGENTS, ALLOWED_ROLES
 from .intent.operations import INTENT_OPERATION_REGISTRY
-from .intent.rules import detect_explicit_operations
+from .intent.targets import extract_style_work_title
+from .intent.rules import (
+    detect_explicit_operations,
+    requested_continuation_chapter_count,
+    requested_created_chapter_count,
+)
 from .intent.schemas import IntentDecision, IntentEffect
 from .schemas import AgentPlan, AgentPlanStep, new_id
 from .tool_manifest import AGENT_TOOL_BY_NAME, AVAILABLE_AGENT_TOOLS, DRAFT_TOOLS
@@ -61,21 +65,18 @@ def plan_step_effect(step: AgentPlanStep) -> IntentEffect:
     return max(effects, key=lambda item: _EFFECT_RANK[item], default="none")
 
 
+def infer_plan_effect(plan: AgentPlan) -> IntentEffect:
+    effects = [infer_deliverable_effect(plan.deliverable)]
+    effects.extend(plan_step_effect(step) for step in plan.steps)
+    return max(effects, key=lambda item: _EFFECT_RANK[item])
+
+
 def validate_plan_effect(plan: AgentPlan) -> None:
-    ceiling = plan.requestedEffect
-    if ceiling == "unknown":
-        ceiling = infer_deliverable_effect(plan.deliverable)
-    deliverable_effect = infer_deliverable_effect(plan.deliverable)
-    if _EFFECT_RANK[deliverable_effect] > _EFFECT_RANK[ceiling]:
+    effect = infer_plan_effect(plan)
+    if _EFFECT_RANK[effect] > _EFFECT_RANK["draft_write"]:
         raise ValueError(
-            f"Plan deliverable exceeds requested effect: {plan.deliverable} requires {deliverable_effect}, ceiling is {ceiling}"
+            "Plans may read project data and create reversible drafts, but formal writes must use the review workflow"
         )
-    for step in plan.steps:
-        effect = plan_step_effect(step)
-        if _EFFECT_RANK[effect] > _EFFECT_RANK[ceiling]:
-            raise ValueError(
-                f"Plan step exceeds requested effect: {step.title} requires {effect}, ceiling is {ceiling}"
-            )
 
 
 def _resolve_deliverable(goal: str, result: Any, existing: str | None = None) -> str:
@@ -131,22 +132,7 @@ def _step_provides_tool(step: AgentPlanStep, tool_name: str) -> bool:
 
 
 def _sequence_toolchain_input(goal: str) -> dict[str, Any]:
-    match = re.search(
-        r"(?:续写|继续写|接着写|连续写|往下写).{0,6}([1-5一二两三四五])章",
-        goal.lower(),
-    )
-    if not match:
-        return {"chapterCount": 2}
-    token = match.group(1)
-    chapter_count = {
-        "一": 1,
-        "二": 2,
-        "两": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-    }.get(token, int(token) if token.isdigit() else 2)
-    return {"chapterCount": chapter_count}
+    return {"chapterCount": requested_continuation_chapter_count(goal) or 2}
 
 
 def _build_steps_from_model(result: Any, existing_step_ids: set[str] | None = None) -> tuple[str, list[AgentPlanStep]]:
@@ -222,13 +208,107 @@ def build_plan_from_model(goal: str, result: Any, preferred_role: str = "team") 
     )
 
 
-def revise_plan_from_model(plan: AgentPlan, result: Any) -> AgentPlan:
+def revise_plan_from_model(plan: AgentPlan, result: Any, *, revision: str | None = None) -> AgentPlan:
     title, steps = _build_steps_from_model(result, {step.stepId for step in plan.steps})
-    deliverable = _resolve_deliverable(plan.goal, result, plan.deliverable)
+    revised_goal = plan.goal
+    if revision and revision.strip():
+        revised_goal = f"{plan.goal}\n\n计划修订：{revision.strip()}"
+    deliverable = _resolve_deliverable(revised_goal, result, plan.deliverable)
     _ensure_deliverable_tool(steps, deliverable, plan.preferredRole)
-    revised = plan.model_copy(update={"title": title, "steps": steps, "deliverable": deliverable})
-    validate_plan_effect(revised)
-    return revised
+    revised = plan.model_copy(update={
+        "title": title,
+        "goal": revised_goal,
+        "steps": steps,
+        "deliverable": deliverable,
+    })
+    try:
+        validate_plan_effect(revised)
+    except ValueError:
+        # Formal writes remain outside the planning flow. Preserve the safe
+        # chain while still carrying the user's revised goal forward.
+        return plan.model_copy(update={"goal": revised_goal})
+    return revised.model_copy(update={"requestedEffect": infer_plan_effect(revised)})
+
+
+def build_plan_from_intent(
+    goal: str,
+    decision: IntentDecision | dict[str, Any] | None,
+    *,
+    preferred_role: str,
+    has_chapter: bool,
+) -> AgentPlan | None:
+    """Build a complete plan when every requested operation has a stable Toolchain."""
+    if decision is None:
+        return None
+    normalized = decision if isinstance(decision, IntentDecision) else IntentDecision.model_validate(decision)
+    operations = [operation for operation in normalized.operations if operation.type != "project.lookup"]
+    if not operations:
+        return None
+
+    normalized_goal = goal.strip() or "创作任务"
+    normalized_role = preferred_role if preferred_role in ALLOWED_ROLES else "team"
+    style_work_title = extract_style_work_title(normalized_goal)
+    steps: list[AgentPlanStep] = []
+    seen_chain_ids: set[str] = set()
+    for operation in operations:
+        chain_id = operation.suggestedToolchainId
+        version = operation.suggestedToolchainVersion
+        if not chain_id or not version or chain_id in seen_chain_ids:
+            return None
+        if operation.target.kind in {"chapter", "chapter_scope"} and not has_chapter:
+            return None
+        definition = TOOLCHAIN_REGISTRY.resolve(chain_id, version)
+        role_candidates = [normalized.suggestedRole, normalized_role]
+        resolved_role = next((
+            "team" if role == "supervisor" else role
+            for role in role_candidates
+            if role and ("team" if role == "supervisor" else role) in definition.allowedRoles
+        ), definition.allowedRoles[0])
+        steps.append(AgentPlanStep(
+            stepId=new_id("step"),
+            agent="supervisor" if resolved_role == "team" else resolved_role,
+            title=(
+                "新增章节草稿" if operation.type == "chapter.create"
+                else "改写章节草稿" if operation.type == "chapter.rewrite"
+                else definition.title
+            ),
+            tools=[],
+            toolchain=ToolchainInvocation(
+                id=definition.id,
+                version=definition.version,
+                input=(
+                    {"chapterCount": requested_created_chapter_count(normalized_goal) or 1}
+                    if operation.type == "chapter.create"
+                    else _sequence_toolchain_input(normalized_goal)
+                    if definition.id == "chapter.sequence_continuation"
+                    else {
+                        "sourceMode": "named_work_model_prior",
+                        "sourceWorkTitle": style_work_title,
+                    }
+                    if definition.id == "agent_skill.style_extract" and style_work_title
+                    else {}
+                ),
+            ),
+        ))
+        seen_chain_ids.add(chain_id)
+
+    deliverable = normalized.deliverable if normalized.deliverable != "none" else "report"
+    required_tool = DRAFT_TOOLS.get(deliverable)
+    if required_tool and not any(_step_provides_tool(step, required_tool) for step in steps):
+        return None
+    plan = AgentPlan(
+        planId=new_id("plan"),
+        threadId=new_id("thread"),
+        title=steps[0].title if len(steps) == 1 else "创作任务计划",
+        goal=normalized_goal,
+        steps=steps,
+        preferredRole=normalized.suggestedRole or normalized_role,
+        deliverable=deliverable,
+        requestedEffect=normalized.requestedEffect,
+    )
+    plan = plan.model_copy(update={"requestedEffect": infer_plan_effect(plan)})
+    validate_plan_effect(plan)
+    return plan
 
 
 def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str, Any] | None, *, has_chapter: bool) -> AgentPlan:
@@ -236,12 +316,6 @@ def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str,
         return plan
     normalized = decision if isinstance(decision, IntentDecision) else IntentDecision.model_validate(decision)
     deliverable = normalized.deliverable if normalized.deliverable != "none" else plan.deliverable
-    deliverable_effect = infer_deliverable_effect(deliverable)
-    effect_ceiling: IntentEffect = "read_only" if normalized.requestedEffect == "unknown" else normalized.requestedEffect
-    if _EFFECT_RANK[deliverable_effect] > _EFFECT_RANK[effect_ceiling]:
-        raise ValueError(
-            f"Intent deliverable exceeds requested effect: {deliverable} requires {deliverable_effect}, ceiling is {effect_ceiling}"
-        )
     existing_chain_ids = {step.toolchain.id for step in plan.steps if step.toolchain}
     chain_steps: list[AgentPlanStep] = []
     chain_operation_count = 0
@@ -269,14 +343,22 @@ def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str,
             AgentPlanStep(
                 stepId=new_id("step"),
                 agent=agent,
-                title=definition.title,
+                title=(
+                    "新增章节草稿" if operation.type == "chapter.create"
+                    else "改写章节草稿" if operation.type == "chapter.rewrite"
+                    else definition.title
+                ),
                 tools=[],
                 toolchain=ToolchainInvocation(
                     id=definition.id,
                     version=definition.version,
-                    input=_sequence_toolchain_input(plan.goal)
-                    if definition.id == "chapter.sequence_continuation"
-                    else {},
+                    input=(
+                        {"chapterCount": requested_created_chapter_count(plan.goal) or 1}
+                        if operation.type == "chapter.create"
+                        else _sequence_toolchain_input(plan.goal)
+                        if definition.id == "chapter.sequence_continuation"
+                        else {}
+                    ),
                 ),
             )
         )
@@ -296,8 +378,8 @@ def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str,
     routed = plan.model_copy(update={
         "steps": steps[:8],
         "deliverable": deliverable,
-        "requestedEffect": effect_ceiling,
     })
+    routed = routed.model_copy(update={"requestedEffect": infer_plan_effect(routed)})
     validate_plan_effect(routed)
     return routed
 

@@ -150,6 +150,7 @@ def _reader_evaluation(chapter_id: str, index: int) -> dict[str, Any]:
     return {
         "chapterId": chapter_id,
         "chapterTitle": f"第{index}章",
+        "scoreScale": 100,
         "clarityScore": 80,
         "emotionalIntensity": 65,
         "suspenseScore": 72,
@@ -220,7 +221,7 @@ def _scope_audit_result() -> dict[str, Any]:
         "conflicts": [{
             "conflictId": "conflict_1",
             "topic": "修订优先级",
-            "sourceFindingIds": ["editor_finding_1", "reader_finding_2"],
+            "sourceFindingIds": ["editor_finding_1", "reader:chapter_2:1:reader_finding_2"],
             "experts": ["editor", "reader"],
             "summary": "编辑强调动机，读者强调可理解性。",
             "resolution": "用同一场景补丁共同处理。",

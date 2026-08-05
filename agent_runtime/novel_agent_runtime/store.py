@@ -165,11 +165,23 @@ class AgentStateStore:
     def mark_invocation_in_flight(self, invocation_key: str) -> ToolInvocationRecord:
         return self._transition_invocation(invocation_key, "in_flight", expected={"prepared"})
 
+    def mark_invocation_operation_pending(
+        self,
+        invocation_key: str,
+        operation: Any,
+    ) -> ToolInvocationRecord:
+        return self._transition_invocation(
+            invocation_key,
+            "operation_pending",
+            expected={"prepared"},
+            result=operation,
+        )
+
     def mark_invocation_succeeded(self, invocation_key: str, result: Any) -> ToolInvocationRecord:
         return self._transition_invocation(
             invocation_key,
             "succeeded",
-            expected={"in_flight"},
+            expected={"in_flight", "operation_pending"},
             result=result,
         )
 
@@ -177,7 +189,7 @@ class AgentStateStore:
         return self._transition_invocation(
             invocation_key,
             "failed",
-            expected={"prepared", "in_flight"},
+            expected={"prepared", "in_flight", "operation_pending"},
             error=error,
         )
 
@@ -185,7 +197,7 @@ class AgentStateStore:
         return self._transition_invocation(
             invocation_key,
             "unknown",
-            expected={"in_flight"},
+            expected={"in_flight", "operation_pending"},
             error=error,
         )
 

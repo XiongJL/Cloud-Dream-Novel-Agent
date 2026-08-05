@@ -75,6 +75,14 @@ try {
         )
     `);
     await client.$executeRawUnsafe(`
+        CREATE TABLE WorldSetting (
+            id TEXT PRIMARY KEY, novelId TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+            type TEXT NOT NULL DEFAULT 'other', icon TEXT, sortOrder REAL NOT NULL DEFAULT 0,
+            createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+    await client.$executeRawUnsafe(`
         CREATE TABLE ItemOwnership (
             id TEXT PRIMARY KEY, characterId TEXT NOT NULL, itemId TEXT NOT NULL, note TEXT,
             createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -125,6 +133,9 @@ try {
     const item = await client.item.create({
         data: { id: 'item-1', novelId: 'novel-1', name: '物品', type: 'item', profile: '{}', sortOrder: 1 },
     });
+    const worldSetting = await client.worldSetting.create({
+        data: { id: 'world-setting-1', novelId: 'novel-1', name: '世界规则', content: '每十天重置一次记录', type: 'other', sortOrder: 1 },
+    });
     const map = await client.mapCanvas.create({
         data: {
             id: 'map-1', novelId: 'novel-1', name: '地图', type: 'world',
@@ -136,6 +147,7 @@ try {
         createCreativeAssetEntitySnapshot('plotPoint', plotPoint),
         createCreativeAssetEntitySnapshot('character', character),
         createCreativeAssetEntitySnapshot('item', item),
+        createCreativeAssetEntitySnapshot('worldSetting', worldSetting),
         createCreativeAssetEntitySnapshot('mapCanvas', map),
     ]);
     const undoResult = await client.$transaction((tx) => undoCreativeAssetsWriteback(tx, 'novel-1', writeback));
@@ -144,6 +156,7 @@ try {
     assert.equal(await client.plotPoint.count(), 0);
     assert.equal(await client.character.count(), 0);
     assert.equal(await client.item.count(), 0);
+    assert.equal(await client.worldSetting.count(), 0);
     assert.equal(await client.mapCanvas.count(), 0);
 
     const edited = await client.character.create({

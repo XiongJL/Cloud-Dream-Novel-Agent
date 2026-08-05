@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -12,10 +13,11 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 
 from .automation import AutomationClient
+from .agent_skills.errors import AgentSkillError
 from .events import AgentEventBus, serialize_sse_event
 from .retry import AgentRequestError
 from .runtime import NovelAgentRuntime
-from .schemas import AgentEnvelope
+from .schemas import AgentEnvelope, new_id, utc_now
 from .store import AgentStateStore
 from .tool_adapter import FastMcpAgentToolAdapter, HttpAgentToolAdapter
 
@@ -28,20 +30,28 @@ def report_progress(phase: str) -> None:
 
 
 def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
-    app = FastAPI(title="CloudDream Novel Agent Runtime", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        await runtime.resume_interrupted_runs()
+        yield
+
+    app = FastAPI(title="CloudDream Novel Agent Runtime", version="0.1.0", lifespan=lifespan)
     active_requests: dict[str, asyncio.Task[Any]] = {}
     progress_states: dict[str, dict[str, Any]] = {}
 
     def append_progress(request_id: str, phase: str, details: dict[str, Any] | None = None) -> None:
         previous = progress_states.get(request_id) or {"sequence": 0, "events": []}
         event = {
+            "eventId": new_id("activity"),
             "sequence": int(previous.get("sequence") or 0) + 1,
+            "requestId": request_id,
             "phase": phase,
+            "createdAt": utc_now(),
             **(details or {}),
         }
         progress_states[request_id] = {
             "sequence": event["sequence"],
-            "events": [*(previous.get("events") or []), event][-50:],
+            "events": [*(previous.get("events") or []), event][-200:],
         }
 
     def check_auth(authorization: str | None) -> None:
@@ -57,7 +67,7 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
             "code": "OK",
             "message": "healthy",
             "data": {
-                "capabilities": ["agent.roles", "agent.chat", "agent.plan", "agent.register_plan", "agent.revise_plan", "agent.execute_plan", "agent.retry_run", "agent.revise_draft", "agent.regenerate_batch", "agent.inspect_side_effect", "agent.reconcile_side_effect", "agent.run_status", "agent.cancel", "agent.submit_approval", "agent.events"],
+                "capabilities": ["agent.roles", "agent.skills", "agent.skill.resolve", "agent.skill.preview", "agent.skill.author", "agent.skill.drafts", "agent.skill.draft", "agent.skill.commit", "agent.skill.discard", "agent.chat", "agent.recover_chat", "agent.retry_chat_summary", "agent.delete_chat_context", "agent.plan", "agent.register_plan", "agent.revise_plan", "agent.execute_plan", "agent.retry_run", "agent.revise_draft", "agent.regenerate_batch", "agent.inspect_side_effect", "agent.reconcile_side_effect", "agent.run_status", "agent.cancel", "agent.submit_approval", "agent.submit_user_input", "agent.dismiss_user_input", "agent.operation_completed", "agent.events"],
                 "toolTransport": runtime.tool_transport,
             },
         }
@@ -71,7 +81,12 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
             active_requests[request_id] = current_task
             if len(progress_states) >= 200:
                 progress_states.pop(next(iter(progress_states)), None)
-            append_progress(request_id, "thinking")
+            append_progress(request_id, "thinking", {
+                "type": "request_started",
+                "stage": "scope_validation",
+                "displayName": "正在校验章节范围",
+                "status": "running",
+            })
 
         async def report_chat_progress(phase: str, details: dict[str, Any]) -> None:
             if not request_id:
@@ -85,8 +100,30 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
                 context["_requestId"] = request_id
             if method == "agent.roles":
                 data = runtime.roles(params, context)
+            elif method == "agent.skills":
+                data = await runtime.skills(params, context)
+            elif method == "agent.skill.resolve":
+                data = await runtime.resolve_skill(params)
+            elif method == "agent.skill.preview":
+                data = await runtime.preview_skill(params)
+            elif method == "agent.skill.author":
+                data = await runtime.author_skill(params, context)
+            elif method == "agent.skill.drafts":
+                data = await runtime.list_skill_drafts(params, context)
+            elif method == "agent.skill.draft":
+                data = await runtime.get_skill_draft(params)
+            elif method == "agent.skill.commit":
+                data = await runtime.commit_skill_draft(params)
+            elif method == "agent.skill.discard":
+                data = await runtime.discard_skill_draft(params)
             elif method == "agent.chat":
                 data = await runtime.chat(params, context, on_progress=report_chat_progress)
+            elif method == "agent.recover_chat":
+                data = await runtime.recover_chat(params, context, on_progress=report_chat_progress)
+            elif method == "agent.retry_chat_summary":
+                data = await runtime.retry_chat_summary(params, context, on_progress=report_chat_progress)
+            elif method == "agent.delete_chat_context":
+                data = runtime.delete_chat_context(params)
             elif method == "agent.plan":
                 data = await runtime.plan(params, context)
             elif method == "agent.register_plan":
@@ -111,14 +148,45 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
                 data = await runtime.cancel(params)
             elif method == "agent.submit_approval":
                 data = await runtime.submit_approval(params)
+            elif method == "agent.submit_user_input":
+                data = await runtime.submit_user_input(params, context)
+            elif method == "agent.dismiss_user_input":
+                data = await runtime.dismiss_user_input(params, context)
+            elif method == "agent.operation_completed":
+                data = await runtime.operation_completed(params)
             else:
                 return {"ok": False, "code": "UNKNOWN_METHOD", "message": f"Unknown method: {method}"}
+            if request_id and method in {"agent.chat", "agent.recover_chat", "agent.retry_chat_summary"}:
+                response_failed = getattr(data, "status", None) == "failed"
+                append_progress(request_id, "finalizing", {
+                    "type": "request_failed" if response_failed else "request_completed",
+                    "stage": "finalization",
+                    "displayName": "请求处理失败" if response_failed else "请求处理完成",
+                    "status": "failed" if response_failed else "completed",
+                })
+                activities = [
+                    event for event in (progress_states.get(request_id) or {}).get("events", [])
+                    if event.get("type")
+                ]
+                if hasattr(data, "activities"):
+                    data.activities = activities
             return {"ok": True, "code": "OK", "message": "ok", "data": data.model_dump() if hasattr(data, "model_dump") else data}
         except asyncio.CancelledError:
             if request_id:
-                append_progress(request_id, "cancelled")
+                append_progress(request_id, "cancelled", {
+                    "type": "request_cancelled", "stage": "finalization",
+                    "displayName": "请求已取消", "status": "cancelled",
+                })
             return {"ok": False, "code": "CANCELLED", "message": "Agent chat was cancelled"}
+        except AgentSkillError as error:
+            return {"ok": False, "code": error.code, "message": error.message}
         except AgentRequestError as error:
+            if request_id:
+                append_progress(request_id, "finalizing", {
+                    "type": "request_failed", "stage": "finalization",
+                    "displayName": error.failure.user_message, "status": "failed",
+                    "details": {"errorCode": error.failure.code},
+                })
             return {
                 "ok": False,
                 "code": error.failure.code,
@@ -126,6 +194,11 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
                 "data": error.failure.payload(),
             }
         except Exception as error:
+            if request_id:
+                append_progress(request_id, "finalizing", {
+                    "type": "request_failed", "stage": "finalization",
+                    "displayName": str(error), "status": "failed",
+                })
             return {"ok": False, "code": "AGENT_RUNTIME_ERROR", "message": str(error)}
         finally:
             if request_id and active_requests.get(request_id) is current_task:
