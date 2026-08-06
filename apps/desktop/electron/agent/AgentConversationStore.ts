@@ -506,21 +506,7 @@ export class AgentConversationStore {
         if (!messageColumns.some((column) => column.name === 'sequence')) {
             await this.db.$executeRawUnsafe('ALTER TABLE AgentMessage ADD COLUMN sequence INTEGER');
         }
-        await this.db.$executeRawUnsafe(`
-            UPDATE AgentMessage AS current
-            SET sequence = (
-                SELECT COUNT(*)
-                FROM AgentMessage AS prior
-                WHERE prior.conversationId = current.conversationId
-                  AND (
-                    datetime(prior.createdAt) < datetime(current.createdAt)
-                    OR (datetime(prior.createdAt) = datetime(current.createdAt) AND prior.id <= current.id)
-                  )
-            )
-            WHERE sequence IS NULL OR sequence < 1
-        `);
         await this.db.$executeRawUnsafe('CREATE INDEX IF NOT EXISTS idx_agent_message_conversation_created ON AgentMessage(conversationId, createdAt)');
-        await this.db.$executeRawUnsafe('CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_message_conversation_sequence ON AgentMessage(conversationId, sequence)');
         await this.db.$executeRawUnsafe(`
             CREATE TABLE IF NOT EXISTS AgentRun (
                 runId TEXT PRIMARY KEY, conversationId TEXT NOT NULL, novelId TEXT NOT NULL,

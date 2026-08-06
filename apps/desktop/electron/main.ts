@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, nativeImage, protocol, net, session, shell } from 'electron'
-import { initDb, db, ensureDbSchema } from '@novel-editor/core'
+import { initDb, db, ensureDbSchema, PrismaClient } from '@novel-editor/core'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -20,6 +20,13 @@ import { AgentAttachmentStore } from './agent/AgentAttachmentStore'
 import { DocumentExtractorClient } from './agent/DocumentExtractorClient'
 import { applyDurableDraftCutover } from './agent/DurableDraftCutover'
 import { readNovelFileAsStructure } from './importers/novelImport'
+import {
+    DATABASE_SCHEMA_VERSION,
+    finalizeDatabaseSchema,
+    prepareDatabaseForSchema,
+    runDatabaseMigrations,
+} from './database/DatabaseLifecycle'
+import { DATABASE_MIGRATIONS } from './database/DatabaseMigrations'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -3254,10 +3261,32 @@ app.whenReady().then(async () => {
         fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     }
 
+    let databasePreparation;
+    try {
+        databasePreparation = await prepareDatabaseForSchema({
+            databasePath: dbPath,
+            userDataPath: app.getPath('userData'),
+            expectedVersion: DATABASE_SCHEMA_VERSION,
+            createProbeClient: () => new PrismaClient({ datasources: { db: { url: dbUrl } } }),
+        });
+        if (databasePreparation.reset) {
+            console.warn('[Main] Archived incompatible database and starting with a clean database:', databasePreparation);
+        }
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('[Main] Failed to prepare database:', error);
+        if (!aiDiagParse.command) {
+            dialog.showErrorBox('数据库准备失败', `${message}\n\n数据库：${dbPath}\n日志：${path.join(app.getPath('userData'), 'debug-dev.log')}`);
+        }
+        app.exit(1);
+        return;
+    }
+
     // 2. Initialize Core Database (Moved after migration)
 
-    // 3. Auto-migrate in Dev (Synchronous)
-    if (!app.isPackaged) {
+    // Build the latest baseline only for a new development database. Existing
+    // databases must use the same versioned migration chain as packaged apps.
+    if (!app.isPackaged && (databasePreparation.reason === 'new' || databasePreparation.reset)) {
         const schemaPath = path.resolve(__dirname, '../../../packages/core/prisma/schema.prisma');
         console.log('[Main] Development mode detected (unpackaged). Checking schema at:', schemaPath);
 
@@ -3322,6 +3351,18 @@ app.whenReady().then(async () => {
         if (schemaApplied) {
             console.log('[Main] Bundled database schema applied successfully.');
         }
+        const migrationResult = await runDatabaseMigrations({
+            database: db,
+            databasePath: dbPath,
+            userDataPath: app.getPath('userData'),
+            migrations: DATABASE_MIGRATIONS,
+            expectedVersion: DATABASE_SCHEMA_VERSION,
+            initialDatabase: databasePreparation.reason === 'new' || databasePreparation.reset,
+        });
+        if (migrationResult.applied.length > 0) {
+            console.log('[Main] Database migrations applied:', migrationResult);
+        }
+        await finalizeDatabaseSchema(db, DATABASE_SCHEMA_VERSION);
         await agentConversationStore.ensureSchema();
         await agentAttachmentStore.ensureSchema();
         if (!aiDiagParse.command) {
@@ -3332,7 +3373,16 @@ app.whenReady().then(async () => {
         }
     } catch (error) {
         console.error('[Main] Failed to ensure bundled database schema:', error);
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (!aiDiagParse.command) {
+            const snapshot = path.join(app.getPath('userData'), 'backups', 'database-migrations');
+            dialog.showErrorBox(
+                '数据库升级失败',
+                `${message}\n\n数据库：${dbPath}\n迁移快照目录：${snapshot}\n日志：${path.join(app.getPath('userData'), 'debug-dev.log')}`,
+            );
+        }
+        app.exit(1);
+        return;
     }
     aiService = new AiService(() => app.getPath('userData'), agentConversationStore);
     registerRagSummaryIndexRefresh((sourceType, sourceId, reason) => {
