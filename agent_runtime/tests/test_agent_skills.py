@@ -1003,7 +1003,9 @@ def test_approved_novel_blueprint_initializes_reviewable_project_assets(tmp_path
             "approvalMode": "full_control",
             "approval": {"approved": True, "approvedStepIds": [plan.steps[0].stepId]},
         }, {"novelId": "novel_1", "locale": "zh-CN"})
-        for _ in range(500):
+        # Windows runners can take longer to flush the async LangGraph SQLite
+        # checkpoint after the creative-assets draft has been validated.
+        for _ in range(2000):
             if runtime.state.runs[run.runId].status in {"completed", "failed", "cancelled"}:
                 break
             await asyncio.sleep(0.01)
