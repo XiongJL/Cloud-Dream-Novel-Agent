@@ -124,7 +124,7 @@ let failedState = {
 failedState = projection.applyAgentRunEvent(
     failedState,
     event(11, 'run_failed', {
-        message: '模型结果已保存，但 JSON 格式未通过校验。可直接修复 JSON 后继续。',
+        message: '生成结果已保存，但格式检查未通过。可直接修复结果并继续。',
         failureRevision: 2,
         completionKind: 'partial',
         recovery: {
@@ -133,7 +133,7 @@ failedState = projection.applyAgentRunEvent(
             retryStrategy: 'repair_model_output',
             canRecover: true,
             recoveryRevision: 2,
-            actionLabel: '修复 JSON 后继续',
+            actionLabel: '修复结果并继续',
             completedArtifactIds: [],
             affectedArtifactIds: [],
             diagnosticRef: 'diagnostic-run-recovery',
@@ -145,7 +145,7 @@ assert.equal(failedState.run.status, 'failed');
 assert.equal(failedState.run.failureRevision, 2);
 assert.equal(failedState.run.completionKind, 'partial');
 assert.equal(failedState.run.recovery.retryStrategy, 'repair_model_output');
-assert.equal(failedState.run.recovery.actionLabel, '修复 JSON 后继续');
+assert.equal(failedState.run.recovery.actionLabel, '修复结果并继续');
 
 const restored = JSON.parse(JSON.stringify(state));
 const snapshot = projection.getRunRecoverySnapshot(restored.run);

@@ -50,7 +50,7 @@ function asOperationError(operation: DraftOperationRecord, error: unknown): Draf
     const source = error as {
         code?: string;
         message?: string;
-        details?: { retryable?: boolean; providerRequestId?: string };
+        details?: Record<string, unknown> & { retryable?: boolean; providerRequestId?: string };
     };
     const code = String(source?.code || 'UNKNOWN');
     return {
@@ -60,6 +60,26 @@ function asOperationError(operation: DraftOperationRecord, error: unknown): Draf
         diagnosticRef: operation.operationId,
         attempt: operation.attemptCount,
         ...(source?.details?.providerRequestId ? { providerRequestId: source.details.providerRequestId } : {}),
+        ...(source?.details ? {
+            details: Object.fromEntries(
+                [
+                    'modelResultRef',
+                    'modelResultRevision',
+                    'resultHash',
+                    'terminationReason',
+                    'responseId',
+                    'model',
+                    'usage',
+                    'requestedMaxTokens',
+                    'attemptCount',
+                    'attempts',
+                    'safeToRetryBeforePublish',
+                    'incomplete',
+                ]
+                    .filter((key) => key in source.details!)
+                    .map((key) => [key, source.details![key]]),
+            ),
+        } : {}),
     };
 }
 

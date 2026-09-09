@@ -19,9 +19,7 @@ from .agent_skills.registry import BUILTIN_AGENT_SKILL_REGISTRY, AgentSkillRegis
 from .agent_skills.errors import AgentSkillError
 from .agent_skills.authoring import (
     AgentSkillAuthorRequest,
-    normalize_authored_skill,
     registration_from_persisted,
-    style_pack_persistence_payload,
 )
 from .agent_skills.schemas import AgentSkillResolveRequest, AgentSkillSelection, ResolvedSkillSet
 from .invocations import (
@@ -85,7 +83,8 @@ from .schemas import (
     utc_now,
 )
 from .store import AgentStateStore
-from .tool_adapter import AgentToolAdapter, AutomationInvoker, HttpAgentToolAdapter
+from .tool_adapter import AgentToolAdapter, AutomationInvoker, HttpAgentToolAdapter, normalize_tool_arguments
+from .automation import AutomationInvokeError
 from .tool_manifest import AGENT_TOOL_BY_NAME, AVAILABLE_AGENT_TOOLS, DRAFT_TOOLS, READ_ONLY_AGENT_TOOLS
 from .toolchains.registry import TOOLCHAIN_REGISTRY
 from .toolchains.chapter_consistency_review import normalize_review, review_markdown, review_request
@@ -233,12 +232,23 @@ from .toolchains.schemas import (
     NovelBootstrapDraft,
     NovelBootstrapInput,
     NovelProjectInitializeInput,
+    StyleSkillPackAuthoringPlan,
     StyleSkillPackDraftArtifact,
     WorldbuildingRangeConsistencyInput,
     WriterRangeRevisionPlanInput,
     ToolchainInvocation,
     ToolchainError,
 )
+
+
+STYLE_SKILL_MEMBER_PATHS = {
+    "language_style": "language-style/SKILL.md",
+    "suspense_release": "suspense-release/SKILL.md",
+    "ensemble_progression": "ensemble-progression/SKILL.md",
+}
+STYLE_SKILL_MEMBER_KEYS = {
+    key: path.split("/", 1)[0] for key, path in STYLE_SKILL_MEMBER_PATHS.items()
+}
 
 
 class NovelAgentRuntime:
@@ -325,6 +335,32 @@ class NovelAgentRuntime:
             if "unexpected keyword argument" not in str(error):
                 raise
             return await self.automation.invoke(method, params, "desktop-ui", request_id=call_id)
+
+    async def _invoke_automation_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        request_id: str,
+        deadline_at: str | None,
+    ) -> Any:
+        try:
+            return await self.automation.invoke(
+                method,
+                params,
+                "desktop-ui",
+                request_id=request_id,
+                deadline_at=deadline_at,
+            )
+        except TypeError as error:
+            if "unexpected keyword argument" not in str(error):
+                raise
+            return await self.automation.invoke(
+                method,
+                params,
+                "desktop-ui",
+                request_id=request_id,
+            )
 
     def _mark_interrupted_runs(self) -> None:
         changed = False
@@ -424,17 +460,25 @@ class NovelAgentRuntime:
         return [role.model_dump() for role in list_agent_roles(locale)]
 
     async def _refresh_persisted_skills(self, novel_id: str | None) -> None:
-        rows = await self.automation.invoke("agent_skill.list", {"novelId": novel_id}, "desktop-ui")
+        # Built-in skills are bundled with the runtime and must remain available
+        # even when the desktop automation bridge is temporarily unavailable.
+        try:
+            rows = await self.automation.invoke("agent_skill.list", {"novelId": novel_id}, "desktop-ui")
+        except AutomationInvokeError:
+            return
         if not isinstance(rows, list):
             return
         for row in rows:
             if not isinstance(row, dict) or not row.get("id") or not row.get("revisionId"):
                 continue
-            full = await self.automation.invoke(
-                "agent_skill.get",
-                {"skillId": row["id"], "revisionId": row["revisionId"]},
-                "desktop-ui",
-            )
+            try:
+                full = await self.automation.invoke(
+                    "agent_skill.get",
+                    {"skillId": row["id"], "revisionId": row["revisionId"]},
+                    "desktop-ui",
+                )
+            except AutomationInvokeError:
+                continue
             if not isinstance(full, dict):
                 continue
             try:
@@ -444,9 +488,12 @@ class NovelAgentRuntime:
             except Exception:
                 continue
             self._persisted_skill_registrations[registration.definition.id] = registration
-        bindings = await self.automation.invoke(
-            "agent_skill.binding.list", {"novelId": novel_id}, "desktop-ui"
-        )
+        try:
+            bindings = await self.automation.invoke(
+                "agent_skill.binding.list", {"novelId": novel_id}, "desktop-ui"
+            )
+        except AutomationInvokeError:
+            bindings = []
         self._persisted_skill_bindings = [item for item in bindings if isinstance(item, dict)] if isinstance(bindings, list) else []
         self.agent_skill_service = AgentSkillService(AgentSkillRegistry([
             *BUILTIN_AGENT_SKILL_REGISTRY.registrations(),
@@ -476,39 +523,135 @@ class NovelAgentRuntime:
         except ValidationError as error:
             raise AgentSkillError("AGENT_SKILL_AUTHOR_INPUT_INVALID", str(error)) from error
         request_id = str(context.get("_requestId") or new_id("skill_author"))
-        raw = await self.automation.invoke(
-            "agent.generate_skill_draft",
-            request.model_dump(),
-            "desktop-ui",
-            request_id=f"{request_id}:generate",
-            parent_request_id=request_id,
-        )
-        proposal = normalize_authored_skill(raw)
-        persisted = await self.automation.invoke(
-            "agent_skill.draft.upsert",
+        authoring_deadline = (datetime.now(timezone.utc) + timedelta(minutes=8)).isoformat()
+        workspace = await self.automation.invoke(
+            "agent_skill.workspace.create",
             {
                 "action": "update" if request.targetSkillId else "create",
                 "scope": request.scope,
-                "status": "ready_for_review",
                 "sourceNovelId": request.novelId,
                 "targetSkillId": request.targetSkillId,
                 "expectedCurrentRevisionId": request.expectedCurrentRevisionId,
-                "draft": proposal.persistence_payload(),
                 "derivationReport": {
                     "kind": "natural_language_authoring",
                     "goal": request.goal,
                     "source": request.source,
-                    "rationale": proposal.rationale,
-                    "warnings": proposal.warnings,
                 },
             },
             "desktop-ui",
-            request_id=f"{request_id}:persist",
+            request_id=f"{request_id}:workspace:create",
             parent_request_id=request_id,
+            deadline_at=authoring_deadline,
         )
-        if not isinstance(persisted, dict):
-            raise AgentSkillError("AGENT_SKILL_DRAFT_PERSIST_FAILED", "Draft store returned an invalid result")
-        return {"draft": persisted, "proposal": proposal.model_dump(), "requiresReview": True}
+        if not isinstance(workspace, dict) or not workspace.get("draftId"):
+            raise AgentSkillError("AGENT_SKILL_DRAFT_PERSIST_FAILED", "Workspace store returned an invalid result")
+        diagnostics: list[dict[str, Any]] = []
+        for attempt in range(1, 5):
+            current = await self.automation.invoke(
+                "agent_skill.workspace.read",
+                {"draftId": workspace["draftId"], "logicalPath": "SKILL.md"},
+                "desktop-ui",
+                request_id=f"{request_id}:workspace:read:{attempt}",
+                parent_request_id=request_id,
+                deadline_at=authoring_deadline,
+            )
+            current_document = str(current.get("contentText") or "") if isinstance(current, dict) else ""
+            generated = await self.automation.invoke(
+                "agent.generate_skill_document",
+                {
+                    **request.model_dump(),
+                    "creatorProfile": "builtin.skill-creator",
+                    "currentDocument": current_document,
+                    "validationDiagnostics": diagnostics,
+                    "attempt": attempt,
+                },
+                "desktop-ui",
+                request_id=f"{request_id}:generate:{attempt}",
+                parent_request_id=request_id,
+                deadline_at=authoring_deadline,
+            )
+            content_text = str(generated.get("contentText") or "") if isinstance(generated, dict) else ""
+            if not content_text:
+                raise AgentSkillError("AGENT_SKILL_AUTHOR_OUTPUT_INVALID", "Skill document generator returned empty text")
+            workspace = await self.automation.invoke(
+                "agent_skill.workspace.write",
+                {
+                    "draftId": workspace["draftId"],
+                    "expectedVersion": workspace["version"],
+                    "logicalPath": "SKILL.md",
+                    "mediaType": "text/markdown",
+                    "contentText": content_text,
+                },
+                "desktop-ui",
+                request_id=f"{request_id}:workspace:write:{attempt}",
+                parent_request_id=request_id,
+                deadline_at=authoring_deadline,
+            )
+            workspace = await self.automation.invoke(
+                "agent_skill.workspace.validate",
+                {
+                    "draftId": workspace["draftId"],
+                    "expectedVersion": workspace["version"],
+                    "finalAttempt": attempt == 4,
+                },
+                "desktop-ui",
+                request_id=f"{request_id}:workspace:validate:{attempt}",
+                parent_request_id=request_id,
+                deadline_at=authoring_deadline,
+            )
+            report = workspace.get("validationReport") if isinstance(workspace, dict) else None
+            if isinstance(report, dict) and report.get("ok") is True:
+                workspace = await self.automation.invoke(
+                    "agent_skill.workspace.compile",
+                    {"draftId": workspace["draftId"], "expectedVersion": workspace["version"]},
+                    "desktop-ui",
+                    request_id=f"{request_id}:workspace:compile",
+                    parent_request_id=request_id,
+                    deadline_at=authoring_deadline,
+                )
+                persisted = await self.automation.invoke(
+                    "agent_skill.draft.get",
+                    {"draftId": workspace["draftId"]},
+                    "desktop-ui",
+                    request_id=f"{request_id}:draft:get",
+                    parent_request_id=request_id,
+                    deadline_at=authoring_deadline,
+                )
+                if not isinstance(persisted, dict):
+                    raise AgentSkillError("AGENT_SKILL_DRAFT_PERSIST_FAILED", "Draft store returned an invalid result")
+                projection = persisted.get("draft") if isinstance(persisted.get("draft"), dict) else {}
+                proposal = {
+                    "definition": projection.get("definition") or {},
+                    "revision": projection.get("revision") or {},
+                    "rationale": [],
+                    "warnings": [],
+                }
+                return {
+                    "draft": persisted,
+                    "workspace": workspace,
+                    "proposal": proposal,
+                    "requiresReview": True,
+                }
+            diagnostics = (
+                [item for item in report.get("diagnostics", []) if isinstance(item, dict)]
+                if isinstance(report, dict) else []
+            )
+        persisted = await self.automation.invoke(
+            "agent_skill.draft.get",
+            {"draftId": workspace["draftId"]},
+            "desktop-ui",
+            request_id=f"{request_id}:draft:attention",
+            parent_request_id=request_id,
+            deadline_at=authoring_deadline,
+        )
+        return {
+            "draft": persisted,
+            "workspace": workspace,
+            "proposal": None,
+            "requiresReview": False,
+            "needsAttention": True,
+            "validationReport": workspace.get("validationReport"),
+        }
 
     async def list_skill_drafts(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         return await self.automation.invoke(
@@ -2677,6 +2820,63 @@ class NovelAgentRuntime:
         self._save()
         return revised
 
+    @staticmethod
+    def _run_deadline_at(
+        plan: AgentPlan,
+        params: dict[str, Any],
+        context: dict[str, Any],
+        *,
+        step_ids: set[str] | None = None,
+    ) -> str:
+        explicit = str(params.get("deadlineAt") or context.get("deadlineAt") or "").strip()
+        if explicit:
+            try:
+                parsed = datetime.fromisoformat(explicit.replace("Z", "+00:00"))
+            except ValueError as error:
+                raise ValueError("deadlineAt must be an ISO-8601 timestamp") from error
+            if parsed.tzinfo is None:
+                raise ValueError("deadlineAt must include a timezone")
+            return parsed.astimezone(timezone.utc).isoformat()
+        toolchain_timeout_seconds = 0
+        for step in plan.steps:
+            if step_ids is not None and step.stepId not in step_ids:
+                continue
+            if step.toolchain is None:
+                continue
+            definition = TOOLCHAIN_REGISTRY.resolve(step.toolchain.id, step.toolchain.version)
+            toolchain_timeout_seconds += definition.budget.timeoutSeconds
+        timeout_seconds = toolchain_timeout_seconds or 600
+        return (datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)).isoformat()
+
+    @staticmethod
+    def _earliest_deadline(*values: str | None) -> str | None:
+        parsed: list[tuple[datetime, str]] = []
+        for value in values:
+            normalized = str(value or "").strip()
+            if not normalized:
+                continue
+            try:
+                deadline = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if deadline.tzinfo is None:
+                continue
+            parsed.append((deadline, normalized))
+        return min(parsed, key=lambda item: item[0])[1] if parsed else None
+
+    @staticmethod
+    def _seconds_until_deadline(value: str | None) -> float | None:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        try:
+            deadline = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if deadline.tzinfo is None:
+            return None
+        return (deadline - datetime.now(timezone.utc)).total_seconds()
+
     async def execute_plan(self, params: dict[str, Any], context: dict[str, Any]) -> AgentRun:
         plan_id = str(params.get("planId") or "")
         plan = self.state.plans.get(plan_id)
@@ -2734,6 +2934,7 @@ class NovelAgentRuntime:
             threadId=plan.threadId,
             planId=plan.planId,
             status="running",
+            deadlineAt=self._run_deadline_at(plan, params, context, step_ids=approved_step_ids),
             skillSnapshot=skill_snapshot,
             userInputResponses=[plan.userDecisions] if plan.userDecisions else [],
         )
@@ -2826,9 +3027,17 @@ class NovelAgentRuntime:
             and failed_run.recovery.failureKind == "model_output_invalid"
             and failed_run.recovery.blockedReason == "repair_exhausted"
         )
+        review_recovery = self.state.recoveryRecords.get(failed_run.runId) or {}
+        retry_saved_draft_review = bool(
+            failed_run.recovery and failed_run.recovery.canRecover
+            and review_recovery.get("nodeId") == "draft.editorial_review"
+            and review_recovery.get("sourceMethod") == "agent.generate_consistency_review"
+            and review_recovery.get("draftSessionId") == failed_run.draftSessionId
+        )
         if (
             strategy == "retry_request"
             and not retry_after_repair_exhausted
+            and not retry_saved_draft_review
             and (exhausted is None or exhausted.payload.get("retryable") is not True)
         ):
             raise ValueError("The failed run has no retryable exhausted request")
@@ -2906,6 +3115,7 @@ class NovelAgentRuntime:
             threadId=failed_run.threadId,
             planId=failed_run.planId,
             status="running",
+            deadlineAt=self._run_deadline_at(plan, {}, {}),
             currentStepId=failed_run.currentStepId,
             progress=failed_run.progress,
             artifacts=[artifact.model_copy(deep=True) for artifact in failed_run.artifacts],
@@ -3038,6 +3248,7 @@ class NovelAgentRuntime:
             threadId=thread_id,
             planId=plan.planId,
             status="running",
+            deadlineAt=self._run_deadline_at(plan, params, context),
         )
         self.state.runs[run.runId] = run
         await self._emit(
@@ -3303,6 +3514,7 @@ class NovelAgentRuntime:
             threadId=thread_id,
             planId=plan.planId,
             status="running",
+            deadlineAt=self._run_deadline_at(plan, params, context),
             draftBatchId=batch.draftBatchId,
         )
         self.state.runs[run.runId] = run
@@ -3728,12 +3940,26 @@ class NovelAgentRuntime:
     ) -> None:
         pending_operation: dict[str, Any] | None = None
         try:
-            result = await self.execution_graph.run(
-                f"run:{run_id}",
-                self._advance_execution,
-                initial_state=initial_state,
-                resume=resume,
-            )
+            run = self.state.runs.get(run_id)
+            remaining_seconds = self._seconds_until_deadline(run.deadlineAt if run else None)
+            if remaining_seconds is None:
+                result = await self.execution_graph.run(
+                    f"run:{run_id}",
+                    self._advance_execution,
+                    initial_state=initial_state,
+                    resume=resume,
+                )
+            else:
+                # The adapter/provider layers receive the exact deadline. This
+                # outer guard adds only transport/checkpoint cleanup grace and
+                # catches stalls before a request reaches those layers.
+                async with asyncio.timeout(max(0.1, remaining_seconds + 1.0)):
+                    result = await self.execution_graph.run(
+                        f"run:{run_id}",
+                        self._advance_execution,
+                        initial_state=initial_state,
+                        resume=resume,
+                    )
             candidate = result.get("pending_operation")
             if result.get("action") == "waiting_operation" and isinstance(candidate, dict):
                 pending_operation = dict(candidate)
@@ -3746,14 +3972,79 @@ class NovelAgentRuntime:
         except Exception as error:
             run = self.state.runs.get(run_id)
             if run and run.status not in {"completed", "failed", "cancelled"}:
-                code = getattr(error, "code", None)
-                details = error.failure.payload() if isinstance(error, AgentRequestError) else (
-                    error.payload() if isinstance(error, ToolchainError) else {}
-                )
+                if isinstance(error, TimeoutError):
+                    code = "UPSTREAM_TIMEOUT"
+                    public_message = "任务超过允许的总处理时间，已停止执行。"
+                    details = {"retryable": True, "deadlineAt": run.deadlineAt}
+                else:
+                    public_message = self._public_failure_message(run, error)
+                    code = getattr(error, "code", None)
+                    details = error.failure.payload() if isinstance(error, AgentRequestError) else (
+                        error.payload() if isinstance(error, ToolchainError) else {}
+                    )
                 recovery_payload = error.details.get("recovery") if isinstance(error, ToolchainError) else None
                 if isinstance(recovery_payload, dict):
                     run.recovery = AgentRecoveryDescriptor.model_validate(recovery_payload)
                 failure_payload = {**details, "message": public_message, "stage": "execution_graph", "code": code}
+                plan = self.state.plans.get(run.planId)
+                step = next(
+                    (item for item in (plan.steps if plan else []) if item.stepId == run.currentStepId),
+                    None,
+                )
+                if step is not None and step.status not in {"completed", "failed", "skipped"}:
+                    active_tool_call = next(
+                        (
+                            event for event in reversed(run.events)
+                            if event.type == "tool_call" and event.stepId == step.stepId and event.status == "running"
+                        ),
+                        None,
+                    )
+                    if active_tool_call is not None:
+                        has_later_result = any(
+                            event.type == "tool_result"
+                            and event.stepId == step.stepId
+                            and event.toolName == active_tool_call.toolName
+                            and event.sequence > active_tool_call.sequence
+                            for event in run.events
+                        )
+                        if not has_later_result:
+                            await self._emit(
+                                run,
+                                "tool_result",
+                                step_id=step.stepId,
+                                agent=step.agent,
+                                tool_name=active_tool_call.toolName,
+                                status="failed",
+                                payload={
+                                    "summary": public_message,
+                                    "code": code,
+                                    "retryable": bool(details.get("retryable")),
+                                    "transport": self.tool_transport,
+                                    **{
+                                        key: active_tool_call.payload[key]
+                                        for key in ("toolchainId", "nodeId")
+                                        if key in active_tool_call.payload
+                                    },
+                                },
+                            )
+                    if step.toolchain is not None:
+                        await self._emit(
+                            run,
+                            "toolchain_failed",
+                            step_id=step.stepId,
+                            agent=step.agent,
+                            status="failed",
+                            payload={**failure_payload, "toolchain": step.toolchain.model_dump()},
+                        )
+                    step.status = "failed"
+                    await self._emit(
+                        run,
+                        "step_failed",
+                        step_id=step.stepId,
+                        agent=step.agent,
+                        status="failed",
+                        payload={"title": step.title, "message": public_message, "code": code},
+                    )
                 await self._emit(run, "error", payload=failure_payload)
                 await self._finish_run(
                     run,
@@ -3906,9 +4197,16 @@ class NovelAgentRuntime:
         if phase == "toolchain":
             try:
                 return await self._advance_toolchain(run, plan, step, graph_state)
-            except ToolchainError as error:
+            except (ToolchainError, AgentRequestError) as error:
                 step.status = "failed"
-                payload = {**error.payload(), "toolchain": step.toolchain.model_dump() if step.toolchain else None}
+                if isinstance(error, AgentRequestError):
+                    payload = {
+                        **error.failure.payload(),
+                        "message": error.failure.user_message,
+                        "toolchain": step.toolchain.model_dump() if step.toolchain else None,
+                    }
+                else:
+                    payload = {**error.payload(), "toolchain": step.toolchain.model_dump() if step.toolchain else None}
                 await self._emit(run, "toolchain_failed", step_id=step.stepId, agent=step.agent, status="failed", payload=payload)
                 await self._emit(run, "error", step_id=step.stepId, agent=step.agent, payload=payload)
                 await self._emit(
@@ -3917,9 +4215,9 @@ class NovelAgentRuntime:
                     step_id=step.stepId,
                     agent=step.agent,
                     status="failed",
-                    payload={"title": step.title, "message": str(error), "code": error.code},
+                    payload={"title": step.title, "message": payload["message"], "code": payload["code"]},
                 )
-                await self._finish_run(run, "failed", "run_failed", {"message": str(error), "code": error.code})
+                await self._finish_run(run, "failed", "run_failed", payload)
                 return {"action": "terminal"}
 
         if phase == "finish_step" or tool_index >= len(step.tools):
@@ -4533,7 +4831,7 @@ class NovelAgentRuntime:
                 return {
                     "toolchain_state": {
                         **chain_state,
-                        "stage": "generate",
+                        "stage": "plan",
                         "source": {
                             "sourceType": "model_prior",
                             "workTitle": work_title,
@@ -4551,6 +4849,7 @@ class NovelAgentRuntime:
                     "action": "continue",
                     "resume_response": None,
                 }
+            scope_tool_input = ChapterScopeContextInput.model_validate(tool_input).model_dump(exclude_none=True)
             await self._emit(
                 run,
                 "toolchain_node_started",
@@ -4567,9 +4866,32 @@ class NovelAgentRuntime:
                 agent=step.agent,
                 tool_name="chapter.scope_context.build",
                 status="running",
-                payload={"summary": "正在读取获准的文风样本范围", "args": tool_input, "toolchainId": invocation.id, "nodeId": node_id},
+                payload={"summary": "正在读取获准的文风样本范围", "args": scope_tool_input, "toolchainId": invocation.id, "nodeId": node_id},
             )
-            raw_source = await self._tool_invoke(run, "chapter.scope_context.build", tool_input)
+            try:
+                raw_source = await self._tool_invoke(run, "chapter.scope_context.build", scope_tool_input)
+            except Exception as error:
+                failure = error.failure.payload() if isinstance(error, AgentRequestError) else {}
+                await self._emit(
+                    run,
+                    "tool_result",
+                    step_id=step.stepId,
+                    agent=step.agent,
+                    tool_name="chapter.scope_context.build",
+                    status="failed",
+                    payload={
+                        "summary": (
+                            error.failure.user_message if isinstance(error, AgentRequestError) else "文风样本读取失败。"
+                        ),
+                        "transport": self.tool_transport,
+                        "toolchainId": invocation.id,
+                        "nodeId": node_id,
+                        "code": failure.get("code") or getattr(error, "code", "NODE_FAILED"),
+                        "retryable": failure.get("retryable", False),
+                        **({"diagnosticRef": failure["diagnosticRef"]} if failure.get("diagnosticRef") else {}),
+                    },
+                )
+                raise
             source = ChapterScopeBundle.model_validate(raw_source)
             await self._emit(
                 run,
@@ -4587,7 +4909,7 @@ class NovelAgentRuntime:
             return {
                 "toolchain_state": {
                     **chain_state,
-                    "stage": "generate",
+                    "stage": "plan",
                     "source": source.model_dump(),
                     "toolCallCount": 1,
                     "estimatedTokens": source.estimatedTokens,
@@ -4596,9 +4918,452 @@ class NovelAgentRuntime:
                 "resume_response": None,
             }
 
-        if stage == "generate":
-            node_id = "novel_blueprint.synthesize" if invocation.id == "novel.bootstrap" else "style_pack.synthesize"
-            method = "agent.generate_novel_bootstrap" if invocation.id == "novel.bootstrap" else "agent.generate_style_skill_pack"
+        if invocation.id == "agent_skill.style_extract" and stage == "plan":
+            node_id = "style_pack.plan"
+            await self._emit(
+                run,
+                "toolchain_node_started",
+                step_id=step.stepId,
+                agent=step.agent,
+                status="running",
+                payload={"toolchainId": invocation.id, "nodeId": node_id, "kind": "model"},
+            )
+            raw_plan = await self._automation_invoke(
+                run,
+                "agent.plan_style_skill_pack",
+                workflow_request(
+                    goal=plan.goal,
+                    locale=graph_state["locale"],
+                    user_decisions=plan.userDecisions,
+                    source=chain_state.get("source") if isinstance(chain_state.get("source"), dict) else None,
+                    agent_skill=self._compile_step_skills(step),
+                ),
+                node_id=node_id,
+            )
+            style_plan = await self._normalize_model_output(
+                run,
+                node_id=node_id,
+                source_method="agent.plan_style_skill_pack",
+                raw_value=raw_plan,
+                normalizer=lambda value: StyleSkillPackAuthoringPlan.model_validate(value),
+            )
+            first_path = STYLE_SKILL_MEMBER_PATHS[style_plan.skills[0].draftKey]
+            workspace = await self._automation_invoke(
+                run,
+                "agent_skill.workspace.create",
+                {
+                    "action": "pack",
+                    "scope": "novel" if graph_state.get("novel_id") else "user",
+                    "sourceNovelId": graph_state.get("novel_id") or None,
+                    "logicalPath": first_path,
+                    "sourceSnapshotRefs": [
+                        str(item.get("sourceId"))
+                        for item in (chain_state.get("source") or {}).get("evidence", [])
+                        if isinstance(item, dict) and item.get("sourceId")
+                    ][:50],
+                    "derivationReport": {
+                        "kind": "style_skill_pack_extraction",
+                        "sourceCoverage": style_plan.sourceCoverage,
+                        "omittedDimensions": style_plan.omittedDimensions,
+                        "warnings": style_plan.warnings,
+                    },
+                },
+                node_id="style_pack.workspace.create",
+            )
+            if not isinstance(workspace, dict) or not workspace.get("draftId"):
+                raise ToolchainError("DRAFT_PERSIST_FAILED", "Skill Pack workspace store returned an invalid result")
+            await self._emit(
+                run,
+                "toolchain_node_completed",
+                step_id=step.stepId,
+                agent=step.agent,
+                status="completed",
+                payload={
+                    "toolchainId": invocation.id,
+                    "nodeId": node_id,
+                    "summary": style_plan.summary[:240],
+                    "skillDraftId": workspace.get("draftId"),
+                },
+            )
+            return {
+                "toolchain_state": {
+                    **chain_state,
+                    "stage": "author",
+                    "stylePlan": style_plan.model_dump(),
+                    "skillWorkspace": workspace,
+                    "styleMemberIndex": 0,
+                    "styleValidationAttempt": 0,
+                },
+                "action": "continue",
+                "resume_response": None,
+            }
+
+        if invocation.id == "agent_skill.style_extract" and stage == "author":
+            style_plan = StyleSkillPackAuthoringPlan.model_validate(chain_state.get("stylePlan") or {})
+            workspace = chain_state.get("skillWorkspace") if isinstance(chain_state.get("skillWorkspace"), dict) else {}
+            latest_workspace = await self._automation_invoke(
+                run,
+                "agent_skill.workspace.list",
+                {"draftId": workspace.get("draftId")},
+                node_id="style_pack.workspace.refresh.author",
+            )
+            if isinstance(latest_workspace, dict):
+                workspace = latest_workspace
+            member_index = int(chain_state.get("styleMemberIndex") or 0)
+            if member_index < len(style_plan.skills):
+                member = style_plan.skills[member_index]
+                logical_path = STYLE_SKILL_MEMBER_PATHS[member.draftKey]
+                diagnostics_by_path = chain_state.get("styleDiagnostics") if isinstance(chain_state.get("styleDiagnostics"), dict) else {}
+                diagnostics = diagnostics_by_path.get(logical_path) if isinstance(diagnostics_by_path.get(logical_path), list) else []
+                current_document = ""
+                documents = workspace.get("documents") if isinstance(workspace.get("documents"), list) else []
+                document_summary = next((
+                    item for item in documents
+                    if isinstance(item, dict) and item.get("logicalPath") == logical_path and not item.get("deleted")
+                ), None)
+                if (
+                    isinstance(document_summary, dict)
+                    and int(document_summary.get("byteLength") or 0) > 0
+                    and not diagnostics
+                    and chain_state.get("styleRepairReturnIndex") is None
+                    and int(chain_state.get("styleValidationAttempt") or 0) == 0
+                ):
+                    return {
+                        "toolchain_state": {
+                            **chain_state,
+                            "skillWorkspace": workspace,
+                            "styleMemberIndex": member_index + 1,
+                        },
+                        "action": "continue",
+                        "resume_response": None,
+                    }
+                if isinstance(document_summary, dict):
+                    current = await self._automation_invoke(
+                        run,
+                        "agent_skill.workspace.read",
+                        {"draftId": workspace.get("draftId"), "logicalPath": logical_path},
+                        node_id=f"style_pack.read.{member.draftKey}",
+                    )
+                    current_document = str(current.get("contentText") or "") if isinstance(current, dict) else ""
+                authoring_goal = (
+                    "为文风 Skill Pack 编写一个独立成员。严格采用成员规划中的 stableId、标题、描述、"
+                    "guidanceMode、触发条件、支持操作、约束和方法维度；正文把方法维度展开为可执行步骤、"
+                    "判断标准、证据边界与去污染规则。不要编写其他成员或 Pack。成员规划："
+                    + json.dumps(member.model_dump(), ensure_ascii=False)
+                )
+                generated = await self._automation_invoke(
+                    run,
+                    "agent.generate_skill_document",
+                    {
+                        "goal": authoring_goal,
+                        "scope": "novel" if graph_state.get("novel_id") else "user",
+                        "novelId": graph_state.get("novel_id") or None,
+                        "locale": graph_state["locale"],
+                        "creatorProfile": "builtin.style-skill-extractor.member",
+                        "targetSkillId": member.stableIdCandidate,
+                        "source": {
+                            "styleSource": chain_state.get("source") or {},
+                            "memberPlan": member.model_dump(),
+                        },
+                        "currentDocument": current_document,
+                        "validationDiagnostics": diagnostics,
+                        "attempt": max(1, int(chain_state.get("styleValidationAttempt") or 0) + 1),
+                    },
+                    node_id=f"style_pack.author.{member.draftKey}",
+                )
+                content_text = str(generated.get("contentText") or "") if isinstance(generated, dict) else ""
+                if not content_text:
+                    raise ToolchainError("STYLE_SKILL_DOCUMENT_EMPTY", f"{logical_path} generator returned empty text")
+                workspace = await self._automation_invoke(
+                    run,
+                    "agent_skill.workspace.write",
+                    {
+                        "draftId": workspace.get("draftId"),
+                        "expectedVersion": workspace.get("version"),
+                        "logicalPath": logical_path,
+                        "mediaType": "text/markdown",
+                        "contentText": content_text,
+                    },
+                    node_id=f"style_pack.write.{member.draftKey}",
+                )
+                repair_return_index = chain_state.get("styleRepairReturnIndex")
+                if repair_return_index is not None:
+                    return {
+                        "toolchain_state": {
+                            **chain_state,
+                            "stage": "repair",
+                            "skillWorkspace": workspace,
+                            "styleRepairIndex": int(repair_return_index),
+                            "styleRepairReturnIndex": None,
+                        },
+                        "action": "continue",
+                        "resume_response": None,
+                    }
+                return {
+                    "toolchain_state": {
+                        **chain_state,
+                        "skillWorkspace": workspace,
+                        "styleMemberIndex": member_index + 1,
+                    },
+                    "action": "continue",
+                    "resume_response": None,
+                }
+
+            translated_pack = {
+                "definition": {
+                    "stableId": style_plan.pack.stableIdCandidate,
+                    "title": style_plan.pack.title,
+                    "description": style_plan.pack.description,
+                },
+                "revision": {
+                    "version": "1.0.0",
+                    "bindings": [
+                        {
+                            "operationId": binding.operationId,
+                            "roleId": binding.roleId,
+                            "primaryDraftKey": STYLE_SKILL_MEMBER_KEYS[binding.primaryDraftKey],
+                            **({"auxiliaryDraftKey": STYLE_SKILL_MEMBER_KEYS[binding.auxiliaryDraftKey]}
+                               if binding.auxiliaryDraftKey else {}),
+                        }
+                        for binding in style_plan.pack.bindings
+                    ],
+                },
+            }
+            workspace = await self._automation_invoke(
+                run,
+                "agent_skill.workspace.set_pack",
+                {
+                    "draftId": workspace.get("draftId"),
+                    "expectedVersion": workspace.get("version"),
+                    "pack": translated_pack,
+                },
+                node_id="style_pack.workspace.set_pack",
+            )
+            return {
+                "toolchain_state": {
+                    **chain_state,
+                    "stage": "validate",
+                    "skillWorkspace": workspace,
+                },
+                "action": "continue",
+                "resume_response": None,
+            }
+
+        if invocation.id == "agent_skill.style_extract" and stage == "validate":
+            workspace = chain_state.get("skillWorkspace") if isinstance(chain_state.get("skillWorkspace"), dict) else {}
+            latest_workspace = await self._automation_invoke(
+                run,
+                "agent_skill.workspace.list",
+                {"draftId": workspace.get("draftId")},
+                node_id="style_pack.workspace.refresh.validate",
+            )
+            if isinstance(latest_workspace, dict):
+                workspace = latest_workspace
+            validation_attempt = int(chain_state.get("styleValidationAttempt") or 0) + 1
+            workspace = await self._automation_invoke(
+                run,
+                "agent_skill.workspace.validate",
+                {
+                    "draftId": workspace.get("draftId"),
+                    "expectedVersion": workspace.get("version"),
+                    "finalAttempt": validation_attempt >= 4,
+                },
+                node_id=f"style_pack.workspace.validate.{validation_attempt}",
+            )
+            report = workspace.get("validationReport") if isinstance(workspace.get("validationReport"), dict) else {}
+            if report.get("ok"):
+                return {
+                    "toolchain_state": {
+                        **chain_state,
+                        "stage": "compile",
+                        "skillWorkspace": workspace,
+                        "styleValidationAttempt": validation_attempt,
+                        "styleDiagnostics": {},
+                    },
+                    "action": "continue",
+                    "resume_response": None,
+                }
+            diagnostics = [item for item in (report.get("diagnostics") or []) if isinstance(item, dict)]
+            affected_paths = sorted({
+                str(item.get("path") or "") for item in diagnostics
+                if str(item.get("path") or "") in STYLE_SKILL_MEMBER_PATHS.values()
+            })
+            if validation_attempt >= 4 or not affected_paths:
+                raise ToolchainError(
+                    "STYLE_SKILL_WORKSPACE_NEEDS_ATTENTION",
+                    "文风 Skill Pack 草稿未通过校验，已保留在待审核草稿中。",
+                    details={
+                        "skillDraftId": workspace.get("draftId"),
+                        "validationReport": report,
+                    },
+                )
+            diagnostics_by_path = {
+                path: [item for item in diagnostics if str(item.get("path") or "") == path]
+                for path in affected_paths
+            }
+            style_plan = StyleSkillPackAuthoringPlan.model_validate(chain_state.get("stylePlan") or {})
+            repair_keys = [
+                item.draftKey for item in style_plan.skills
+                if STYLE_SKILL_MEMBER_PATHS[item.draftKey] in affected_paths
+            ]
+            return {
+                "toolchain_state": {
+                    **chain_state,
+                    "stage": "repair",
+                    "skillWorkspace": workspace,
+                    "styleValidationAttempt": validation_attempt,
+                    "styleDiagnostics": diagnostics_by_path,
+                    "styleRepairKeys": repair_keys,
+                    "styleRepairIndex": 0,
+                },
+                "action": "continue",
+                "resume_response": None,
+            }
+
+        if invocation.id == "agent_skill.style_extract" and stage == "compile":
+            style_plan = StyleSkillPackAuthoringPlan.model_validate(chain_state.get("stylePlan") or {})
+            workspace = chain_state.get("skillWorkspace") if isinstance(chain_state.get("skillWorkspace"), dict) else {}
+            latest_workspace = await self._automation_invoke(
+                run,
+                "agent_skill.workspace.list",
+                {"draftId": workspace.get("draftId")},
+                node_id="style_pack.workspace.refresh.compile",
+            )
+            if isinstance(latest_workspace, dict):
+                workspace = latest_workspace
+            if workspace.get("phase") != "compiled" or workspace.get("status") != "ready_for_review":
+                workspace = await self._automation_invoke(
+                    run,
+                    "agent_skill.workspace.compile",
+                    {
+                        "draftId": workspace.get("draftId"),
+                        "expectedVersion": workspace.get("version"),
+                    },
+                    node_id="style_pack.workspace.compile",
+                )
+            persisted = await self._automation_invoke(
+                run,
+                "agent_skill.draft.get",
+                {"draftId": workspace.get("draftId")},
+                node_id="style_pack.workspace.get",
+            )
+            if not isinstance(persisted, dict):
+                raise ToolchainError("DRAFT_PERSIST_FAILED", "Compiled Skill Pack draft could not be loaded")
+            persisted_draft = persisted.get("draft") if isinstance(persisted.get("draft"), dict) else {}
+            compiled_by_key = {
+                str(item.get("draftKey") or ""): item
+                for item in (persisted_draft.get("skills") or [])
+                if isinstance(item, dict)
+            }
+            artifact_skills = []
+            for member in style_plan.skills:
+                compiled = compiled_by_key.get(STYLE_SKILL_MEMBER_KEYS[member.draftKey]) or {}
+                revision = compiled.get("revision") if isinstance(compiled.get("revision"), dict) else {}
+                artifact_skills.append({
+                    "draftKey": member.draftKey,
+                    "stableIdCandidate": member.stableIdCandidate,
+                    "title": member.title,
+                    "description": member.description,
+                    "guidanceMode": member.guidanceMode,
+                    "confidence": member.confidence,
+                    "triggerHints": member.triggerHints,
+                    "antiTriggerHints": member.antiTriggerHints,
+                    "supportedOperations": member.supportedOperations,
+                    "instructions": str(revision.get("instructions") or ""),
+                    "constraints": list(revision.get("constraints") or member.constraints),
+                    "evidenceNotes": member.evidenceNotes,
+                    "contaminationWarnings": member.contaminationWarnings,
+                    "evaluationPrompt": member.evaluationPrompt,
+                })
+            output = StyleSkillPackDraftArtifact.model_validate({
+                "summary": style_plan.summary,
+                "sourceCoverage": style_plan.sourceCoverage,
+                "skills": artifact_skills,
+                "pack": style_plan.pack.model_dump(),
+                "omittedDimensions": style_plan.omittedDimensions,
+                "warnings": style_plan.warnings,
+            })
+            artifact = await self._publish_artifact(
+                run,
+                artifact_type="agent_skill_pack_draft",
+                title=output.pack.title,
+                summary=output.summary[:500],
+                content=style_skill_pack_markdown(output),
+                reference={
+                    "novelId": graph_state.get("novel_id"),
+                    "toolchainId": invocation.id,
+                    "version": invocation.version,
+                    "skillDraftId": persisted.get("id"),
+                },
+                metadata={
+                    "draft": output.model_dump(),
+                    "skills": [skill.model_dump() for skill in step.skills],
+                    "source": chain_state.get("source") or {},
+                    "skillDraft": persisted,
+                },
+                step_id=step.stepId,
+                agent=step.agent,
+            )
+            await self._emit(
+                run,
+                "toolchain_node_completed",
+                step_id=step.stepId,
+                agent=step.agent,
+                status="completed",
+                payload={
+                    "toolchainId": invocation.id,
+                    "nodeId": "style_pack.compile",
+                    "artifactId": artifact.artifactId,
+                    "summary": output.summary[:240],
+                },
+            )
+            return {
+                "toolchain_state": {
+                    **chain_state,
+                    "stage": "completed",
+                    "artifactId": artifact.artifactId,
+                    "result": output.model_dump(),
+                    "skillDraft": persisted,
+                    "skillWorkspace": workspace,
+                },
+                "action": "continue",
+                "resume_response": None,
+            }
+
+        if invocation.id == "agent_skill.style_extract" and stage == "repair":
+            repair_keys = [str(item) for item in (chain_state.get("styleRepairKeys") or [])]
+            repair_index = int(chain_state.get("styleRepairIndex") or 0)
+            if repair_index >= len(repair_keys):
+                return {
+                    "toolchain_state": {**chain_state, "stage": "validate"},
+                    "action": "continue",
+                    "resume_response": None,
+                }
+            style_plan = StyleSkillPackAuthoringPlan.model_validate(chain_state.get("stylePlan") or {})
+            key = repair_keys[repair_index]
+            next_member_index = next(
+                index for index, item in enumerate(style_plan.skills) if item.draftKey == key
+            )
+            return {
+                "toolchain_state": {
+                    **chain_state,
+                    "stage": "author",
+                    "styleMemberIndex": next_member_index,
+                    "styleRepairReturnIndex": repair_index + 1,
+                },
+                "action": "continue",
+                "resume_response": None,
+            }
+
+        if invocation.id == "agent_skill.style_extract" and stage == "generate":
+            raise ToolchainError(
+                "TOOLCHAIN_STATE_UNSUPPORTED",
+                "This saved Style Skill run used a retired authoring stage; create a new run to use the document workspace flow",
+            )
+
+        if invocation.id == "novel.bootstrap" and stage == "generate":
+            node_id = "novel_blueprint.synthesize"
+            method = "agent.generate_novel_bootstrap"
             await self._emit(
                 run,
                 "toolchain_node_started",
@@ -4619,52 +5384,17 @@ class NovelAgentRuntime:
                 ),
                 node_id=node_id,
             )
-            if invocation.id == "novel.bootstrap":
-                output = await self._normalize_model_output(
-                    run,
-                    node_id=node_id,
-                    source_method=method,
-                    raw_value=raw_result,
-                    normalizer=lambda value: NovelBootstrapDraft.model_validate(value),
-                )
-                artifact_type = "novel_bootstrap_draft"
-                title = "新小说方案"
-                summary = output.corePremise[:500]
-                content = novel_bootstrap_markdown(output)
-                skill_draft_record: dict[str, Any] | None = None
-            else:
-                output = await self._normalize_model_output(
-                    run,
-                    node_id=node_id,
-                    source_method=method,
-                    raw_value=raw_result,
-                    normalizer=lambda value: StyleSkillPackDraftArtifact.model_validate(value),
-                )
-                artifact_type = "agent_skill_pack_draft"
-                title = output.pack.title
-                summary = output.summary[:500]
-                content = style_skill_pack_markdown(output)
-                persisted = await self._automation_invoke(
-                    run,
-                    "agent_skill.draft.upsert",
-                    {
-                        "action": "pack",
-                        "scope": "novel" if graph_state.get("novel_id") else "user",
-                        "status": "ready_for_review",
-                "sourceNovelId": graph_state.get("novel_id") or None,
-                        "draft": style_pack_persistence_payload(output.model_dump()),
-                        "derivationReport": {
-                            "kind": "style_skill_pack_extraction",
-                            "sourceCoverage": output.sourceCoverage,
-                            "omittedDimensions": output.omittedDimensions,
-                            "warnings": output.warnings,
-                        },
-                    },
-                    node_id="style_pack.persist_draft",
-                )
-                if not isinstance(persisted, dict):
-                    raise ToolchainError("DRAFT_PERSIST_FAILED", "Skill Pack draft store returned an invalid result")
-                skill_draft_record = persisted
+            output = await self._normalize_model_output(
+                run,
+                node_id=node_id,
+                source_method=method,
+                raw_value=raw_result,
+                normalizer=lambda value: NovelBootstrapDraft.model_validate(value),
+            )
+            artifact_type = "novel_bootstrap_draft"
+            title = "新小说方案"
+            summary = output.corePremise[:500]
+            content = novel_bootstrap_markdown(output)
             artifact = await self._publish_artifact(
                 run,
                 artifact_type=artifact_type,
@@ -4675,13 +5405,11 @@ class NovelAgentRuntime:
                     "novelId": graph_state.get("novel_id"),
                     "toolchainId": invocation.id,
                     "version": invocation.version,
-                    **({"skillDraftId": skill_draft_record.get("id")} if skill_draft_record else {}),
                 },
                 metadata={
                     "draft": output.model_dump(),
                     "skills": [skill.model_dump() for skill in step.skills],
                     "source": chain_state.get("source") or {},
-                    **({"skillDraft": skill_draft_record} if skill_draft_record else {}),
                 },
                 step_id=step.stepId,
                 agent=step.agent,
@@ -4700,7 +5428,6 @@ class NovelAgentRuntime:
                     "stage": "completed",
                     "artifactId": artifact.artifactId,
                     "result": output.model_dump(),
-                    **({"skillDraft": skill_draft_record} if skill_draft_record else {}),
                 },
                 "action": "continue",
                 "resume_response": None,
@@ -6917,6 +7644,15 @@ class NovelAgentRuntime:
                     node_id=node_id,
                     details={"invocationKey": error.invocation_key, "method": error.method},
                 ) from error
+            except DraftOperationFailed as error:
+                await self._emit_tool_failure(run, step, invocation, node_id, tool_name, error)
+                raise ToolchainError(
+                    "MODEL_OUTPUT_TRUNCATED" if error.code == "MODEL_OUTPUT_TRUNCATED" else "NODE_FAILED",
+                    str(error),
+                    node_id=node_id,
+                    retryable=False,
+                    details=error.details,
+                ) from error
             except ToolchainError:
                 raise
             except Exception as error:
@@ -6983,6 +7719,306 @@ class NovelAgentRuntime:
                     "nodeId": node_id,
                     "summary": summary,
                     "artifactId": artifact.artifactId,
+                },
+            )
+            return {"toolchain_state": updated, "action": "continue", "resume_response": None}
+
+        if input_data.editorialReview and not chain_state.get("draftReview"):
+            draft_result = DraftToolchainResult.model_validate(chain_state["draftResult"])
+            read_node_id = "draft.review_source"
+            read_tool_name = "draft.get"
+            self._require_toolchain_tool(definition, read_tool_name, read_node_id)
+            read_params = {"draftSessionId": draft_result.draftSessionId}
+            await self._emit_toolchain_node_started(run, step, invocation, read_node_id, tool_name=read_tool_name)
+            await self._emit_tool_call(run, step, invocation, read_node_id, read_tool_name, read_params)
+            try:
+                raw_session = await self._tool_invoke(run, read_tool_name, read_params)
+                if not isinstance(raw_session, dict):
+                    raise ToolchainError(
+                        "NODE_FAILED",
+                        "draft.get returned no reviewable chapter draft",
+                        node_id=read_node_id,
+                    )
+                if raw_session.get("status", "draft") != "draft" or int(raw_session.get("version") or 1) != draft_result.version:
+                    raise ToolchainError("VERSION_CONFLICT", "草稿已变化，请基于当前版本重新审校。", node_id=read_node_id)
+                payload = raw_session.get("payload") if isinstance(raw_session.get("payload"), dict) else {}
+                draft_text = str(payload.get("generatedText") or payload.get("content") or "").strip()
+                if not draft_text:
+                    raise ToolchainError(
+                        "NODE_FAILED",
+                        "The generated DraftSession contains no chapter text to review",
+                        node_id=read_node_id,
+                    )
+            except Exception as error:
+                await self._emit_tool_failure(run, step, invocation, read_node_id, read_tool_name, error)
+                raise
+            source_summary = self._summarize_result(read_tool_name, raw_session)
+            await self._emit_tool_success(run, step, invocation, read_node_id, read_tool_name, source_summary)
+            await self._emit(
+                run,
+                "toolchain_node_completed",
+                step_id=step.stepId,
+                agent=step.agent,
+                tool_name=read_tool_name,
+                status="completed",
+                payload={
+                    "toolchainId": invocation.id,
+                    "nodeId": read_node_id,
+                    "summary": source_summary,
+                    "draftSessionId": draft_result.draftSessionId,
+                    "draftVersion": raw_session.get("version"),
+                },
+            )
+
+            review_node_id = "draft.editorial_review"
+            if int(chain_state.get("modelCallCount") or 0) >= definition.budget.maxModelCalls:
+                raise ToolchainError(
+                    "BUDGET_EXCEEDED",
+                    "Chapter continuation exhausted its editorial review model budget.",
+                    node_id=review_node_id,
+                )
+            draft_context = context_bundle.model_copy(update={
+                "chapter": {
+                    **context_bundle.chapter,
+                    "id": input_data.chapterId,
+                    "content": draft_text,
+                    "draftSessionId": draft_result.draftSessionId,
+                    "draftVersion": raw_session.get("version"),
+                    "contentSource": "draft_session",
+                },
+            })
+            await self._emit_toolchain_node_started(run, step, invocation, review_node_id, kind="model")
+            try:
+                raw_review = await self._automation_invoke(
+                    run,
+                    "agent.generate_consistency_review",
+                    review_request(
+                        plan.goal,
+                        graph_state["locale"],
+                        draft_context,
+                        input_data.reviewDimensions,
+                        self._compile_step_skills(step),
+                    ),
+                    node_id=review_node_id,
+                )
+                review = await self._normalize_model_output(
+                    run,
+                    node_id=review_node_id,
+                    source_method="agent.generate_consistency_review",
+                    raw_value=raw_review,
+                    normalizer=lambda value: normalize_review(value, draft_context),
+                )
+            except AgentRequestError as error:
+                if error.code in {"MODEL_OUTPUT_TRUNCATED", "NETWORK_ERROR", "PROVIDER_TIMEOUT", "PROVIDER_UNAVAILABLE", "PROVIDER_RATE_LIMITED", "PROVIDER_AUTH"}:
+                    run.recovery = AgentRecoveryDescriptor(
+                        failureKind="model_output_truncated" if error.code == "MODEL_OUTPUT_TRUNCATED" else "transport",
+                        failedAtPhase="model_pending", retryStrategy="retry_request", canRecover=True,
+                        recoveryRevision=run.failureRevision + 1, actionLabel="重试审校",
+                        completedArtifactIds=[artifact.artifactId for artifact in run.artifacts],
+                        diagnosticRef=error.failure.diagnostic_ref,
+                    )
+                    self.state.recoveryRecords[run.runId] = {
+                        "nodeId": review_node_id, "sourceMethod": "agent.generate_consistency_review",
+                        "draftSessionId": draft_result.draftSessionId,
+                        "draftVersion": draft_result.version,
+                    }
+                    self._save()
+                raise
+            except Exception as error:
+                raise ToolchainError(
+                    "NODE_FAILED",
+                    f"Generated draft editorial review failed: {error}",
+                    node_id=review_node_id,
+                    retryable=True,
+                ) from error
+            review_artifact = await self._publish_artifact(
+                run,
+                artifact_type="consistency_review",
+                title="章节草稿编辑审校",
+                summary=review.summary[:500],
+                content=review_markdown(review),
+                reference={
+                    "chapterId": input_data.chapterId,
+                    "draftSessionId": draft_result.draftSessionId,
+                    "draftVersion": raw_session.get("version"),
+                    "toolchainId": invocation.id,
+                    "version": invocation.version,
+                },
+                metadata={
+                    "review": review.model_dump(),
+                    "reviewedDraftSessionId": draft_result.draftSessionId,
+                    "reviewedDraftVersion": raw_session.get("version"),
+                    "contentSource": "draft_session",
+                },
+                step_id=step.stepId,
+                agent="editor",
+            )
+            final_draft_result = draft_result
+            final_artifact_id = str(chain_state.get("artifactId") or "") or None
+            actionable_issues = [
+                issue for issue in review.issues
+                if issue.severity in {"critical", "high"}
+            ]
+            revision_artifact_id: str | None = None
+            if actionable_issues:
+                revision_node_id = "draft.editorial_revision"
+                revision_tool_name = "chapter.revise_draft"
+                self._require_toolchain_tool(definition, revision_tool_name, revision_node_id)
+                review_request_id = new_id("review")
+                created_at = utc_now()
+                revision_params = {
+                    "sourceDraftSessionId": draft_result.draftSessionId,
+                    "sourceDraftVersion": int(raw_session.get("version") or draft_result.version),
+                    "reviewRequestId": review_request_id,
+                    "locale": graph_state["locale"],
+                    "comments": [
+                        {
+                            "commentId": new_id("comment"),
+                            "novelId": input_data.novelId,
+                            "sourceConversationId": run.threadId,
+                            "sourceRunId": run.runId,
+                            "sourceArtifactId": review_artifact.artifactId,
+                            "reviewVersionId": draft_result.draftSessionId,
+                            "draftSessionId": draft_result.draftSessionId,
+                            "anchor": {
+                                "kind": "chapter",
+                                "targetId": input_data.chapterId,
+                                "quote": issue.excerpt[:500],
+                            },
+                            "body": "：".join(part for part in (
+                                issue.title.strip(),
+                                issue.recommendation.strip(),
+                            ) if part),
+                            "status": "sent",
+                            "sentMode": "regenerate",
+                            "createdAt": created_at,
+                            "updatedAt": created_at,
+                            "sentAt": created_at,
+                        }
+                        for issue in actionable_issues
+                    ],
+                }
+                await self._emit_toolchain_node_started(
+                    run,
+                    step,
+                    invocation,
+                    revision_node_id,
+                    tool_name=revision_tool_name,
+                )
+                await self._emit_tool_call(
+                    run,
+                    step,
+                    invocation,
+                    revision_node_id,
+                    revision_tool_name,
+                    revision_params,
+                )
+                try:
+                    raw_revision = await self._tool_invoke(run, revision_tool_name, revision_params)
+                    revised_session = normalize_chapter_draft(raw_revision)
+                except SideEffectResultUnknown as error:
+                    await self._emit_tool_failure(
+                        run, step, invocation, revision_node_id, revision_tool_name, error,
+                    )
+                    raise ToolchainError(
+                        "SIDE_EFFECT_UNKNOWN",
+                        str(error),
+                        node_id=revision_node_id,
+                        details={"invocationKey": error.invocation_key, "method": error.method},
+                    ) from error
+                except Exception as error:
+                    await self._emit_tool_failure(
+                        run, step, invocation, revision_node_id, revision_tool_name, error,
+                    )
+                    raise ToolchainError("NODE_FAILED", str(error), node_id=revision_node_id) from error
+                run.draftSessionId = revised_session.draftSessionId
+                revision_summary = revised_session.previewSummary or "编辑审校修订草稿已生成，等待用户审核。"
+                await self._emit_tool_success(
+                    run,
+                    step,
+                    invocation,
+                    revision_node_id,
+                    revision_tool_name,
+                    revision_summary,
+                )
+                revision_artifact = await self._publish_artifact(
+                    run,
+                    artifact_type="chapter_draft",
+                    title="编辑审校修订草稿",
+                    summary=revision_summary,
+                    reference={
+                        "draftSessionId": revised_session.draftSessionId,
+                        "revisionOfDraftSessionId": draft_result.draftSessionId,
+                        "reviewArtifactId": review_artifact.artifactId,
+                    },
+                    metadata={
+                        "toolchainId": invocation.id,
+                        "version": invocation.version,
+                        "draftSession": revised_session.model_dump(),
+                        "reviewArtifactId": review_artifact.artifactId,
+                        "reviewRequestId": review_request_id,
+                    },
+                    step_id=step.stepId,
+                    agent="writer",
+                    tool_name=revision_tool_name,
+                )
+                final_draft_result = DraftToolchainResult(
+                    draftSessionId=revised_session.draftSessionId,
+                    draftType=revised_session.type,
+                    status=revised_session.status,
+                    version=revised_session.version,
+                    previewSummary=revised_session.previewSummary,
+                    artifactId=revision_artifact.artifactId,
+                    warnings=context_bundle.warnings,
+                    contextStats={
+                        "toolCallCount": context_bundle.toolCallCount + 3,
+                        "estimatedTokens": context_bundle.estimatedTokens,
+                        "evidenceCount": len(context_bundle.evidence),
+                    },
+                )
+                final_artifact_id = revision_artifact.artifactId
+                revision_artifact_id = revision_artifact.artifactId
+                await self._emit(
+                    run,
+                    "toolchain_node_completed",
+                    step_id=step.stepId,
+                    agent="writer",
+                    tool_name=revision_tool_name,
+                    status="completed",
+                    payload={
+                        "toolchainId": invocation.id,
+                        "nodeId": revision_node_id,
+                        "summary": revision_summary,
+                        "artifactId": revision_artifact.artifactId,
+                        "draftSessionId": revised_session.draftSessionId,
+                        "revisionOfDraftSessionId": draft_result.draftSessionId,
+                    },
+                )
+            updated = {
+                **chain_state,
+                "draftResult": final_draft_result.model_dump(),
+                "artifactId": final_artifact_id,
+                "draftReview": review.model_dump(),
+                "draftReviewArtifactId": review_artifact.artifactId,
+                "reviewedDraftSessionId": draft_result.draftSessionId,
+                "reviewedDraftVersion": raw_session.get("version"),
+                "draftRevisionArtifactId": revision_artifact_id,
+                "toolCallCount": int(chain_state.get("toolCallCount") or 0) + 1 + (1 if actionable_issues else 0),
+                "modelCallCount": int(chain_state.get("modelCallCount") or 0) + 1,
+            }
+            await self._emit(
+                run,
+                "toolchain_node_completed",
+                step_id=step.stepId,
+                agent="editor",
+                status="completed",
+                payload={
+                    "toolchainId": invocation.id,
+                    "nodeId": review_node_id,
+                    "summary": review.summary[:240],
+                    "artifactId": review_artifact.artifactId,
+                    "draftSessionId": draft_result.draftSessionId,
+                    "draftVersion": raw_session.get("version"),
                 },
             )
             return {"toolchain_state": updated, "action": "continue", "resume_response": None}
@@ -8694,6 +9730,7 @@ class NovelAgentRuntime:
             planId=run.planId,
             threadId=run.threadId,
             status=run.status,
+            deadlineAt=run.deadlineAt,
             currentStepId=run.currentStepId,
             currentStepTitle=current_step_title,
             totalSteps=len(plan.steps) if plan else 0,
@@ -9151,6 +10188,14 @@ class NovelAgentRuntime:
                     "understandingSummary": understanding_summary,
                 },
             )
+            plan = self.state.plans.get(run.planId)
+            if plan is not None:
+                run.deadlineAt = self._run_deadline_at(
+                    plan,
+                    {},
+                    {},
+                    step_ids={run.currentStepId} if run.currentStepId else None,
+                )
             self._save()
             resume_task = asyncio.create_task(self._run_graph_guarded(run_id, resume=compatibility_response))
             self._run_tasks[run_id] = resume_task
@@ -9290,6 +10335,14 @@ class NovelAgentRuntime:
                 "response": response,
             },
         )
+        plan = self.state.plans.get(run.planId)
+        if plan is not None:
+            run.deadlineAt = self._run_deadline_at(
+                plan,
+                {},
+                {},
+                step_ids={run.currentStepId} if run.currentStepId else None,
+            )
         self._save()
         resume_task = asyncio.create_task(self._run_graph_guarded(run_id, resume=response))
         self._run_tasks[run_id] = resume_task
@@ -9581,20 +10634,36 @@ class NovelAgentRuntime:
         raise ValueError(f"Unsupported Agent tool mapping: {tool_name}")
 
     async def _tool_invoke(self, run: AgentRun, method: str, params: dict[str, Any]) -> Any:
+        normalized_params = normalize_tool_arguments(params)
         if method == "chapter.generate_draft":
-            return await self._durable_chapter_draft_invoke(run, params)
+            return await self._durable_chapter_draft_invoke(run, normalized_params)
         definition = AGENT_TOOL_BY_NAME.get(method)
         if definition and not definition.read_only:
-            return await self._side_effect_tool_invoke(run, method, params)
+            return await self._side_effect_tool_invoke(run, method, normalized_params)
+
+        async def invoke_adapter(request_id: str) -> Any:
+            try:
+                return await self.tool_adapter.invoke(
+                    method,
+                    normalized_params,
+                    "desktop-ui",
+                    request_id=request_id,
+                    deadline_at=run.deadlineAt,
+                )
+            except TypeError as error:
+                if "unexpected keyword argument" not in str(error):
+                    raise
+                return await self.tool_adapter.invoke(
+                    method,
+                    normalized_params,
+                    "desktop-ui",
+                    request_id=request_id,
+                )
+
         return await self._retryable_request_invoke(
             run,
             method,
-            lambda request_id: self.tool_adapter.invoke(
-                method,
-                params,
-                "desktop-ui",
-                request_id=request_id,
-            ),
+            invoke_adapter,
             node_id=method,
             tool_request=True,
         )
@@ -9699,7 +10768,10 @@ class NovelAgentRuntime:
         self._save()
         operation: dict[str, Any]
         if record.status == "prepared":
-            operation_deadline = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+            operation_deadline = self._earliest_deadline(
+                run.deadlineAt,
+                (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+            )
             start_params = {
                 "operationKey": operation_key,
                 "generationRevision": int(params.get("generationRevision") or 1),
@@ -9830,11 +10902,12 @@ class NovelAgentRuntime:
                 error = observed.get("error") if isinstance(observed.get("error"), dict) else {}
                 code = str(error.get("code") or "DRAFT_OPERATION_FAILED")
                 message = str(error.get("userMessage") or "后台草稿任务已明确失败。")
+                details = error.get("details") if isinstance(error.get("details"), dict) else {}
                 self.store.mark_invocation_failed(
                     operation_key,
-                    {"code": code, "message": message, "operationId": operation_id},
+                    {"code": code, "message": message, "operationId": operation_id, **details},
                 )
-                raise DraftOperationFailed(code, message, operation_id)
+                raise DraftOperationFailed(code, message, operation_id, details)
             if operation_status not in {
                 "queued",
                 "running_generation",
@@ -9891,7 +10964,13 @@ class NovelAgentRuntime:
         self._active_request_ids.setdefault(run.runId, set()).add(request_id)
         self._active_tool_request_ids.setdefault(run.runId, set()).add(request_id)
         try:
-            result = await self.tool_adapter.invoke(method, params, "desktop-ui", request_id=request_id)
+            result = await self.tool_adapter.invoke(
+                method,
+                params,
+                "desktop-ui",
+                request_id=request_id,
+                deadline_at=run.deadlineAt,
+            )
             try:
                 self.store.mark_invocation_succeeded(
                     invocation_key,
@@ -9922,6 +11001,28 @@ class NovelAgentRuntime:
         except SideEffectResultUnknown:
             raise
         except Exception as error:
+            details = getattr(error, "details", None)
+            if isinstance(details, dict) and details.get("safeToRetryBeforePublish") is True:
+                failure = {
+                    "code": str(getattr(error, "code", "INVOCATION_ERROR")),
+                    "message": str(error),
+                    **{
+                        key: details[key]
+                        for key in (
+                            "terminationReason",
+                            "responseId",
+                            "model",
+                            "usage",
+                            "requestedMaxTokens",
+                            "attemptCount",
+                            "attempts",
+                            "safeToRetryBeforePublish",
+                        )
+                        if key in details
+                    },
+                }
+                self.store.mark_invocation_failed(invocation_key, failure)
+                raise
             try:
                 self.store.mark_invocation_unknown(
                     invocation_key,
@@ -10037,8 +11138,10 @@ class NovelAgentRuntime:
 
     @staticmethod
     def _public_failure_message(run: AgentRun, error: Exception) -> str:
+        if run.recovery and run.recovery.actionLabel == "重试审校" and run.draftSessionId:
+            return f"正文已保存，审校未完成。可重试审校，无需重新生成正文。原因：{error}"
         if run.recovery and run.recovery.failureKind == "model_output_invalid":
-            return "模型结果已保存，但 JSON 格式未通过校验。可直接修复 JSON 后继续。"
+            return "生成结果已保存，但格式检查未通过。可直接修复结果并继续。"
         if run.recovery and run.recovery.failureKind == "local_transform_failed":
             return "模型结果已保存，但本地处理程序未能完成转换。当前版本不会重复执行同一失败步骤。"
         return str(error)
@@ -10066,7 +11169,7 @@ class NovelAgentRuntime:
             retryStrategy="repair_model_output",
             canRecover=True,
             recoveryRevision=run.failureRevision + 1,
-            actionLabel="修复 JSON 后继续",
+            actionLabel="修复结果并继续",
             completedArtifactIds=[artifact.artifactId for artifact in run.artifacts if artifact.status in {"ready", "committed"}],
             diagnosticRef=diagnostic_ref,
         )
@@ -10128,7 +11231,7 @@ class NovelAgentRuntime:
             )
             raise ToolchainError(
                 "MODEL_OUTPUT_INVALID",
-                "模型返回的 JSON 与输出契约不一致，自动修复未成功。",
+                "生成结果未能通过格式检查，自动修复未成功。",
                 node_id=node_id,
                 retryable=False,
                 details={"recovery": recovery.model_dump()},
@@ -10165,16 +11268,19 @@ class NovelAgentRuntime:
                 "automaticRepairAttempts": 0,
             }
 
+        async def invoke_automation(request_id: str) -> Any:
+            return await self._invoke_automation_request(
+                method,
+                params,
+                request_id=request_id,
+                deadline_at=run.deadlineAt if run else None,
+            )
+
         try:
             return await self._retryable_request_invoke(
                 run,
                 method,
-                lambda request_id: self.automation.invoke(
-                    method,
-                    params,
-                    "desktop-ui",
-                    request_id=request_id,
-                ),
+                invoke_automation,
                 node_id=effective_node_id,
                 on_result=remember_result,
             )
@@ -10206,7 +11312,7 @@ class NovelAgentRuntime:
                 )
                 raise ToolchainError(
                     "MODEL_OUTPUT_INVALID",
-                    "模型返回的 JSON 无法解析，自动修复未成功。",
+                    "生成结果未能通过格式检查，自动修复未成功。",
                     node_id=effective_node_id,
                     retryable=False,
                     details={"recovery": recovery.model_dump()},
@@ -10244,7 +11350,7 @@ class NovelAgentRuntime:
         result = await self._retryable_request_invoke(
             run,
             "agent.repair_structured_output",
-            lambda request_id: self.automation.invoke(
+            lambda request_id: self._invoke_automation_request(
                 "agent.repair_structured_output",
                 {
                     "modelResultRef": model_result_ref,
@@ -10255,8 +11361,8 @@ class NovelAgentRuntime:
                     "repairAttemptId": repair_attempt_id,
                     "repairAttempt": repair_attempt,
                 },
-                "desktop-ui",
                 request_id=request_id,
+                deadline_at=run.deadlineAt if run else None,
             ),
             node_id=f"{node_id}.repair.{repair_attempt}",
         )

@@ -8,6 +8,7 @@ import pytest
 
 from novel_agent_runtime.events import AgentEventBus
 from novel_agent_runtime.runtime import NovelAgentRuntime
+from novel_agent_runtime.retry import AgentRequestError, AgentRequestFailure
 from novel_agent_runtime.store import AgentStateStore
 from novel_agent_runtime.tool_adapter import FastMcpAgentToolAdapter
 from novel_agent_runtime.toolchains.chapter_continuation import chapter_draft_params
@@ -242,6 +243,31 @@ def test_empty_chapter_without_authoritative_target_or_prior_context_is_rejected
     assert error.value.code == "CONTEXT_INSUFFICIENT"
 
 
+def test_explicit_first_chapter_draft_can_start_without_prior_prose() -> None:
+    input_data = ChapterContinuationInput(
+        novelId="novel_1", chapterId="chapter_first",
+        goal="请为当前空白章节创作完整正文。这是首章，主角在停电时收到来信。",
+    )
+    context = ContextBundle(chapter={"id": "chapter_first", "content": ""})
+    params = chapter_draft_params(
+        input_data, context, input_data.goal,
+        resolved_target={"chapterId": "chapter_first", "hasContent": False},
+    )
+    assert params["mode"] == "new_chapter"
+    assert params["chapterId"] == "chapter_first"
+    assert params["currentContent"] == ""
+    assert params["userIntent"] == input_data.goal
+    # Title-based target resolution may omit hasContent; the freshly read
+    # chapter context still authoritatively identifies the empty target.
+    assert chapter_draft_params(
+        input_data, context, input_data.goal,
+        resolved_target={"chapterId": "chapter_first"},
+    )["mode"] == "new_chapter"
+    for target in (None, {"chapterId": "other", "hasContent": False}):
+        with pytest.raises(ToolchainError):
+            chapter_draft_params(input_data, context, input_data.goal, resolved_target=target)
+
+
 async def _wait_terminal(runtime: NovelAgentRuntime, run_id: str) -> None:
     for _ in range(3000):
         if runtime.state.runs[run_id].status in {"completed", "failed", "cancelled"}:
@@ -264,9 +290,11 @@ async def _wait_approval(runtime: NovelAgentRuntime, run_id: str, checkpoint_typ
 
 
 @pytest.mark.parametrize("transport", ["http", "fastmcp"])
+@pytest.mark.parametrize("review_failure", [None, "MODEL_OUTPUT_TRUNCATED", "PROVIDER_TIMEOUT"])
 def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approval(
     tmp_path: Path,
     transport: str,
+    review_failure: str | None,
 ) -> None:
     async def scenario() -> None:
         store = AgentStateStore(tmp_path / transport)
@@ -300,6 +328,34 @@ def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approv
                         {"label": "伪装的系统", "description": "强化异常规则"},
                     ],
                 }
+            if method == "agent.generate_consistency_review":
+                if review_failure and [name for name, _, _ in automation.calls].count(method) == 1:
+                    raise AgentRequestError(AgentRequestFailure(
+                        code=review_failure, retryable=False, attempts=2,
+                        user_message="审校输出额度耗尽", diagnostic_ref="review-test",
+                    ))
+                reviewed_chapter = params["contextBundle"]["chapter"]
+                assert reviewed_chapter["content"] == "顾野推开检修层铁门，广播突然念出了他的名字。"
+                assert reviewed_chapter["contentSource"] == "draft_session"
+                assert reviewed_chapter["draftSessionId"] == "draft_chapter_chain_1"
+                return {
+                    "overallScore": 68,
+                    "summary": "草稿结尾有效，但存在一处高风险逻辑跳跃。",
+                    "dimensions": [],
+                    "issues": [{
+                        "issueId": "issue_logic_1",
+                        "type": "logic",
+                        "severity": "high",
+                        "title": "铁门开启缺少钥匙动作",
+                        "location": "检修层入口",
+                        "excerpt": "顾野推开检修层铁门",
+                        "evidence": [],
+                        "recommendation": "补写顾野使用旧站钥匙开门的动作。",
+                        "uncertainty": "",
+                    }],
+                    "uncheckableDimensions": [],
+                    "warnings": [],
+                }
             if method == "chapter.generate_draft":
                 return {
                     "draftSessionId": "draft_chapter_chain_1",
@@ -307,6 +363,25 @@ def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approv
                     "status": "draft",
                     "version": 1,
                     "previewSummary": "章节草稿 1200 字符",
+                    "payload": {
+                        "generatedText": "顾野推开检修层铁门，广播突然念出了他的名字。",
+                    },
+                }
+            if method == "chapter.revise_draft":
+                assert params["sourceDraftSessionId"] == "draft_chapter_chain_1"
+                assert params["sourceDraftVersion"] == 1
+                assert params["comments"][0]["sourceArtifactId"]
+                assert "旧站钥匙" in params["comments"][0]["body"]
+                return {
+                    "draftSessionId": "draft_chapter_chain_revision_1",
+                    "type": "chapter-draft",
+                    "status": "draft",
+                    "version": 1,
+                    "previewSummary": "审批意见修订草稿 1250 字符",
+                    "revisionOfDraftSessionId": "draft_chapter_chain_1",
+                    "payload": {
+                        "generatedText": "顾野用旧站钥匙打开检修层铁门，广播突然念出了他的名字。",
+                    },
                 }
             if method in {"agent.generate_report", "agent.generate_chat", "agent.revise_plan"}:
                 return await FakeAutomationClient.invoke(automation, method, params, origin, request_id=request_id)
@@ -318,7 +393,7 @@ def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approv
         runtime = NovelAgentRuntime(store, automation, AgentEventBus(store), tool_adapter=adapter)
         plan = await runtime.plan(
             {
-                "goal": "接着写当前章节，推进旧站真相",
+                "goal": "接着写当前章节，推进旧站真相；写完后由编辑审校逻辑、视角和结尾钩子",
                 "role": "writer",
                 "chapterId": "chapter_2",
                 "intentDecision": {
@@ -387,6 +462,25 @@ def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approv
         await _wait_terminal(runtime, run.runId)
         completed = runtime.state.runs[run.runId]
 
+        if review_failure:
+            assert completed.status == "failed"
+            assert completed.draftSessionId == "draft_chapter_chain_1"
+            assert completed.recovery is not None
+            assert completed.recovery.actionLabel == "重试审校"
+            assert completed.recovery.failureKind == ("model_output_truncated" if review_failure == "MODEL_OUTPUT_TRUNCATED" else "transport")
+            assert completed.completionKind == "partial"
+            failed_id = run.runId
+            # Recovery survives restart and reuses the checkpointed draft.
+            runtime = NovelAgentRuntime(store, automation, AgentEventBus(store), tool_adapter=resumed_adapter)
+            run = await runtime.retry_run({
+                "failedRunId": failed_id, "expectedFailureRevision": completed.failureRevision,
+                "strategy": "retry_request", "mode": "failed_node",
+            }, {})
+            await _wait_terminal(runtime, run.runId)
+            completed = runtime.state.runs[run.runId]
+            assert completed.retryOfRunId == failed_id
+            assert [name for name, _, _ in automation.calls].count("agent.generate_consistency_review") == 2
+
         assert completed.status == "completed"
         assert [method for method, _, _ in automation.calls].count("chapter.generate_draft") == 1
         assert [method for method, _, _ in automation.calls].count("chapter.draft.start") == 1
@@ -399,6 +493,23 @@ def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approv
         assert "失踪调查员" in draft_params["userIntent"]
         artifact = next(item for item in completed.artifacts if item.type == "chapter_draft")
         assert artifact.reference["draftSessionId"] == "draft_chapter_chain_1"
+        review_artifact = next(item for item in completed.artifacts if item.type == "consistency_review")
+        assert review_artifact.reference["draftSessionId"] == "draft_chapter_chain_1"
+        assert review_artifact.reference["draftVersion"] == 1
+        assert review_artifact.metadata["contentSource"] == "draft_session"
+        review_params = next(
+            params for method, params, _ in automation.calls
+            if method == "agent.generate_consistency_review"
+        )
+        assert review_params["dimensions"] == ["logic", "point_of_view", "ending_hook"]
+        assert completed.draftSessionId == "draft_chapter_chain_revision_1"
+        revision_artifact = next(
+            item for item in completed.artifacts
+            if item.reference.get("draftSessionId") == "draft_chapter_chain_revision_1"
+        )
+        assert revision_artifact.reference["revisionOfDraftSessionId"] == "draft_chapter_chain_1"
+        assert revision_artifact.reference["reviewArtifactId"] == review_artifact.artifactId
+        assert [method for method, _, _ in automation.calls].count("chapter.revise_draft") == 1
         assert store.list_invocations(run.runId)[0].status == "succeeded"
         events = store.list_events(run.runId)
         assert any(event.type == "toolchain_completed" for event in events)

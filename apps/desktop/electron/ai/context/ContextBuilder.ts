@@ -11,6 +11,7 @@ import type {
     NarrativeStateLedger,
 } from '../../../shared/agentChapterScope';
 import { extractReadableText } from '../../../shared/lexicalDocument';
+import { novelChapterLength, resolveWritingLength } from '../../../shared/writingPolicy';
 
 export interface ContinueWritingContext {
     currentContentSource: string;
@@ -38,6 +39,7 @@ export interface ContinueWritingContext {
         mode: 'new_chapter' | 'continue_chapter';
         contextChapterCount: number;
         targetLength: number;
+        novelChapterLength?: number;
         style: string;
         tone: string;
         pace: string;
@@ -602,6 +604,9 @@ export class ContextBuilder {
     }
 
     async buildForContinueWriting(payload: ContinueWritingPayload): Promise<ContinueWritingContext> {
+        const novel = await db.novel.findUnique({ where: { id: payload.novelId }, select: { formatting: true } });
+        const novelDefault = novelChapterLength(novel?.formatting);
+        const lengthTarget = resolveWritingLength({ ...payload, novelDefault });
         const summaryChapterCount = Math.max(1, Math.min(20, payload.contextChapterCount ?? 8));
         const recentRawChapterCount = Math.max(1, Math.min(3, payload.recentRawChapterCount ?? 2));
         const previousChapterCount = summaryChapterCount + recentRawChapterCount;
@@ -848,7 +853,8 @@ export class ContextBuilder {
                 style: payload.style || 'default',
                 tone: payload.tone || 'balanced',
                 pace: payload.pace || 'medium',
-                targetLength: Math.max(100, Math.min(4000, payload.targetLength ?? 500)),
+                targetLength: lengthTarget.target,
+                novelChapterLength: novelDefault,
             },
             policy,
             snapshot,

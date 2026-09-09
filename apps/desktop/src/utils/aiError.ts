@@ -6,6 +6,7 @@
     | 'PROVIDER_TIMEOUT'
     | 'PROVIDER_UNAVAILABLE'
     | 'PROVIDER_FILTERED'
+    | 'MODEL_OUTPUT_TRUNCATED'
     | 'NETWORK_ERROR'
     | 'PERSISTENCE_ERROR'
     | 'UNKNOWN';
@@ -18,6 +19,7 @@ const AI_ERROR_CODES: UiAiErrorCode[] = [
     'PROVIDER_TIMEOUT',
     'PROVIDER_UNAVAILABLE',
     'PROVIDER_FILTERED',
+    'MODEL_OUTPUT_TRUNCATED',
     'NETWORK_ERROR',
     'PERSISTENCE_ERROR',
     'UNKNOWN',
@@ -52,7 +54,7 @@ export function inferAiErrorCode(error: unknown): UiAiErrorCode | undefined {
     if (maybeCode) return maybeCode;
 
     const message = toMessage(error);
-    const codeHit = message.match(/\b(INVALID_INPUT|NOT_FOUND|CONFLICT|PROVIDER_AUTH|PROVIDER_TIMEOUT|PROVIDER_UNAVAILABLE|PROVIDER_FILTERED|NETWORK_ERROR|PERSISTENCE_ERROR|UNKNOWN)\b/i);
+    const codeHit = message.match(/\b(INVALID_INPUT|NOT_FOUND|CONFLICT|PROVIDER_AUTH|PROVIDER_TIMEOUT|PROVIDER_UNAVAILABLE|PROVIDER_FILTERED|MODEL_OUTPUT_TRUNCATED|NETWORK_ERROR|PERSISTENCE_ERROR|UNKNOWN)\b/i);
     if (codeHit?.[1]) {
         return normalizeCode(codeHit[1]);
     }
@@ -85,6 +87,7 @@ export function formatAiError(code?: string, t?: (key: string) => string, fallba
         case 'PROVIDER_TIMEOUT': return 'Request timed out.';
         case 'PROVIDER_UNAVAILABLE': return 'Model is currently unavailable.';
         case 'PROVIDER_FILTERED': return 'Request was filtered by content policy.';
+        case 'MODEL_OUTPUT_TRUNCATED': return 'Generation reached its output limit before a complete draft was produced.';
         case 'NETWORK_ERROR': return 'Network connection failed.';
         case 'PERSISTENCE_ERROR': return 'Write failed.';
         default: return fallback || 'Unknown error.';

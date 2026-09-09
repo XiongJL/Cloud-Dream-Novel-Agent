@@ -4,9 +4,11 @@ import type { PromptPreviewData } from '../../../components/AIPromptPreview/type
 import type { ContinueWritingConfig } from '../../../components/Editor/ContinueWritingModal';
 import type { Chapter } from '../../../types';
 import { formatAiErrorFromUnknown } from '../../../utils/aiError';
+import { DEFAULT_CHAPTER_LENGTH, DEFAULT_CONTINUATION_LENGTH, normalizeWritingLength, novelChapterLength } from '../../../../shared/writingPolicy';
 
 type UseContinueWritingParams = {
     novelId: string;
+    novelFormatting?: string;
     currentChapter: Chapter | null;
     plotLines: Array<{ points?: unknown[] }>;
     contentRef: MutableRefObject<string>;
@@ -18,6 +20,7 @@ type UseContinueWritingParams = {
 
 export function useContinueWriting({
     novelId,
+    novelFormatting,
     currentChapter,
     plotLines,
     contentRef,
@@ -27,6 +30,7 @@ export function useContinueWriting({
     stripRepeatedPrefixFromGeneration,
 }: UseContinueWritingParams) {
     const [isContinueModalOpen, setIsContinueModalOpen] = useState(false);
+    const previousModalOpen = useRef(false);
     const [isContinuing, setIsContinuing] = useState(false);
     const [continueStatus, setContinueStatus] = useState('');
     const [isContinuePreviewOpen, setIsContinuePreviewOpen] = useState(false);
@@ -53,10 +57,17 @@ export function useContinueWriting({
     const continuePromptTimerRef = useRef<number | null>(null);
 
     const normalizeContinueTargetLength = useCallback((value: string) => {
-        const parsed = Number(value);
-        if (!Number.isFinite(parsed)) return 500;
-        return Math.max(100, Math.min(4000, parsed));
+        return normalizeWritingLength(value, DEFAULT_CONTINUATION_LENGTH);
     }, []);
+
+    useEffect(() => {
+        if (isContinueModalOpen && !previousModalOpen.current) {
+            const empty = !extractPlainTextFromLexical(contentRef.current || '').trim();
+            setContinueConfig(current => ({ ...current, targetLength: String(empty
+                ? novelChapterLength(novelFormatting) ?? DEFAULT_CHAPTER_LENGTH : DEFAULT_CONTINUATION_LENGTH) }));
+        }
+        previousModalOpen.current = isContinueModalOpen;
+    }, [isContinueModalOpen, novelFormatting, contentRef, extractPlainTextFromLexical]);
 
     const resetContinuePromptPreview = useCallback(() => {
         setContinuePromptPreview(null);

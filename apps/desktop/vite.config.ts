@@ -1,7 +1,8 @@
 import path from 'node:path'
+import { rm } from 'node:fs/promises'
 import react from '@vitejs/plugin-react'
 import electronSimpleImport from 'vite-plugin-electron/simple'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
 
 const electronSimple =
     typeof electronSimpleImport === 'function'
@@ -17,6 +18,29 @@ if (typeof electronSimple !== 'function') {
 // BrowserWindow in the main process.
 delete process.env.ELECTRON_RUN_AS_NODE
 
+const wait = (delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+
+function prepareElectronDevOutput(): Plugin {
+    return {
+        name: 'novel-editor:prepare-electron-dev-output',
+        apply: 'serve',
+        async configResolved(config) {
+            const mainOutput = path.join(config.root, 'dist-electron', 'main.js')
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+                try {
+                    await rm(mainOutput, { force: true })
+                    return
+                } catch (error) {
+                    const code = (error as NodeJS.ErrnoException).code || ''
+                    const retryable = code === 'EBUSY' || code === 'EPERM' || code === 'EACCES' || code === 'UNKNOWN'
+                    if (!retryable || attempt === 7) throw error
+                    await wait(75 * (attempt + 1))
+                }
+            }
+        },
+    }
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(() => {
     const devHost = process.env.VITE_DEV_HOST || '127.0.0.1'
@@ -31,6 +55,7 @@ export default defineConfig(() => {
         },
         plugins: [
             react(),
+            prepareElectronDevOutput(),
             electronSimple({
                 main: {
                     entry: 'electron/main.ts',

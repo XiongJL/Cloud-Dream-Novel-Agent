@@ -48,6 +48,9 @@ CloudDream Novel Agent 的 Agent 化目标不是把现有编辑器改成聊天�
 | [roadmap.md](./roadmap.md) | Phase 1-3 路线图、当前落实状态、后续补齐项 |
 | [manual-acceptance-checklist.md](./manual-acceptance-checklist.md) | Phase 1 真实接口、长任务、刷新、取消与草稿写回手动验收步骤 |
 | [manual-test-fix-plan-2026-07-20.md](./manual-test-fix-plan-2026-07-20.md) | 人工测试发现的失败重试、可折叠 Inspector、对话报告与当前对话修订批次待修复计划 |
+| [chapter-writing-budget-and-recovery-fix-plan-2026-09-05.md](./chapter-writing-budget-and-recovery-fix-plan-2026-09-05.md) | 完整章节实测后的输出预算、截断恢复、占位草稿兜底与计划审校链路待修复方案 |
+| [chapter-writing-retest-2026-09-07.md](./chapter-writing-retest-2026-09-07.md) | 输出预算与首章守卫修复、真实草稿审校和写回复测证据 |
+| [chapter-writing-product-defaults-2026-09-09.md](./chapter-writing-product-defaults-2026-09-09.md) | 整章默认 2300 字、正文 18K 自动额度、篇幅校验和审校失败恢复 |
 | [decisions.md](./decisions.md) | 已确认的关键设计决策与不做项 |
 
 ## 当前实现基线

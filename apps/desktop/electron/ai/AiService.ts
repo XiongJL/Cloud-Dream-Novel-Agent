@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { db } from '@novel-editor/core';
 import { jsonrepair } from 'jsonrepair';
@@ -22,6 +21,7 @@ import {
     AiMapImagePayload,
     AiMapImageResult,
     AiMapImageStats,
+    AiGenerationMetadata,
     OpenClawSmokeResult,
     AiProvider,
     AiProviderType,
@@ -68,10 +68,18 @@ import { devLog, devLogError, redactForLog } from '../debug/devLogger';
 import { filterNarrativeStateDeltaEvidence, normalizeNarrativeStateDelta } from '../../shared/narrativeState';
 import type { AgentConversationCompressionSnapshot } from '../agent/AgentConversationStore';
 import {
+    buildAgentStructuredOutputInstruction,
     getAgentStructuredOutputContract,
     type AgentStructuredOutputContract,
     validateAgentStructuredOutput,
 } from '../automation/AgentStructuredOutputContracts';
+import {
+    capTaskOutputBudget,
+    resolveTaskOutputBudget,
+    type OutputBudgetTask,
+    type TaskOutputBudget,
+} from './TaskOutputBudget';
+import { resolveWritingLength, countWritingUnits, novelChapterLength, type WritingLengthTarget, DEFAULT_CHAPTER_LENGTH } from '../../shared/writingPolicy';
 
 type AgentStructuredCheckpoint = {
     modelResultRef: string;
@@ -106,7 +114,6 @@ const VALID_MAP_TYPES = new Set(['world', 'region', 'scene']);
 const DRAFT_GENERATION_TIMEOUT_MS = 300_000;
 const DRAFT_FIRST_BYTE_TIMEOUT_MS = 120_000;
 const DRAFT_STREAM_IDLE_TIMEOUT_MS = 60_000;
-const AGENT_CHAT_REQUESTED_OUTPUT_TOKENS = 2_600;
 const AGENT_CHAT_MINIMUM_OUTPUT_TOKENS = 256;
 const AGENT_CHAT_MINIMUM_DYNAMIC_CONTEXT_TOKENS = 1_280;
 const AGENT_CHAT_DYNAMIC_CONTEXT_HEADROOM_TOKENS = 128;
@@ -198,6 +205,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         imageWatermark: false,
         timeoutMs: 60000,
         maxTokens: 4096,
+        outputBudgetMode: 'auto',
         contextWindowTokens: 0,
         temperature: 0.7,
     },
@@ -485,7 +493,24 @@ export class AiService {
         context: AgentStructuredInvocationContext,
         task: () => Promise<T>,
     ): Promise<T> {
-        return this.agentStructuredInvocation.run(context, task);
+        return this.agentStructuredInvocation.run(context, async () => {
+            const result = await task();
+            const contract = getAgentStructuredOutputContract(context.method);
+            if (!contract) {
+                throw new AiActionError(
+                    'UNKNOWN',
+                    `Structured Agent method is not registered: ${context.method}`,
+                );
+            }
+            const issues = validateAgentStructuredOutput(result, contract);
+            if (issues.length > 0) {
+                this.invalidAgentStructuredOutput(
+                    'Normalized Agent result did not match the product output contract',
+                    issues,
+                );
+            }
+            return result;
+        });
     }
 
     private async checkpointAndParseStructuredResponse(rawText: string): Promise<Record<string, unknown> | null> {
@@ -556,7 +581,7 @@ export class AiService {
         contract: AgentStructuredOutputContract;
         validationIssues: Array<{ path: string; message: string }>;
     }, signal?: AbortSignal): Promise<Record<string, unknown>> {
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt: [
                 'You repair a structured JSON payload so it conforms to the supplied JSON Schema.',
                 'Preserve the original meaning and values whenever they can be represented by the schema.',
@@ -936,12 +961,21 @@ export class AiService {
         const contextWindowTokens = providerType === 'http'
             ? this.settingsCache.http.contextWindowTokens
             : this.settingsCache.mcpCli.contextWindowTokens;
+        const structuredInvocation = this.agentStructuredInvocation.getStore();
+        const structuredOutputInstruction = structuredInvocation
+            ? buildAgentStructuredOutputInstruction(structuredInvocation.method)
+            : '';
+        const budgetedSystemPrompt = structuredOutputInstruction
+            ? `${input.systemPrompt}\n\n${structuredOutputInstruction}`
+            : input.systemPrompt;
         const assembly = this.agentContextAssembler.assemble({
             providerType,
             model,
             contextWindowTokens,
             outputTokens: input.outputTokens,
-            systemPrompt: input.systemPrompt,
+            // generateStructured appends the same instruction to the provider request. Include it
+            // here as well so context assembly reserves its real token cost without sending it twice.
+            systemPrompt: budgetedSystemPrompt,
             currentRequest: input.currentRequest,
             protectedContext: input.protectedContext,
             history: input.history,
@@ -1037,7 +1071,7 @@ export class AiService {
                 recommendedOptionId: string;
                 recommendationReason: string;
             }>;
-        };
+        } | null;
         contextDiagnostics: AgentContextDiagnostics;
         contextCompression?: {
             applied: true;
@@ -1354,10 +1388,11 @@ export class AiService {
             AGENT_CHAT_MINIMUM_DYNAMIC_CONTEXT_TOKENS,
             minimumDynamicCount.contextTokens + AGENT_CHAT_DYNAMIC_CONTEXT_HEADROOM_TOKENS,
         );
-        const requestedOutputTokens = Math.min(
-            this.settingsCache.http.maxTokens,
-            AGENT_CHAT_REQUESTED_OUTPUT_TOKENS,
-        );
+        const taskOutputBudget = this.resolveGenerationBudget('plan', {
+            systemPrompt,
+            promptInput: JSON.stringify({ currentRequest, sections }),
+        });
+        const requestedOutputTokens = taskOutputBudget.recoveryTokens;
         const adaptiveOutputBudget = tokenCounter.adaptOutputReserve({
             providerType,
             model,
@@ -1389,6 +1424,7 @@ export class AiService {
             );
         }
         const outputTokens = adaptiveOutputBudget.outputReserveTokens;
+        const outputBudget = capTaskOutputBudget(taskOutputBudget, outputTokens);
         if (adaptiveOutputBudget.reduced) {
             devLog('INFO', 'AiService.agentContext.outputBudgetAdapted', 'Agent output budget reduced to fit the configured context window', {
                 providerType,
@@ -1446,16 +1482,16 @@ export class AiService {
             artifacts: contextArtifacts,
             compressionDiagnostics: coordinatorResult.diagnostics,
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
             prompt: contextAssembly.prompt,
-            maxTokens: outputTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.5),
             timeoutMs: payload.forceFinalization
                 ? Math.min(Math.max(this.settingsCache.http.timeoutMs, 15000), 45000)
                 : Math.min(Math.max(this.settingsCache.http.timeoutMs, 120000), 145000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_chat');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         const rawInputRequest = parsed?.inputRequest && typeof parsed.inputRequest === 'object' && !Array.isArray(parsed.inputRequest)
             ? parsed.inputRequest as Record<string, unknown>
@@ -1542,11 +1578,11 @@ export class AiService {
             shouldPlan: parsed?.shouldPlan === true,
             needsClarification: Boolean(inputRequest),
             requestedOperations,
-            deliverable,
-            suggestedRole,
+            deliverable: deliverable || 'none',
+            suggestedRole: suggestedRole || (roleLabels[payload.role] ? payload.role : 'team'),
             confidence: Math.max(0, Math.min(1, rawConfidence)),
             toolCalls,
-            ...(inputRequest && toolCalls.length === 0 ? { inputRequest } : {}),
+            inputRequest: inputRequest && toolCalls.length === 0 ? inputRequest : null,
             contextDiagnostics: diagnostics,
             ...(diagnostics.compressionApplied ? {
                 contextCompression: {
@@ -1661,7 +1697,7 @@ export class AiService {
             : '';
         const systemPrompt = [baseSystemPrompt, revisionPrompt].filter(Boolean).join(' ');
         const contextText = JSON.stringify(payload.context ?? {}).slice(0, 60000);
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt: `Goal=${goal}\n\nRevisionInstruction=${revisionInstruction}\n\nPreviousBeats=${JSON.stringify(previousBeats)}\n\nAnchorChapterId=${chapterId}\n\nTargetChapterIds=${JSON.stringify(payload.targetChapterIds || [])}\n\nContext=${contextText}`,
             maxTokens: Math.min(this.settingsCache.http.maxTokens, 3200),
@@ -1687,7 +1723,7 @@ export class AiService {
                     { path: `beats.${index}`, message: 'title, chapterGoal, coreConflict, and endingHook are required' },
                 ]);
             }
-            const targetWordCount = Math.max(100, Math.min(50000, Math.trunc(Number(raw?.targetWordCount) || 2000)));
+            const targetWordCount = Math.max(100, Math.min(50000, Math.trunc(Number(raw?.targetWordCount) || DEFAULT_CHAPTER_LENGTH)));
             return {
                 title,
                 chapterGoal,
@@ -1731,7 +1767,8 @@ export class AiService {
                 'Distinguish character knowledge from reader knowledge and report only actual relationship changes.',
                 'Return strict JSON with characterLocations, relationshipChanges, knowledgeChanges, itemStates, resolvedConflicts, openedConflicts, and warnings.',
             ].join(' ');
-        const response = await this.getProvider().generate({
+        const narrativeStateProvider = this.getProvider();
+        const response = await narrativeStateProvider.generate({
             systemPrompt,
             prompt: [
                 `KnownCharacters=${JSON.stringify(characters)}`,
@@ -1808,7 +1845,12 @@ export class AiService {
                 'IntentDecision is a validated high-priority planning hint. Preserve operation order and deliverable, using suggested Toolchains when available.',
                 'UserDecisions contains authoritative structured choices submitted by the user. Preserve every choice and custom instruction in the plan.',
             ].join(' ');
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 2400);
+        const outputBudget = this.resolveGenerationBudget('plan', {
+            systemPrompt,
+            promptInput: JSON.stringify({ goal, availableTools, availableToolchains,
+                intentDecision: payload.intentDecision, userDecisions: payload.userDecisions }),
+        });
+        const outputTokens = outputBudget.recoveryTokens;
         const prompt = this.assembleAgentPrompt({
             operation: 'agent.generate_plan',
             systemPrompt,
@@ -1841,14 +1883,14 @@ export class AiService {
                 value: payload.userDecisions || null,
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
             prompt,
-            maxTokens: outputTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.35),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_plan');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.steps)) {
             this.invalidAgentStructuredOutput('Agent planner did not return valid JSON steps', [
@@ -1857,7 +1899,7 @@ export class AiService {
         }
         return {
             title: trimText(parsed.title, 120) || (isZh ? '创作任务计划' : 'Writing task plan'),
-            deliverable: trimText(parsed.deliverable, 40),
+            deliverable: trimText(parsed.deliverable, 40) || 'report',
             steps: parsed.steps,
         };
     }
@@ -1873,7 +1915,7 @@ export class AiService {
         const effectiveAnswers = Array.isArray(payload.effectiveAnswers) ? payload.effectiveAnswers.slice(0, 3) : [];
         if (!answers.length) throw new AiActionError('INVALID_INPUT', 'answers is required');
         const fallback = trimText(payload.fallbackSummary, 2000);
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt: [
                 '你只负责忠实概括用户刚刚提交的结构化决定。',
                 '不得添加新设定、补充未选择的方向、调换选择优先级或替用户作出额外决定。',
@@ -1950,7 +1992,7 @@ export class AiService {
                 'Prefer one synthesis question; allow 2-3 only for independent blockers. Each question needs 2-3 mutually exclusive options, recommended first.',
                 'Return strict JSON with needsFollowUp and optional inputRequest.',
             ].join(' ');
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt: [
                 `Goal=${goal}`,
@@ -2057,7 +2099,7 @@ export class AiService {
                 },
             ],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2073,7 +2115,7 @@ export class AiService {
         }
         return {
             title: trimText(parsed.title, 120) || payload.currentPlan.title,
-            deliverable: trimText(parsed.deliverable, 40),
+            deliverable: trimText(parsed.deliverable, 40) || trimText(payload.currentPlan.deliverable, 40) || 'report',
             steps: parsed.steps,
         };
     }
@@ -2112,7 +2154,6 @@ export class AiService {
                 'Deduplicate issues and list uncheckable dimensions explicitly.',
                 'Return one strict JSON object only, with overallScore, summary, dimensions, issues, uncheckableDimensions, and warnings.',
             ].join(' ');
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4200);
         const agentSkillPrompt = trimText(payload.agentSkill?.prompt, 48000);
         const skillSourceRef = payload.agentSkill?.sections
             ?.map((section) => {
@@ -2138,23 +2179,44 @@ export class AiService {
             value: payload.contextBundle,
             sourceRef: 'chapter.context@1.0.0',
         });
+        const reviewDimensions = Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [];
+        const outputBudget = this.resolveGenerationBudget('editor_review', {
+            systemPrompt,
+            promptInput: JSON.stringify({
+                goal,
+                dimensions: reviewDimensions,
+                contextBundle: payload.contextBundle,
+                agentSkill: agentSkillPrompt,
+            }),
+        });
+        const outputTokens = outputBudget.initialTokens;
         const prompt = this.assembleAgentPrompt({
             operation: 'agent.generate_consistency_review',
             systemPrompt,
-            outputTokens,
+            outputTokens: outputBudget.recoveryTokens,
             currentRequest: {
                 goal,
-                dimensions: Array.isArray(payload.dimensions) ? payload.dimensions.slice(0, 12) : [],
+                dimensions: reviewDimensions,
             },
             sections,
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.2),
-            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
+            // A reasoning model may spend the first attempt on reasoning alone.
+            // Both 8K and 16K attempts share one bounded five-minute deadline.
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, DRAFT_GENERATION_TIMEOUT_MS),
             signal,
+        }, outputBudget, 'agent.generate_consistency_review');
+        devLog('INFO', 'AiService.generateAgentConsistencyReview.response', 'Consistency review generation completed', {
+            responseId: response.responseId,
+            usage: response.usage,
+            finishReason: response.finishReason,
+            requestedMaxTokens: response.requestedMaxTokens,
+            elapsedMs: response.elapsedMs,
+            attemptCount: response.attemptCount ?? 1,
         });
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.dimensions) || !Array.isArray(parsed.issues)) {
@@ -2214,7 +2276,7 @@ export class AiService {
                 sourceRef: 'writer.range_revision_plan@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2281,7 +2343,7 @@ export class AiService {
                 sourceRef: 'editor.range_review@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2358,7 +2420,7 @@ export class AiService {
                 sourceRef: 'reader.journey_review@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2426,7 +2488,7 @@ export class AiService {
                 sourceRef: 'worldbuilding.range_consistency@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2489,7 +2551,7 @@ export class AiService {
                 sourceRef: 'research.range_fact_check@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2556,7 +2618,7 @@ export class AiService {
                 sourceRef: 'research.range_fact_check@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2612,7 +2674,7 @@ export class AiService {
                 sourceRef: 'novel.scope_audit@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2681,7 +2743,7 @@ export class AiService {
                 sourceRef: 'plotline.analysis@1.0.0',
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2738,7 +2800,7 @@ export class AiService {
                 }] : []),
             ],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -2753,7 +2815,7 @@ export class AiService {
         return parsed as Record<string, unknown>;
     }
 
-    async generateAgentStyleSkillPack(payload: {
+    async planAgentStyleSkillPack(payload: {
         goal: string;
         locale?: string;
         source?: Record<string, unknown>;
@@ -2764,19 +2826,24 @@ export class AiService {
         const isZh = (payload.locale || 'zh-CN').startsWith('zh');
         const systemPrompt = isZh
             ? [
-                '你是创作 Skill 提炼器。只从输入中获准的小说样本，或明确标注的低置信度模型先验，提炼抽象、可复用的方法；不评价作者身份，不复制长句、专名、人物或情节。',
-                '必须生成两个独立 Skill 草稿：language_style 与 suspense_release。只有样本确实显示多人物并行推进时才生成 ensemble_progression，否则写入 omittedDimensions。',
-                'language_style 覆盖句长节奏、叙述距离、视角、词汇密度、对白、描写、修辞和段落；suspense_release 覆盖问题建立、线索、误导、揭示节拍、章末钩子和读者认知差；群像覆盖视角轮换、目标、交汇节点、出场节奏与辨识度。',
-                '每个 Skill 草稿包含 draftKey、stableIdCandidate、title、description、guidanceMode、confidence、triggerHints、antiTriggerHints、supportedOperations、instructions、constraints、evidenceNotes、contaminationWarnings、evaluationPrompt。',
-                'Pack 只保存 Operation/Role 到主 Skill 和最多一个辅助 Skill 的绑定，不得合并成 composite Prompt。',
-                'sourceCoverage 必须说明样本章数、覆盖类型、证据充分度与缺口。只有作品名称或模型先验时 confidence 必须为 low，并给出警告。',
+                '你是创作 Skill Pack 的规划器。只从获准的小说样本，或明确标注的低置信度模型先验，规划抽象、可复用的方法；不评价作者身份，不复制长句、专名、人物或情节。',
+                '本次只输出短小的成员元数据和写作维度，不编写 SKILL.md 正文，不返回 instructions。后续步骤会把每个成员独立写入并校验。',
+                '必须规划 language_style 与 suspense_release。只有样本确实显示多人物并行推进时才规划 ensemble_progression，否则写入 omittedDimensions。',
+                'language_style 的 methodDimensions 覆盖句长节奏、叙述距离、视角、词汇密度、对白、描写、修辞和段落中的至少三项；suspense_release 覆盖问题建立、线索、误导、揭示节拍、章末钩子和读者认知差中的至少三项；群像覆盖视角轮换、人物目标、交汇节点、出场节奏与辨识度中的至少三项。',
+                '每个成员只包含 draftKey、stableIdCandidate、title、description、guidanceMode、confidence、triggerHints、antiTriggerHints、supportedOperations、constraints、methodDimensions、evidenceNotes、contaminationWarnings、evaluationPrompt。',
+                'Pack 只保存 Operation/Role 到主 Skill 和最多一个辅助 Skill 的绑定，不得合并正文或 composite Prompt。sourceCoverage 必须说明样本覆盖与缺口；只有作品名或模型先验时 confidence 必须为 low。',
                 '只返回严格 JSON：summary、sourceCoverage、skills(2-3)、pack{stableIdCandidate,title,description,bindings[{operationId,roleId,primaryDraftKey,auxiliaryDraftKey}]}、omittedDimensions、warnings。',
             ].join(' ')
-            : 'Extract abstract reusable writing methods from the authorized samples without copying long phrases, proper nouns, characters, or plot. Produce separate language_style and suspense_release drafts, optional ensemble_progression only with evidence, and an operation/role Skill Pack binding. Return strict JSON.';
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 7500);
+            : [
+                'Plan a reusable fiction Style Skill Pack from only the authorized samples or explicitly low-confidence model prior.',
+                'Return bounded member metadata and methodDimensions only. Do not author SKILL.md bodies and do not return instructions.',
+                'Always plan language_style and suspense_release. Add ensemble_progression only when supported by evidence.',
+                'Keep the Pack as operation/role bindings, report source coverage and gaps, and return one strict JSON object.',
+            ].join(' ');
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 3500);
         const skillPrompt = trimText(payload.agentSkill?.prompt, 48000);
         const prompt = this.assembleAgentPrompt({
-            operation: 'agent.generate_style_skill_pack',
+            operation: 'agent.plan_style_skill_pack',
             systemPrompt,
             outputTokens,
             currentRequest: { goal },
@@ -2799,32 +2866,37 @@ export class AiService {
                 }] : []),
             ],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
-            temperature: Math.min(this.settingsCache.http.temperature, 0.35),
-            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 360000),
+            temperature: Math.min(this.settingsCache.http.temperature, 0.3),
+            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.skills) || parsed.skills.length < 2 || !parsed.pack || typeof parsed.pack !== 'object') {
-            this.invalidAgentStructuredOutput('Style Skill extractor returned an invalid Skill Pack draft');
+            this.invalidAgentStructuredOutput('Style Skill planner returned an invalid Skill Pack plan');
         }
         return parsed as Record<string, unknown>;
     }
 
-    async generateAgentSkillDraft(payload: {
+    async generateAgentSkillDocument(payload: {
         goal: string;
         scope?: 'user' | 'novel';
         novelId?: string;
         locale?: string;
+        creatorProfile?: 'builtin.skill-creator' | 'builtin.style-skill-extractor.member';
         targetSkillId?: string;
         source?: Record<string, unknown>;
-    }, signal?: AbortSignal): Promise<Record<string, unknown>> {
+        currentDocument?: string;
+        validationDiagnostics?: Array<Record<string, unknown>>;
+        attempt?: number;
+    }, signal?: AbortSignal): Promise<{ contentText: string }> {
         const goal = trimText(payload.goal, 12000);
         if (!goal) throw new AiActionError('INVALID_INPUT', 'goal is required');
         const isZh = (payload.locale || 'zh-CN').startsWith('zh');
+        const creatorProfile = payload.creatorProfile || 'builtin.skill-creator';
         const allowedOperations = [
             'project.lookup', 'novel.bootstrap', 'agent_skill.style_extract', 'chapter.context',
             'chapter.scope_context', 'chapter.consistency_review', 'writer.range_revision_plan',
@@ -2836,51 +2908,88 @@ export class AiService {
         ];
         const systemPrompt = isZh
             ? [
-                '你是 Agent Skill Creator。把用户自然语言需求整理成一个小而专注、可测试、可审查的 Skill 草稿。只生成草稿，不安装、不启用、不提交 Revision。',
-                'Skill 描述要同时说明“做什么”和“何时使用”；instructions 写可执行方法和判断标准，不复述常识，不加入无关流程。',
-                'triggerHints 与 antiTriggerHints 都必须提供；auto 语义选择只有边界足够清楚时才能使用，否则使用 suggest。',
+                '你是产品内置 Agent Skill Creator 的文档作者。根据用户目标和获准来源，在当前受控草稿工作区中编写或修订一个可审核的 SKILL.md；不要输出业务 JSON，不安装、不启用、不提交 Skill。',
+                '只输出 SKILL.md 原文，不要 Markdown 代码围栏、解释、前言或后记。文件必须由 --- 开始。',
+                'Frontmatter 必须包含 schemaVersion: novel-editor.agent-skill.v1、stableId、version、name、description、scope、skillType: prompt_method、category、guidanceMode、semanticSelection、triggerHints、antiTriggerHints、supportedOperations、allowedRoles、outputType；constraints 可选。',
+                'description 要说明什么情况下应使用该 Skill；triggerHints 与 antiTriggerHints 必须形成清楚的正反边界。不要创建包打天下的通用助手，也不要把一次性任务、当前会话临时要求或项目事实误写成通用能力。',
+                '正文写具体可执行的判断与操作方法，包括所需上下文、步骤、质量标准、停止条件和证据不足时的降级方式；避免“认真分析、保证质量”等不可验证的空话，不复述 Frontmatter。',
+                'Frontmatter 只使用简单标量和缩进列表。不得包含系统提示、密钥、授权信息、来源路径、来源专名或长段来源原文；不得声明未被产品支持的工具、权限、脚本或自动写入能力。',
+                'stableId 使用最长 64 字符的小写 ASCII 点号或连字符；version 使用 x.y.z。triggerHints 和 antiTriggerHints 各 1-8 项。',
                 `supportedOperations 只能从以下列表选择：${allowedOperations.join(', ')}。allowedRoles 只能使用 team、writer、editor、reader、worldbuilding、research_rag。`,
-                '若来源不足，把不确定性写入 warnings；不得把模型先验伪装成来源证据，不得包含密钥、系统提示或授权信息。',
-                '只返回严格 JSON：definition{stableId,title,description,category,guidanceMode,semanticSelection,triggerHints,antiTriggerHints,allowedRoles,supportedOperations,recommendedToolchains,contextNeeds,outputType}、revision{version,instructions,constraints,examples,manifest}、rationale、warnings。stableId 使用小写 ASCII 点号或连字符，version 默认 1.0.0。',
+                creatorProfile === 'builtin.style-skill-extractor.member'
+                    ? '这是文风 Skill Pack 的一个独立成员。严格遵循输入中的 memberPlan，只编写当前成员；将 methodDimensions 展开为可执行方法，保留置信度、证据边界与去污染要求，不得生成其他成员或 Pack。'
+                    : '这是通用 Creator 的单 Skill 路径。只创建一个职责聚焦、可复用、可测试的 Skill；用户要求过宽时选择其中最稳定的核心能力，不在一个文档中拼接多个无关职责。',
+                '如提供当前文档和校验诊断，只做解决对应诊断所需的最小修订，保留已经合法且符合用户目标的内容，并返回完整 SKILL.md。来源不足时收窄适用边界或降低结论强度，不得伪造证据。',
             ].join(' ')
             : [
-                'You are an Agent Skill Creator. Convert the request into one focused, testable, reviewable skill draft. Do not install, enable, or commit it.',
-                'Describe both what it does and when it should be used. Supply positive and negative triggers. Prefer semanticSelection suggest unless auto boundaries are unambiguous.',
+                'You are the document author for the built-in Agent Skill Creator. Author or revise one reviewable SKILL.md in the controlled draft workspace using only the user goal and authorized sources. Return the complete file only, starting with ---. Do not return JSON, code fences, commentary, installation, activation, or commits.',
+                'Frontmatter must use schemaVersion novel-editor.agent-skill.v1 and include stableId, version, name, description, scope, skillType prompt_method, category, guidanceMode, semanticSelection, positive and negative trigger lists, supportedOperations, allowedRoles, and outputType.',
+                'Make description and positive/negative triggers define when the Skill applies. Do not turn a one-off request, temporary conversation preference, or project fact into a universal Skill.',
+                'The body must provide executable decisions and steps, required context, quality checks, stop conditions, and evidence-insufficient behavior. Avoid generic advice and never claim unsupported tools, permissions, scripts, or direct writes.',
                 `supportedOperations must come from: ${allowedOperations.join(', ')}. allowedRoles must come from team, writer, editor, reader, worldbuilding, research_rag.`,
-                'Return strict JSON with definition, revision, rationale, and warnings. Use a lowercase ASCII stableId and semantic version 1.0.0.',
+                creatorProfile === 'builtin.style-skill-extractor.member'
+                    ? 'This is one member of a Style Skill Pack. Follow memberPlan exactly, expand methodDimensions into an executable method, preserve evidence and contamination boundaries, and do not author other members or the Pack.'
+                    : 'This is the generic single-Skill Creator path. Keep one focused, reusable, testable responsibility instead of combining unrelated capabilities.',
+                'If a current document and diagnostics are supplied, make only the smallest corrections required by those diagnostics, preserve valid content, and return the whole file.',
             ].join(' ');
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 5000);
+        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 5500);
+        const currentDocument = typeof payload.currentDocument === 'string'
+            ? payload.currentDocument.slice(0, 32_000)
+            : '';
+        const diagnostics = Array.isArray(payload.validationDiagnostics)
+            ? payload.validationDiagnostics.slice(0, 20)
+            : [];
         const prompt = this.assembleAgentPrompt({
-            operation: 'agent.generate_skill_draft',
+            operation: 'agent.generate_skill_document',
             systemPrompt,
             outputTokens,
             currentRequest: {
                 goal,
                 scope: payload.scope || 'user',
                 novelId: payload.novelId || null,
+                creatorProfile,
                 targetSkillId: payload.targetSkillId || null,
+                attempt: Math.max(1, Number(payload.attempt) || 1),
             },
-            sections: payload.source && Object.keys(payload.source).length ? [{
-                id: 'authorized-skill-source',
-                kind: 'retrieval',
-                priority: 'high',
-                value: payload.source,
-                sourceRef: 'agent-skill-author-request',
-            }] : [],
+            sections: [
+                ...(payload.source && Object.keys(payload.source).length ? [{
+                    id: 'authorized-skill-source',
+                    kind: 'retrieval' as const,
+                    priority: 'high' as const,
+                    value: payload.source,
+                    sourceRef: 'agent-skill-author-request',
+                }] : []),
+                ...(currentDocument ? [{
+                    id: 'current-skill-document',
+                    kind: 'artifact' as const,
+                    priority: 'required' as const,
+                    value: currentDocument,
+                    sourceRef: 'agent-skill-workspace',
+                }] : []),
+                ...(diagnostics.length ? [{
+                    id: 'workspace-validation-diagnostics',
+                    kind: 'decision' as const,
+                    priority: 'required' as const,
+                    value: diagnostics,
+                    sourceRef: 'agent-skill-validator',
+                }] : []),
+            ],
         });
         const response = await this.getProvider().generate({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
-            temperature: Math.min(this.settingsCache.http.temperature, 0.3),
+            temperature: Math.min(this.settingsCache.http.temperature, diagnostics.length ? 0.15 : 0.3),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
         });
-        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
-        if (!parsed || typeof parsed.definition !== 'object' || typeof parsed.revision !== 'object') {
-            this.invalidAgentStructuredOutput('Agent Skill Creator returned an invalid draft');
-        }
-        return parsed as Record<string, unknown>;
+        let contentText = response.text.trim();
+        const fenced = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n```$/i.exec(contentText);
+        if (fenced) contentText = fenced[1].trim();
+        const frontmatterStart = contentText.indexOf('---');
+        if (frontmatterStart > 0) contentText = contentText.slice(frontmatterStart).trim();
+        if (!contentText) throw new AiActionError('MODEL_OUTPUT_INVALID', 'Agent Skill document generation returned empty text');
+        return { contentText };
     }
 
     async generateAgentReport(payload: {
@@ -2963,7 +3072,7 @@ export class AiService {
                 },
             ],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -3031,7 +3140,7 @@ export class AiService {
                 value: trimText(payload.analysisSummary, 2000),
             }],
         });
-        const response = await this.getProvider().generate({
+        const response = await this.generateStructured({
             systemPrompt,
             prompt,
             maxTokens: outputTokens,
@@ -3233,10 +3342,19 @@ export class AiService {
             contextChapterCount: payload.contextChapterCount,
         });
         const bundle = await this.buildContinuePromptBundle(payload);
+        const outputBudget = this.resolveGenerationBudget('chapter_draft', {
+            systemPrompt: bundle.systemPrompt,
+            promptInput: JSON.stringify({
+                structured: bundle.structured,
+                effectiveUserPrompt: bundle.effectiveUserPrompt,
+                usedContext: bundle.usedContext,
+            }),
+            targetLength: payload.targetLength,
+        });
         const prompt = this.assembleDraftGenerationPrompt({
             operation: 'chapter.preview_generation_context',
             systemPrompt: bundle.systemPrompt,
-            outputTokens: this.settingsCache.http.maxTokens,
+            outputTokens: outputBudget.recoveryTokens,
             structured: bundle.structured,
             effectiveUserPrompt: bundle.effectiveUserPrompt,
             usedContext: bundle.usedContext,
@@ -3250,6 +3368,7 @@ export class AiService {
             editableUserPrompt: bundle.defaultUserPrompt,
             usedContext: bundle.usedContext,
             warnings: bundle.warnings,
+            outputBudget,
         };
     }
 
@@ -3270,27 +3389,91 @@ export class AiService {
         const generationTemperature = Number.isFinite(payload.temperature)
             ? Math.max(0, Math.min(2, Number(payload.temperature)))
             : this.settingsCache.http.temperature;
+        const outputBudget = this.resolveGenerationBudget('chapter_draft', {
+            systemPrompt: bundle.systemPrompt,
+            promptInput: JSON.stringify({
+                structured: bundle.structured,
+                effectiveUserPrompt: bundle.effectiveUserPrompt,
+                usedContext: bundle.usedContext,
+            }),
+            targetLength: payload.targetLength,
+        });
         const prompt = this.assembleDraftGenerationPrompt({
             operation: 'chapter.generate_draft',
             systemPrompt: bundle.systemPrompt,
-            outputTokens: this.settingsCache.http.maxTokens,
+            outputTokens: outputBudget.recoveryTokens,
             structured: bundle.structured,
             effectiveUserPrompt: bundle.effectiveUserPrompt,
             usedContext: bundle.usedContext,
         });
 
-        const response = await provider.generate({
+        const generationStartedAt = Date.now();
+        const generationTimeoutMs = Math.max(this.settingsCache.http.timeoutMs, DRAFT_GENERATION_TIMEOUT_MS);
+        let response = await this.generateWithBudgetRecovery((request) => provider.generate(request), {
             systemPrompt: bundle.systemPrompt,
             prompt,
-            maxTokens: this.settingsCache.http.maxTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: generationTemperature,
-            timeoutMs: Math.max(this.settingsCache.http.timeoutMs, DRAFT_GENERATION_TIMEOUT_MS),
+            timeoutMs: generationTimeoutMs,
             firstByteTimeoutMs: DRAFT_FIRST_BYTE_TIMEOUT_MS,
             streamIdleTimeoutMs: DRAFT_STREAM_IDLE_TIMEOUT_MS,
             onActivity,
             signal,
-        });
+        }, outputBudget, 'chapter.generate_draft');
         signal?.throwIfAborted();
+
+        const lengthTarget = bundle.lengthTarget;
+        const firstCount = countWritingUnits(response.text, payload.locale);
+        let generationAttemptCount = response.attemptCount ?? 1;
+        let lengthRepairAttempted = false;
+        let lengthRepairMaximumTokens = 0;
+        if (firstCount < lengthTarget.min || firstCount > lengthTarget.max) {
+            const remainingMs = generationTimeoutMs - (Date.now() - generationStartedAt);
+            if (remainingMs >= 1000) {
+                const repairInstruction = /^zh/i.test(payload.locale || 'zh-CN')
+                    ? `当前正文实测${firstCount}汉字，目标${lengthTarget.min}—${lengthTarget.max}汉字。请${firstCount < lengthTarget.min ? '补足行动与对话' : '精简重复描述'}，保持情节、人物、视角与结尾，输出完整修订正文，不要说明修改过程。`
+                    : `The draft contains ${firstCount} words; the target is ${lengthTarget.min}–${lengthTarget.max}. Revise its length, preserving plot, viewpoint and ending. Return the complete revised prose only.`;
+                const repairContext = `${bundle.effectiveUserPrompt}\n\n${repairInstruction}\nExistingDraft=${JSON.stringify(response.text)}`;
+                const repairBudget = this.resolveGenerationBudget('chapter_draft', {
+                    systemPrompt: bundle.systemPrompt, promptInput: repairContext,
+                    targetLength: lengthTarget.target,
+                });
+                lengthRepairMaximumTokens = repairBudget.initialTokens;
+                try {
+                    const repairPrompt = this.assembleDraftGenerationPrompt({
+                        operation: 'chapter.repair_length', systemPrompt: bundle.systemPrompt,
+                        outputTokens: repairBudget.initialTokens, structured: bundle.structured,
+                        effectiveUserPrompt: repairContext, usedContext: bundle.usedContext,
+                    });
+                    signal?.throwIfAborted();
+                    lengthRepairAttempted = true;
+                    generationAttemptCount += 1;
+                    // One quality correction sharing the original deadline;
+                    // no nested output-budget recovery loop.
+                    const repaired = await provider.generate({
+                        systemPrompt: bundle.systemPrompt, prompt: repairPrompt,
+                        maxTokens: repairBudget.initialTokens, temperature: generationTemperature,
+                        timeoutMs: Math.max(1000, generationTimeoutMs - (Date.now() - generationStartedAt)),
+                        firstByteTimeoutMs: Math.min(DRAFT_FIRST_BYTE_TIMEOUT_MS, remainingMs),
+                        streamIdleTimeoutMs: Math.min(DRAFT_STREAM_IDLE_TIMEOUT_MS, remainingMs),
+                        onActivity, signal,
+                    });
+                    if (!repaired.text.trim()) throw new Error('Empty length correction');
+                    response = { ...repaired, attemptCount: (response.attemptCount ?? 1) + 1 };
+                } catch (error) {
+                    signal?.throwIfAborted();
+                    if (normalizeAiError(error).code === 'CANCELLED') throw error;
+                    bundle.warnings.push(/^zh/i.test(payload.locale || 'zh-CN')
+                        ? '字数调整未完成，已保留此前完整草稿，请审核篇幅。'
+                        : 'Length correction did not finish. The previous complete draft was preserved for review.');
+                }
+            }
+        }
+        const actualLength = countWritingUnits(response.text, payload.locale);
+        const withinRange = actualLength >= lengthTarget.min && actualLength <= lengthTarget.max;
+        if (!withinRange) bundle.warnings.push(/^zh/i.test(payload.locale || 'zh-CN')
+            ? `篇幅待审核：实测${actualLength}汉字，目标${lengthTarget.min}—${lengthTarget.max}汉字。`
+            : `Length needs review: ${actualLength} words; target ${lengthTarget.min}–${lengthTarget.max}.`);
 
         const consistency = await this.checkConsistency({
             novelId: payload.novelId,
@@ -3304,6 +3487,17 @@ export class AiService {
             contextPolicy: bundle.contextPolicy,
             contextSnapshot: bundle.contextSnapshot,
             consistency,
+            generation: {
+                responseId: response.responseId,
+                usage: response.usage,
+                finishReason: response.finishReason,
+                requestedMaxTokens: response.requestedMaxTokens,
+                elapsedMs: response.elapsedMs,
+                attemptCount: generationAttemptCount,
+                budget: outputBudget,
+                lengthValidation: { ...lengthTarget, actual: actualLength, withinRange, repairAttempted: lengthRepairAttempted },
+                taskOutputLimitTokens: outputBudget.totalTaskTokens + lengthRepairMaximumTokens,
+            },
         };
         devLog('INFO', 'AiService.continueWriting.success', 'Continue writing success', {
             chapterId: payload.chapterId,
@@ -3496,10 +3690,20 @@ export class AiService {
             targetSections: payload.targetSections,
         });
         const bundle = await this.buildCreativeAssetsPromptBundle(payload);
+        const targetSections = this.resolveCreativeTargetSections(payload);
+        const outputBudget = this.resolveGenerationBudget('creative_assets', {
+            systemPrompt: bundle.systemPrompt,
+            promptInput: JSON.stringify({
+                structured: bundle.structured,
+                effectiveUserPrompt: bundle.effectiveUserPrompt,
+                usedContext: bundle.usedContext,
+            }),
+            itemCount: targetSections.length,
+        });
         const prompt = this.assembleDraftGenerationPrompt({
             operation: 'creative_assets.preview_generation_context',
             systemPrompt: bundle.systemPrompt,
-            outputTokens: this.settingsCache.http.maxTokens,
+            outputTokens: outputBudget.recoveryTokens,
             structured: bundle.structured,
             effectiveUserPrompt: bundle.effectiveUserPrompt,
             usedContext: bundle.usedContext,
@@ -3512,6 +3716,7 @@ export class AiService {
             rawPrompt: buildRawPromptPreview(bundle.systemPrompt, prompt),
             editableUserPrompt: bundle.defaultUserPrompt,
             usedContext: bundle.usedContext,
+            outputBudget,
         };
     }
 
@@ -3545,98 +3750,92 @@ export class AiService {
         return output;
     }
 
-    async generateCreativeAssets(payload: CreativeAssetsGeneratePayload, signal?: AbortSignal): Promise<{ draft: CreativeAssetsDraft }> {
+    async generateCreativeAssets(payload: CreativeAssetsGeneratePayload, signal?: AbortSignal): Promise<{
+        draft: CreativeAssetsDraft;
+        generation: AiGenerationMetadata;
+    }> {
         devLog('INFO', 'AiService.generateCreativeAssets.start', 'Generate creative assets start', {
             novelId: payload.novelId,
             briefLength: payload.brief?.length ?? 0,
             providerType: this.settingsCache.providerType,
             targetSections: payload.targetSections,
         });
-        const provider = this.getProvider();
         const bundle = await this.buildCreativeAssetsPromptBundle(payload);
         const targetSections = this.resolveCreativeTargetSections(payload);
+        const outputBudget = this.resolveGenerationBudget('creative_assets', {
+            systemPrompt: bundle.systemPrompt,
+            promptInput: JSON.stringify({
+                structured: bundle.structured,
+                effectiveUserPrompt: bundle.effectiveUserPrompt,
+                usedContext: bundle.usedContext,
+            }),
+            itemCount: targetSections.length,
+        });
         const prompt = this.assembleDraftGenerationPrompt({
             operation: 'creative_assets.generate_draft',
             systemPrompt: bundle.systemPrompt,
-            outputTokens: this.settingsCache.http.maxTokens,
+            outputTokens: outputBudget.recoveryTokens,
             structured: bundle.structured,
             effectiveUserPrompt: bundle.effectiveUserPrompt,
             usedContext: bundle.usedContext,
         });
-        const response = await provider.generate({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt: bundle.systemPrompt,
             prompt,
-            maxTokens: this.settingsCache.http.maxTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: this.settingsCache.http.temperature,
             // 创作工坊需要生成多个板块的结构化 JSON，内容量大，使用更宽裕的超时
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
             signal,
-        });
+        }, outputBudget, 'creative_assets.generate_draft');
 
-        try {
-            const parsed = JSON.parse(response.text) as CreativeAssetsDraft;
-            if (parsed && typeof parsed === 'object') {
-                const filtered: CreativeAssetsDraft = this.buildEmptyCreativeDraft(targetSections);
-                for (const section of targetSections) {
-                    const list = (parsed as any)?.[section];
-                    (filtered as any)[section] = Array.isArray(list) ? list : [];
-                }
-                devLog('INFO', 'AiService.generateCreativeAssets.success', 'Generate creative assets success', {
-                    novelId: payload.novelId,
-                    counts: {
-                        plotLines: filtered.plotLines?.length ?? 0,
-                        plotPoints: filtered.plotPoints?.length ?? 0,
-                        characters: filtered.characters?.length ?? 0,
-                        items: filtered.items?.length ?? 0,
-                        skills: filtered.skills?.length ?? 0,
-                        worldSettings: filtered.worldSettings?.length ?? 0,
-                        maps: filtered.maps?.length ?? 0,
-                    },
-                });
-                return { draft: filtered };
-            }
-        } catch {
-            // fallback below
+        const parsed = await this.checkpointAndParseStructuredResponse(response.text);
+        if (!parsed) {
+            this.invalidAgentStructuredOutput('Creative assets response did not contain a JSON object');
         }
-
-        const suffix = randomUUID().slice(0, 6);
-        const fallbackDraft: CreativeAssetsDraft = {
-            plotLines: [{
-                name: `主线-${suffix}`,
-                description: 'AI 生成的主线草稿',
-                color: '#6366f1',
-                points: [{ title: '开端事件', description: '引发主线的关键事件', type: 'event', status: 'active' }],
-            }],
-            plotPoints: [{
-                title: '中段转折',
-                description: '推动章节冲突升级',
-                type: 'event',
-                status: 'active',
-            }],
-            characters: [{ name: `角色-${suffix}`, role: 'protagonist', description: 'AI 生成角色草稿', profile: { goal: '完成使命' } }],
-            items: [{ name: `物品-${suffix}`, type: 'item', description: 'AI 生成物品草稿', profile: { rarity: 'rare' } }],
-            skills: [{ name: `技能-${suffix}`, description: 'AI 生成技能草稿', profile: { rank: 'A' } }],
-            worldSettings: [{ name: `世界规则-${suffix}`, type: 'other', content: 'AI 生成世界设定草稿' }],
-            maps: [{ name: `世界地图-${suffix}`, type: 'world', description: 'AI 生成地图草稿', imagePrompt: 'fantasy world map' }],
-        };
-        const filteredFallback: CreativeAssetsDraft = this.buildEmptyCreativeDraft(targetSections);
+        const filtered: CreativeAssetsDraft = this.buildEmptyCreativeDraft(targetSections);
+        const issues: Array<{ path: string; message: string }> = [];
         for (const section of targetSections) {
-            (filteredFallback as any)[section] = (fallbackDraft as any)[section] ?? [];
+            const list = parsed[section];
+            if (!Array.isArray(list)) {
+                issues.push({ path: section, message: 'Expected an array for the requested section' });
+                continue;
+            }
+            (filtered as any)[section] = list;
+        }
+        const validTargetCount = targetSections.reduce(
+            (count, section) => count + ((filtered as any)[section]?.length ?? 0),
+            0,
+        );
+        if (validTargetCount === 0) {
+            issues.push({ path: '$', message: 'No valid items were returned for the requested sections' });
+        }
+        if (issues.length > 0) {
+            this.invalidAgentStructuredOutput('Creative assets response did not match the requested draft sections', issues);
         }
         devLog('INFO', 'AiService.generateCreativeAssets.success', 'Generate creative assets success', {
             novelId: payload.novelId,
             counts: {
-                plotLines: filteredFallback.plotLines?.length ?? 0,
-                plotPoints: filteredFallback.plotPoints?.length ?? 0,
-                characters: filteredFallback.characters?.length ?? 0,
-                items: filteredFallback.items?.length ?? 0,
-                skills: filteredFallback.skills?.length ?? 0,
-                worldSettings: filteredFallback.worldSettings?.length ?? 0,
-                maps: filteredFallback.maps?.length ?? 0,
+                plotLines: filtered.plotLines?.length ?? 0,
+                plotPoints: filtered.plotPoints?.length ?? 0,
+                characters: filtered.characters?.length ?? 0,
+                items: filtered.items?.length ?? 0,
+                skills: filtered.skills?.length ?? 0,
+                worldSettings: filtered.worldSettings?.length ?? 0,
+                maps: filtered.maps?.length ?? 0,
             },
         });
         return {
-            draft: filteredFallback,
+            draft: filtered,
+            generation: {
+                responseId: response.responseId,
+                usage: response.usage,
+                finishReason: response.finishReason,
+                requestedMaxTokens: response.requestedMaxTokens,
+                elapsedMs: response.elapsedMs,
+                attemptCount: response.attemptCount ?? 1,
+                budget: outputBudget,
+            },
         };
     }
 
@@ -4413,6 +4612,7 @@ export class AiService {
     }
 
     private async buildContinuePromptBundle(payload: ContinueWritingPayload): Promise<{
+        lengthTarget: WritingLengthTarget;
         systemPrompt: string;
         defaultUserPrompt: string;
         effectiveUserPrompt: string;
@@ -4422,7 +4622,7 @@ export class AiService {
         contextPolicy: import('../../shared/agentChapterScope').ContinuationContextPolicy;
         contextSnapshot: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
     }> {
-        const isZh = /^zh/i.test(String(payload.locale || '').trim());
+        const isZh = /^zh/i.test(String(payload.locale || 'zh-CN').trim());
         const writeMode: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter' =
             payload.mode === 'new_chapter'
                 ? 'new_chapter'
@@ -4448,7 +4648,16 @@ export class AiService {
             }
             : context.dynamicContext;
         const compactDynamicContext = this.compactContinueDynamicContext(dynamicContextForPrompt as Record<string, unknown>);
-        const normalizedUserIntent = trimText(payload.userIntent, 800);
+        const normalizedUserIntent = trimText(payload.userIntent, 12000);
+        const novelDefault = canReusePreparedContext
+            ? novelChapterLength((await db.novel.findUnique({ where: { id: payload.novelId }, select: { formatting: true } }))?.formatting)
+            : context.params.novelChapterLength;
+        const lengthTarget = resolveWritingLength({
+            userIntent: normalizedUserIntent,
+            targetLength: payload.targetLength,
+            mode: writeMode,
+            novelDefault,
+        });
         const normalizedCurrentLocation = trimText(payload.currentLocation, 120);
         const batchContext = payload.batchContext && typeof payload.batchContext === 'object'
             ? payload.batchContext
@@ -4456,8 +4665,8 @@ export class AiService {
         const writeParamsForPrompt = {
             ...context.params,
             targetLength: isZh
-                ? `约${Math.max(100, Math.min(4000, Number(context.params.targetLength || 500)))}汉字`
-                : `about ${Math.max(100, Math.min(4000, Number(context.params.targetLength || 500)))} Chinese characters`,
+                ? `约${lengthTarget.target}汉字，范围${lengthTarget.min}—${lengthTarget.max}汉字（不计标点和空白）`
+                : `about ${lengthTarget.target} words, between ${lengthTarget.min} and ${lengthTarget.max} words`,
         };
         const systemPrompt = writeMode === 'rewrite_chapter'
             ? (isZh
@@ -4481,8 +4690,8 @@ export class AiService {
                     : 'Constraint=Output a complete replacement chapter. Preserve required facts and function; do not append to the original or explain edits.')
                 : writeMode === 'new_chapter'
                 ? (isZh
-                    ? 'Constraint=基于大纲与世界观写出新章节开场，不得复述已有段落。'
-                    : 'Constraint=Start a fresh chapter opening based on outline and world context. Do not echo prior chapter paragraphs.')
+                    ? 'Constraint=基于大纲与世界观写出一章完整正文，包含开场、冲突推进与章末收束或悬念；不得复述已有段落。'
+                    : 'Constraint=Write a complete new chapter with an opening, developing conflict, and a closing beat or hook. Do not echo prior chapter paragraphs.')
                 : (isZh
                     ? 'Constraint=仅输出新增续写内容，不得重复当前章节或上下文已出现段落。'
                     : 'Constraint=Output must be NEW continuation content only. Do not restate prior paragraphs from current chapter or context.'),
@@ -4509,6 +4718,8 @@ export class AiService {
         const effectiveUserPrompt = payload.overrideUserPrompt?.trim() ? payload.overrideUserPrompt.trim() : defaultUserPrompt;
         const structuredParams = {
             ...context.params,
+            targetLength: lengthTarget.target,
+            lengthTarget,
             contextPolicy: context.policy,
             contextSnapshot: {
                 scopeId: context.snapshot.scopeId,
@@ -4530,6 +4741,7 @@ export class AiService {
             ...(batchContext ? { batchContext } : {}),
         };
         return {
+            lengthTarget,
             systemPrompt,
             defaultUserPrompt,
             effectiveUserPrompt,
@@ -4537,7 +4749,7 @@ export class AiService {
                 goal: writeMode === 'rewrite_chapter'
                     ? (isZh ? '生成目标章节的完整替换正文。' : 'Generate a complete replacement for the target chapter.')
                     : writeMode === 'new_chapter'
-                    ? (isZh ? '生成新章节开场内容。' : 'Generate opening content for a new chapter.')
+                    ? (isZh ? '生成一章完整正文。' : 'Generate a complete chapter.')
                     : (isZh ? '仅生成续写新增内容。' : 'Generate continuation content only.'),
                 contextRefs: context.usedContext,
                 params: structuredParams,
@@ -4751,6 +4963,145 @@ export class AiService {
         };
     }
 
+    private resolveGenerationBudget(
+        task: OutputBudgetTask,
+        input: {
+            systemPrompt?: string;
+            promptInput?: string;
+            targetLength?: number;
+            itemCount?: number;
+        },
+    ): TaskOutputBudget {
+        return resolveTaskOutputBudget({
+            task,
+            mode: this.settingsCache.http.outputBudgetMode,
+            providerType: this.settingsCache.providerType,
+            apiMode: this.settingsCache.http.apiMode,
+            model: this.settingsCache.providerType === 'http' ? this.settingsCache.http.model : 'mcp-cli',
+            configuredContextWindowTokens: this.settingsCache.providerType === 'http'
+                ? this.settingsCache.http.contextWindowTokens
+                : this.settingsCache.mcpCli.contextWindowTokens,
+            manualMaxTokens: this.settingsCache.http.maxTokens,
+            ...input,
+        });
+    }
+
+    private async generateWithBudgetRecovery(
+        generate: (request: Parameters<AiProvider['generate']>[0]) => ReturnType<AiProvider['generate']>,
+        request: Parameters<AiProvider['generate']>[0],
+        budget: TaskOutputBudget,
+        stage: string,
+    ): ReturnType<AiProvider['generate']> {
+        const startedAt = Date.now();
+        const taskDeadlineAt = typeof request.timeoutMs === 'number' && Number.isFinite(request.timeoutMs)
+            ? startedAt + Math.max(1_000, request.timeoutMs)
+            : undefined;
+        try {
+            const result = await generate({ ...request, maxTokens: budget.initialTokens });
+            return { ...result, attemptCount: 1 };
+        } catch (error) {
+            const firstFailure = normalizeAiError(error);
+            const safeToRetry = firstFailure.code === 'MODEL_OUTPUT_TRUNCATED'
+                && firstFailure.details?.safeToRetryBeforePublish === true
+                && budget.canIncreaseOnce
+                && !request.signal?.aborted
+                && (taskDeadlineAt === undefined || taskDeadlineAt - Date.now() >= 1_000);
+            if (!safeToRetry) throw firstFailure;
+            request.signal?.throwIfAborted();
+            devLog('WARN', 'AiService.outputBudget.recovery', 'Retrying unpublished truncated generation once with a larger output budget', {
+                stage,
+                firstAttemptTokens: budget.initialTokens,
+                recoveryTokens: budget.recoveryTokens,
+                totalTaskTokens: budget.totalTaskTokens,
+                responseId: firstFailure.details?.responseId,
+            });
+            try {
+                const remainingTimeoutMs = taskDeadlineAt === undefined
+                    ? request.timeoutMs
+                    : Math.max(1_000, taskDeadlineAt - Date.now());
+                const result = await generate({
+                    ...request,
+                    maxTokens: budget.recoveryTokens,
+                    timeoutMs: remainingTimeoutMs,
+                    firstByteTimeoutMs: request.firstByteTimeoutMs === undefined
+                        ? undefined
+                        : Math.min(request.firstByteTimeoutMs, remainingTimeoutMs ?? request.firstByteTimeoutMs),
+                    streamIdleTimeoutMs: request.streamIdleTimeoutMs === undefined
+                        ? undefined
+                        : Math.min(request.streamIdleTimeoutMs, remainingTimeoutMs ?? request.streamIdleTimeoutMs),
+                });
+                return { ...result, attemptCount: 2 };
+            } catch (retryError) {
+                const retryFailure = normalizeAiError(retryError);
+                throw new AiActionError(retryFailure.code, retryFailure.message, retryFailure.detail, {
+                    ...retryFailure.details,
+                    // The output-budget recovery has consumed the only
+                    // unpublished retry assigned to this task. Do not let an
+                    // outer operation retry multiply provider requests.
+                    retryable: false,
+                    attempts: 2,
+                    firstAttempt: {
+                        requestedMaxTokens: budget.initialTokens,
+                        responseId: firstFailure.details?.responseId,
+                        modelResultRef: firstFailure.details?.modelResultRef,
+                        terminationReason: firstFailure.details?.terminationReason,
+                        usage: firstFailure.details?.usage,
+                        partialText: firstFailure.details?.partialText,
+                    },
+                    taskBudgetTokens: budget.totalTaskTokens,
+                });
+            }
+        }
+    }
+
+    private generateStructuredWithBudgetRecovery(
+        request: Parameters<AiProvider['generate']>[0],
+        budget: TaskOutputBudget,
+        stage: string,
+    ): ReturnType<AiProvider['generate']> {
+        return this.generateWithBudgetRecovery(
+            (attempt) => this.generateStructured(attempt),
+            request,
+            budget,
+            stage,
+        );
+    }
+
+    private async generateStructured(
+        request: Parameters<AiProvider['generate']>[0],
+    ): ReturnType<AiProvider['generate']> {
+        const invocation = this.agentStructuredInvocation.getStore();
+        if (!invocation) {
+            throw new AiActionError('UNKNOWN', 'Structured generation requires a registered invocation context');
+        }
+        const contractInstruction = buildAgentStructuredOutputInstruction(invocation.method);
+        if (!contractInstruction) {
+            throw new AiActionError('UNKNOWN', `Structured Agent method is not registered: ${invocation.method}`);
+        }
+        try {
+            return await this.getProvider().generate({
+                ...request,
+                systemPrompt: `${request.systemPrompt}\n\n${contractInstruction}`,
+            });
+        } catch (error) {
+            const normalized = normalizeAiError(error);
+            const partialText = typeof normalized.details?.partialText === 'string'
+                ? normalized.details.partialText
+                : '';
+            if (partialText && invocation.contract) {
+                invocation.latestCheckpoint = await invocation.checkpoint(partialText, invocation.contract);
+                throw new AiActionError(normalized.code, normalized.message, normalized.detail, {
+                    ...normalized.details,
+                    modelResultRef: invocation.latestCheckpoint.modelResultRef,
+                    modelResultRevision: invocation.latestCheckpoint.revision,
+                    resultHash: invocation.latestCheckpoint.resultHash,
+                    incomplete: true,
+                });
+            }
+            throw normalized;
+        }
+    }
+
     private getProvider(): AiProvider {
         return this.settingsCache.providerType === 'mcp-cli'
             ? new McpCliProvider(this.settingsCache)
@@ -4817,10 +5168,18 @@ export class AiService {
             }
             const raw = fs.readFileSync(this.settingsFilePath, 'utf8');
             const parsed = JSON.parse(raw) as Partial<AiSettings>;
+            const parsedHttp = parsed.http as Partial<AiSettings['http']> | undefined;
             return {
                 ...DEFAULT_AI_SETTINGS,
                 ...parsed,
-                http: { ...DEFAULT_AI_SETTINGS.http, ...(parsed.http ?? {}) },
+                http: {
+                    ...DEFAULT_AI_SETTINGS.http,
+                    ...(parsedHttp ?? {}),
+                    // Existing installations treated maxTokens as an explicit
+                    // ceiling. Preserve that meaning unless the user opts in
+                    // to automatic per-task budgeting.
+                    outputBudgetMode: parsedHttp?.outputBudgetMode ?? 'manual',
+                },
                 mcpCli: { ...DEFAULT_AI_SETTINGS.mcpCli, ...(parsed.mcpCli ?? {}) },
                 proxy: { ...DEFAULT_AI_SETTINGS.proxy, ...(parsed.proxy ?? {}) },
                 summary: { ...DEFAULT_AI_SETTINGS.summary, ...(parsed.summary ?? {}) },

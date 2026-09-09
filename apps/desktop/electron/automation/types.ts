@@ -1,5 +1,6 @@
 import type {
     ConfirmCreativeAssetsResult,
+    AiGenerationMetadata,
     CreativeAssetsDraft,
     CreativeAssetsDraftValidationResult,
     PromptPreviewResult,
@@ -88,6 +89,7 @@ export interface ChapterDraftPayload {
     contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
     contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
     sourceSnapshot?: import('../../shared/draftBatch').DraftBatchSourceSnapshot;
+    generation?: AiGenerationMetadata;
 }
 
 export interface DraftSessionRecord {
@@ -110,6 +112,7 @@ export interface DraftSessionRecord {
     selection?: CreativeDraftSelection;
     validation?: CreativeAssetsDraftValidationResult | null;
     previewSummary: string;
+    generation?: AiGenerationMetadata;
     version: number;
     createdAt: string;
     updatedAt: string;

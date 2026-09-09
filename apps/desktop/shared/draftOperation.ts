@@ -24,6 +24,7 @@ export type DraftOperationError = {
     diagnosticRef: string;
     attempt?: number;
     providerRequestId?: string;
+    details?: Record<string, unknown>;
 };
 
 export type DraftOperationResultRef = {

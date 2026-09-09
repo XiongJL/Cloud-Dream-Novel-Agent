@@ -16,8 +16,23 @@ def test_retry_classification_allows_only_recoverable_failures() -> None:
 
     assert not is_retryable_agent_error(AutomationInvokeError("INVALID_INPUT", "invalid", status_code=500))
     assert not is_retryable_agent_error(AutomationInvokeError("PROVIDER_AUTH", "forbidden"))
+    assert not is_retryable_agent_error(AutomationInvokeError(
+        "MODEL_OUTPUT_TRUNCATED",
+        "limit",
+        {"safeToRetryBeforePublish": True},
+        status_code=500,
+    ))
     assert not is_retryable_agent_error(ToolchainError("SIDE_EFFECT_UNKNOWN", "unknown", retryable=True))
     assert not is_retryable_agent_error(ValueError("schema mismatch"))
+
+
+def test_exhausted_provider_budget_prevents_outer_transport_retry() -> None:
+    for code in ("PROVIDER_TIMEOUT", "NETWORK_ERROR", "PROVIDER_UNAVAILABLE"):
+        error = AutomationInvokeError(code, "budget exhausted", {"retryable": False, "attempts": 2}, 503)
+        assert not is_retryable_agent_error(error)
+        failure = normalize_agent_error(error)
+        assert failure.retryable is False
+        assert failure.payload()["attempts"] == 2
 
 
 def test_normalized_failure_is_sanitized_and_keeps_diagnostics() -> None:

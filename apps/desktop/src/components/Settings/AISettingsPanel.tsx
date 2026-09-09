@@ -149,6 +149,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     http: {
                         ...res.http,
                         apiMode: res.http?.apiMode ?? 'chat-completions',
+                        outputBudgetMode: res.http?.outputBudgetMode ?? 'manual',
                     },
                 } as AISettings;
                 setSettings(merged);
@@ -541,9 +542,33 @@ export function AISettingsPanel({ isDark }: Props) {
                                         theme={isDark ? 'dark' : 'light'}
                                     />
                                 </SettingField>
-                                <SettingField label={t('settings.ai.maxTokens')} hint={t('settings.ai.maxTokensHint')}>
-                                    <input type="number" value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || 4096 } })} placeholder="4096" className={inputClass} />
+                                <SettingField label={t('settings.ai.outputBudgetMode')} hint={t('settings.ai.outputBudgetModeHint')}>
+                                    <select
+                                        value={settings.http.outputBudgetMode}
+                                        onChange={(event) => setSettings({
+                                            ...settings,
+                                            http: {
+                                                ...settings.http,
+                                                outputBudgetMode: event.target.value === 'manual' ? 'manual' : 'auto',
+                                            },
+                                        })}
+                                        className={inputClass}
+                                    >
+                                        <option value="auto">{t('settings.ai.outputBudgetAuto')}</option>
+                                        <option value="manual">{t('settings.ai.outputBudgetManual')}</option>
+                                    </select>
                                 </SettingField>
+                                <div className="md:col-span-2 space-y-1 text-sm">
+                                    <p>{t('settings.ai.contextWindowTokens')}：{formatContextWindow(settings.http.contextWindowTokens || httpContextCapability.defaultContextWindowTokens)} Token</p>
+                                    <p className="text-xs text-gray-500">{t('settings.ai.contextWindowTokensHint')}</p>
+                                </div>
+                                <details className="md:col-span-2 rounded-xl border border-gray-300/30 p-3 space-y-4" open={settings.http.outputBudgetMode === 'manual' ? true : undefined}>
+                                    <summary className="cursor-pointer text-sm">{t('settings.ai.generationAdvanced')}</summary>
+                                {settings.http.outputBudgetMode === 'manual' ? (
+                                    <SettingField label={t('settings.ai.maxTokens')} hint={t('settings.ai.maxTokensHint')}>
+                                        <input type="number" min={128} step={1024} value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || 4096 } })} placeholder="18432" className={inputClass} />
+                                    </SettingField>
+                                ) : null}
                                 <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensHint')} className="md:col-span-2">
                                     <select
                                         value={httpContextWindowMode}
@@ -618,6 +643,7 @@ export function AISettingsPanel({ isDark }: Props) {
                                         />
                                     ) : null}
                                 </SettingField>
+                                </details>
                                 <SettingField label={t('settings.ai.creativity.label')}>
                                     <select value={creativityLevel} onChange={(e) => updateCreativityLevel(e.target.value as CreativityLevel)} className={inputClass}>
                                         <option value="safe">{t('settings.ai.creativity.safe')}</option>

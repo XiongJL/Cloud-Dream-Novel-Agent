@@ -24,6 +24,7 @@ RunStatus = Literal["idle", "waiting_approval", "waiting_user_input", "running",
 RunCompletionKind = Literal["complete", "partial"]
 RecoveryFailureKind = Literal[
     "transport",
+    "model_output_truncated",
     "model_output_invalid",
     "local_transform_failed",
     "artifact_publish_failed",
@@ -454,6 +455,7 @@ class AgentRun(BaseModel):
     threadId: str
     planId: str
     status: RunStatus
+    deadlineAt: str | None = None
     currentStepId: str | None = None
     progress: float = 0
     events: list[AgentRunEvent] = Field(default_factory=list)
@@ -484,6 +486,7 @@ class AgentRunStatusResult(BaseModel):
     planId: str
     threadId: str
     status: RunStatus
+    deadlineAt: str | None = None
     currentStepId: str | None = None
     currentStepTitle: str | None = None
     totalSteps: int = 0

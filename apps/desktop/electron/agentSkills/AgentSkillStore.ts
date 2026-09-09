@@ -1,5 +1,21 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { PrismaClientType } from '@novel-editor/core';
+import {
+    AGENT_SKILL_DOCUMENT_MAX_BYTES,
+    AGENT_SKILL_DOCUMENT_MAX_COUNT,
+    AGENT_SKILL_DOCUMENT_TOTAL_BYTES,
+    assertAgentSkillAuthoringCommitReady,
+    buildAgentSkillAuthoringInputHash,
+    createAgentSkillAuthoringState,
+    hashAgentSkillDocument,
+    invalidateAgentSkillAuthoringState,
+    isAllowedAgentSkillLogicalPath,
+    readAgentSkillAuthoringState,
+    serializeAgentSkillProjection,
+    validateAgentSkillWorkspace,
+    type AgentSkillAuthoringDocument,
+    type AgentSkillAuthoringState,
+} from './AgentSkillAuthoring';
 
 export type AgentSkillDraftStatus = 'editing' | 'ready_for_review' | 'committed' | 'discarded';
 
@@ -103,6 +119,49 @@ function assertSafeJson(value: unknown): void {
     if (/(?:api[_-]?key|access[_-]?token|authorization|bearer\s+[a-z0-9._-]{12,})/iu.test(serialized)) {
         throw new Error('AGENT_SKILL_SECRET_DETECTED');
     }
+}
+
+function bumpPatchVersion(version: string): string {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+    if (!match) return '1.0.0';
+    return `${match[1]}.${match[2]}.${Number(match[3]) + 1}`;
+}
+
+function countOccurrences(contentText: string, oldText: string): number {
+    if (!oldText) return 0;
+    let count = 0;
+    let cursor = 0;
+    while (cursor <= contentText.length) {
+        const found = contentText.indexOf(oldText, cursor);
+        if (found < 0) break;
+        count += 1;
+        cursor = found + oldText.length;
+    }
+    return count;
+}
+
+function workspaceSummary(draft: AgentSkillDraftRecord): Record<string, unknown> {
+    const state = readAgentSkillAuthoringState(draft.draft);
+    if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+    return {
+        draftId: draft.id,
+        version: draft.version,
+        status: draft.status,
+        action: draft.action,
+        scope: draft.scope,
+        phase: state.phase,
+        authoringInputHash: state.authoringInputHash,
+        validatedInputHash: state.validatedInputHash,
+        compiledInputHash: state.compiledInputHash,
+        validationReport: state.validationReport,
+        documents: state.documents.map((document) => ({
+            logicalPath: document.logicalPath,
+            mediaType: document.mediaType,
+            contentHash: document.contentHash,
+            deleted: document.deleted,
+            byteLength: Buffer.byteLength(document.contentText, 'utf8'),
+        })),
+    };
 }
 
 export class AgentSkillStore {
@@ -300,6 +359,9 @@ export class AgentSkillStore {
         assertSafeJson(input.derivationReport || {});
         const id = input.id || randomUUID();
         const existing = input.id ? await this.database.agentSkillDraft.findUnique({ where: { id } }) : null;
+        if (!existing && input.id && input.expectedVersion !== undefined) {
+            throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        }
         if (existing && input.expectedVersion !== undefined && existing.version !== input.expectedVersion) {
             throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
         }
@@ -313,13 +375,330 @@ export class AgentSkillStore {
             derivationReportJson: input.derivationReport ? JSON.stringify(input.derivationReport) : null,
             expectedCurrentRevisionId: input.expectedCurrentRevisionId || null,
         };
-        const row = existing
-            ? await this.database.agentSkillDraft.update({
-                where: { id },
+        if (existing) {
+            const updated = await this.database.agentSkillDraft.updateMany({
+                where: { id, version: input.expectedVersion ?? existing.version },
                 data: { ...payload, version: { increment: 1 }, updatedAt: new Date() },
-            })
-            : await this.database.agentSkillDraft.create({ data: { id, ...payload } });
+            });
+            if (updated.count !== 1) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+            const row = await this.database.agentSkillDraft.findUnique({ where: { id } });
+            if (!row) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+            return toDraft(row as DraftRow);
+        }
+        const row = await this.database.agentSkillDraft.create({ data: { id, ...payload } });
         return toDraft(row as DraftRow);
+    }
+
+    async createAuthoringWorkspace(input: {
+        action?: AgentSkillDraftRecord['action'];
+        scope: AgentSkillDraftRecord['scope'];
+        sourceNovelId?: string;
+        targetSkillId?: string;
+        expectedCurrentRevisionId?: string;
+        logicalPath?: string;
+        contentText?: string;
+        sourceSnapshotRefs?: string[];
+        pack?: Record<string, unknown>;
+        derivationReport?: Record<string, unknown>;
+    }): Promise<Record<string, unknown>> {
+        await this.ensureSchema();
+        const action = input.action || (input.targetSkillId ? 'update' : 'create');
+        if (input.scope === 'novel' && !input.sourceNovelId) throw new Error('AGENT_SKILL_WORKSPACE_NOVEL_REQUIRED');
+        if (action === 'pack' && input.targetSkillId) throw new Error('AGENT_SKILL_PACK_UPDATE_UNSUPPORTED');
+        let contentText = input.contentText;
+        let expectedCurrentRevisionId = input.expectedCurrentRevisionId;
+        if (input.targetSkillId) {
+            const existing = await this.getSkill({ skillId: input.targetSkillId, revisionId: expectedCurrentRevisionId });
+            if (!existing) throw new Error('AGENT_SKILL_NOT_FOUND');
+            if (String(existing.scope || '') !== input.scope) throw new Error('AGENT_SKILL_WORKSPACE_SCOPE_MISMATCH');
+            const revision = asObject(existing.revision);
+            if (!revision.id) throw new Error('AGENT_SKILL_REVISION_NOT_FOUND');
+            expectedCurrentRevisionId = String(revision.id);
+            if (contentText === undefined) {
+                const nextRevision = { ...revision, version: bumpPatchVersion(String(revision.version || '')) };
+                contentText = serializeAgentSkillProjection({
+                    definition: {
+                        stableId: existing.stableId,
+                        title: existing.title,
+                        description: existing.description,
+                    },
+                    revision: nextRevision,
+                }, input.scope);
+            }
+        }
+        const logicalPath = input.logicalPath || (action === 'pack' ? 'skill/SKILL.md' : 'SKILL.md');
+        const authoring = createAgentSkillAuthoringState({
+            logicalPath,
+            contentText,
+            sourceSnapshotRefs: input.sourceSnapshotRefs,
+            pack: input.pack,
+        });
+        const created = await this.upsertDraft({
+            action,
+            scope: input.scope,
+            status: 'editing',
+            sourceNovelId: input.sourceNovelId,
+            targetSkillId: input.targetSkillId,
+            expectedCurrentRevisionId,
+            draft: {
+                authoring,
+                ...(input.pack ? { pack: input.pack } : {}),
+            },
+            derivationReport: input.derivationReport,
+        });
+        return workspaceSummary(created);
+    }
+
+    async listAuthoringDocuments(input: { draftId: string }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        return workspaceSummary(draft);
+    }
+
+    async readAuthoringDocument(input: { draftId: string; logicalPath: string }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const logicalPath = String(input?.logicalPath || '');
+        const document = state.documents.find((item) => item.logicalPath === logicalPath && !item.deleted);
+        if (!document) throw new Error('AGENT_SKILL_WORKSPACE_DOCUMENT_NOT_FOUND');
+        return {
+            draftId: draft.id,
+            version: draft.version,
+            phase: state.phase,
+            logicalPath: document.logicalPath,
+            mediaType: document.mediaType,
+            contentText: document.contentText,
+            contentHash: document.contentHash,
+            byteLength: Buffer.byteLength(document.contentText, 'utf8'),
+        };
+    }
+
+    private async persistAuthoringMutation(
+        draft: AgentSkillDraftRecord,
+        nextDraft: Record<string, unknown>,
+        expectedVersion: number,
+        status: AgentSkillDraftStatus = 'editing',
+    ): Promise<AgentSkillDraftRecord> {
+        return this.upsertDraft({
+            id: draft.id,
+            expectedVersion,
+            status,
+            action: draft.action,
+            scope: draft.scope,
+            sourceNovelId: draft.sourceNovelId,
+            targetSkillId: draft.targetSkillId,
+            expectedCurrentRevisionId: draft.expectedCurrentRevisionId,
+            draft: nextDraft,
+            derivationReport: draft.derivationReport,
+        });
+    }
+
+    async writeAuthoringDocument(input: {
+        draftId: string;
+        expectedVersion: number;
+        logicalPath: string;
+        contentText: string;
+        mediaType?: 'text/markdown';
+    }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        if (draft.status === 'committed' || draft.status === 'discarded') throw new Error('AGENT_SKILL_DRAFT_NOT_EDITABLE');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const logicalPath = String(input?.logicalPath || '');
+        if (!isAllowedAgentSkillLogicalPath(logicalPath)) throw new Error('AGENT_SKILL_WORKSPACE_PATH_INVALID');
+        if (input.mediaType && input.mediaType !== 'text/markdown') throw new Error('AGENT_SKILL_WORKSPACE_MEDIA_TYPE_INVALID');
+        if (typeof input.contentText !== 'string') throw new Error('AGENT_SKILL_WORKSPACE_CONTENT_REQUIRED');
+        if (Buffer.byteLength(input.contentText, 'utf8') > AGENT_SKILL_DOCUMENT_MAX_BYTES) {
+            throw new Error('AGENT_SKILL_WORKSPACE_DOCUMENT_TOO_LARGE');
+        }
+        const documents = [...state.documents];
+        const existingIndex = documents.findIndex((document) => document.logicalPath === logicalPath);
+        const document: AgentSkillAuthoringDocument = {
+            logicalPath,
+            mediaType: 'text/markdown',
+            contentText: input.contentText,
+            contentHash: hashAgentSkillDocument(input.contentText),
+            deleted: false,
+        };
+        if (existingIndex >= 0) documents[existingIndex] = document;
+        else documents.push(document);
+        if (documents.length > AGENT_SKILL_DOCUMENT_MAX_COUNT) throw new Error('AGENT_SKILL_WORKSPACE_DOCUMENT_COUNT_EXCEEDED');
+        const totalBytes = documents.filter((item) => !item.deleted)
+            .reduce((sum, item) => sum + Buffer.byteLength(item.contentText, 'utf8'), 0);
+        if (totalBytes > AGENT_SKILL_DOCUMENT_TOTAL_BYTES) throw new Error('AGENT_SKILL_WORKSPACE_TOTAL_TOO_LARGE');
+        const nextDraft = { ...draft.draft };
+        nextDraft.authoring = invalidateAgentSkillAuthoringState({ ...state, documents }, nextDraft.pack);
+        const updated = await this.persistAuthoringMutation(draft, nextDraft, input.expectedVersion);
+        return workspaceSummary(updated);
+    }
+
+    async patchAuthoringDocument(input: {
+        draftId: string;
+        expectedVersion: number;
+        logicalPath: string;
+        expectedContentHash: string;
+        oldText: string;
+        newText: string;
+    }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        if (draft.status === 'committed' || draft.status === 'discarded') throw new Error('AGENT_SKILL_DRAFT_NOT_EDITABLE');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const document = state.documents.find((item) => item.logicalPath === input.logicalPath && !item.deleted);
+        if (!document) throw new Error('AGENT_SKILL_WORKSPACE_DOCUMENT_NOT_FOUND');
+        if (!input.oldText || typeof input.newText !== 'string') throw new Error('AGENT_SKILL_WORKSPACE_PATCH_INVALID');
+        if (document.contentHash !== input.expectedContentHash) throw new Error('AGENT_SKILL_WORKSPACE_CONTENT_CONFLICT');
+        if (countOccurrences(document.contentText, input.oldText) !== 1) throw new Error('AGENT_SKILL_WORKSPACE_PATCH_CONFLICT');
+        const contentText = document.contentText.replace(input.oldText, input.newText);
+        return this.writeAuthoringDocument({
+            draftId: draft.id,
+            expectedVersion: input.expectedVersion,
+            logicalPath: document.logicalPath,
+            contentText,
+            mediaType: 'text/markdown',
+        });
+    }
+
+    async removeAuthoringDocument(input: {
+        draftId: string;
+        expectedVersion: number;
+        logicalPath: string;
+        expectedContentHash?: string;
+    }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        if (draft.status === 'committed' || draft.status === 'discarded') throw new Error('AGENT_SKILL_DRAFT_NOT_EDITABLE');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const index = state.documents.findIndex((item) => item.logicalPath === input.logicalPath && !item.deleted);
+        if (index < 0) throw new Error('AGENT_SKILL_WORKSPACE_DOCUMENT_NOT_FOUND');
+        if (input.expectedContentHash && state.documents[index].contentHash !== input.expectedContentHash) {
+            throw new Error('AGENT_SKILL_WORKSPACE_CONTENT_CONFLICT');
+        }
+        const documents = state.documents.map((document, documentIndex) => (
+            documentIndex === index ? { ...document, deleted: true } : document
+        ));
+        const nextDraft = { ...draft.draft };
+        nextDraft.authoring = invalidateAgentSkillAuthoringState({ ...state, documents }, nextDraft.pack);
+        const updated = await this.persistAuthoringMutation(draft, nextDraft, input.expectedVersion);
+        return workspaceSummary(updated);
+    }
+
+    async setAuthoringPack(input: {
+        draftId: string;
+        expectedVersion: number;
+        pack: Record<string, unknown>;
+    }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        if (draft.action !== 'pack') throw new Error('AGENT_SKILL_WORKSPACE_NOT_PACK');
+        if (draft.status === 'committed' || draft.status === 'discarded') throw new Error('AGENT_SKILL_DRAFT_NOT_EDITABLE');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const pack = asObject(input.pack);
+        assertSafeJson(pack);
+        const nextDraft: Record<string, unknown> = { ...draft.draft, pack };
+        nextDraft.authoring = invalidateAgentSkillAuthoringState(state, pack);
+        const updated = await this.persistAuthoringMutation(draft, nextDraft, input.expectedVersion);
+        return workspaceSummary(updated);
+    }
+
+    async validateAuthoringWorkspace(input: {
+        draftId: string;
+        expectedVersion: number;
+        finalAttempt?: boolean;
+    }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        if (draft.status === 'committed' || draft.status === 'discarded') throw new Error('AGENT_SKILL_DRAFT_NOT_EDITABLE');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const validation = validateAgentSkillWorkspace({ draft: draft.draft, action: draft.action, scope: draft.scope });
+        const nextState: AgentSkillAuthoringState = {
+            ...state,
+            phase: validation.report.ok ? 'validating' : input.finalAttempt ? 'needs_attention' : 'revising',
+            validationReport: validation.report,
+            validatedInputHash: validation.report.ok ? validation.report.inputHash : undefined,
+            compiledInputHash: undefined,
+        };
+        const nextDraft = { ...draft.draft, authoring: nextState };
+        const updated = await this.persistAuthoringMutation(draft, nextDraft, input.expectedVersion);
+        return workspaceSummary(updated);
+    }
+
+    async compileAuthoringWorkspace(input: {
+        draftId: string;
+        expectedVersion: number;
+    }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        if (draft.status === 'committed' || draft.status === 'discarded') throw new Error('AGENT_SKILL_DRAFT_NOT_EDITABLE');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const inputHash = buildAgentSkillAuthoringInputHash(state.documents, draft.draft.pack);
+        if (state.authoringInputHash !== inputHash || state.validatedInputHash !== inputHash) {
+            throw new Error('AGENT_SKILL_WORKSPACE_VALIDATION_REQUIRED');
+        }
+        const validation = validateAgentSkillWorkspace({ draft: draft.draft, action: draft.action, scope: draft.scope });
+        if (!validation.report.ok || !validation.projection) throw new Error('AGENT_SKILL_WORKSPACE_VALIDATION_REQUIRED');
+        const nextState: AgentSkillAuthoringState = {
+            ...state,
+            phase: 'compiled',
+            validationReport: validation.report,
+            validatedInputHash: inputHash,
+            compiledInputHash: inputHash,
+        };
+        const projection = validation.projection as Record<string, unknown>;
+        const nextDraft = { ...draft.draft, ...projection, authoring: nextState };
+        const updated = await this.persistAuthoringMutation(draft, nextDraft, input.expectedVersion, 'ready_for_review');
+        return workspaceSummary(updated);
+    }
+
+    async diffAuthoringWorkspace(input: { draftId: string }): Promise<Record<string, unknown>> {
+        const draft = await this.getDraft(String(input?.draftId || ''));
+        if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
+        const state = readAgentSkillAuthoringState(draft.draft);
+        if (!state) throw new Error('AGENT_SKILL_WORKSPACE_NOT_FOUND');
+        const activeDocuments = state.documents.filter((document) => !document.deleted);
+        let beforeText = '';
+        if (draft.targetSkillId) {
+            const existing = await this.getSkill({ skillId: draft.targetSkillId, revisionId: draft.expectedCurrentRevisionId });
+            const revision = asObject(existing?.revision);
+            if (existing && revision.id) {
+                beforeText = serializeAgentSkillProjection({
+                    definition: {
+                        stableId: existing.stableId,
+                        title: existing.title,
+                        description: existing.description,
+                    },
+                    revision,
+                }, draft.scope);
+            }
+        }
+        const currentHash = buildAgentSkillAuthoringInputHash(state.documents, draft.draft.pack);
+        return {
+            draftId: draft.id,
+            version: draft.version,
+            stale: state.compiledInputHash !== currentHash,
+            documents: activeDocuments.map((document) => ({
+                logicalPath: document.logicalPath,
+                changeType: beforeText && document.logicalPath === 'SKILL.md' ? 'modified' : 'added',
+                beforeText: document.logicalPath === 'SKILL.md' ? beforeText : '',
+                afterText: document.contentText,
+                beforeHash: document.logicalPath === 'SKILL.md' && beforeText ? hashAgentSkillDocument(beforeText) : undefined,
+                afterHash: document.contentHash,
+            })),
+        };
     }
 
     async discardDraft(id: string, expectedVersion?: number): Promise<AgentSkillDraftRecord> {
@@ -354,6 +733,12 @@ export class AgentSkillStore {
         const draft = prefetched ?? await this.getDraft(input.draftId);
         if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
         if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        assertAgentSkillAuthoringCommitReady({
+            draft: draft.draft,
+            action: draft.action,
+            scope: draft.scope,
+            status: draft.status,
+        });
         if (draft.status !== 'ready_for_review' && draft.status !== 'editing') throw new Error('AGENT_SKILL_DRAFT_NOT_COMMITTABLE');
         const definition = asObject(draft.draft.definition);
         const proposedRevision = asObject(draft.draft.revision);
@@ -444,6 +829,12 @@ export class AgentSkillStore {
         const draft = prefetched ?? await this.getDraft(input.draftId);
         if (!draft) throw new Error('AGENT_SKILL_DRAFT_NOT_FOUND');
         if (draft.version !== input.expectedVersion) throw new Error('AGENT_SKILL_DRAFT_VERSION_CONFLICT');
+        assertAgentSkillAuthoringCommitReady({
+            draft: draft.draft,
+            action: draft.action,
+            scope: draft.scope,
+            status: draft.status,
+        });
         if (draft.status !== 'ready_for_review' && draft.status !== 'editing') throw new Error('AGENT_SKILL_DRAFT_NOT_COMMITTABLE');
         const rawSkills = Array.isArray(draft.draft.skills) ? draft.draft.skills : [];
         const pack = asObject(draft.draft.pack);

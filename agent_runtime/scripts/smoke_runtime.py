@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 
 def free_port() -> int:
@@ -66,11 +66,38 @@ def main() -> None:
                     capabilities = ((payload.get("data") or {}).get("capabilities") or [])
                     if payload.get("ok") is True and "agent.plan" in capabilities:
                         print(f"[agent-runtime] health smoke passed on port {port}")
-                        return
+                        break
                     raise RuntimeError(f"Unexpected health response: {payload}")
                 except URLError:
                     time.sleep(0.25)
-            raise TimeoutError(f"Agent runtime did not become healthy within {args.timeout:.0f}s")
+            else:
+                raise TimeoutError(f"Agent runtime did not become healthy within {args.timeout:.0f}s")
+
+            request = Request(
+                f"http://127.0.0.1:{port}/invoke",
+                data=json.dumps({
+                    "requestId": "packaged-skill-smoke",
+                    "method": "agent.skills",
+                    "params": {"locale": "zh-CN"},
+                    "context": {"locale": "zh-CN"},
+                }).encode("utf-8"),
+                headers={
+                    "Authorization": "Bearer smoke-token",
+                    "Content-Type": "application/json",
+                },
+            )
+            with urlopen(request, timeout=10) as response:
+                skills_response = json.load(response)
+            skills = skills_response.get("data") if skills_response.get("ok") is True else None
+            skill_ids = {item.get("id") for item in skills if isinstance(item, dict)} if isinstance(skills, list) else set()
+            expected = {
+                "builtin.continuity-review",
+                "builtin.novel-bootstrap",
+                "builtin.style-skill-extractor",
+            }
+            if not expected.issubset(skill_ids):
+                raise RuntimeError(f"Packaged Agent runtime built-in skills smoke failed: {skills_response}")
+            print(f"[agent-runtime] built-in skills smoke passed: {sorted(expected)}")
         finally:
             if process.poll() is None:
                 process.terminate()

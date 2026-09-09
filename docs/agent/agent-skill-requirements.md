@@ -123,11 +123,15 @@ Run 开始时锁定的 Skill ID、Revision、内容哈希、解析来源和必�
 
 ### 5.7 Skill Creator
 
-系统内置的元能力，负责把用户的自然语言创建意图和允许读取的来源材料转换为一个或多个 AgentSkillDraft。Skill Creator 只定义创建方法；资料读取、模型调用、校验、试运行和保存由受控 Authoring Toolchain 执行。
+系统内置的元能力，负责把用户的自然语言创建意图和允许读取的来源材料转换为一个或多个可审核 Skill。Skill Creator 采用 SQLite 虚拟文档式 Agent Authoring：先在应用管理的持久化 Draft 中创建或修改逻辑名为 `SKILL.md` 和可选 Markdown references 的文本文档，再反复读取、校验和修订；验证通过后才编译领域字段。Pack 标题与 Operation/Role 绑定继续使用现有小型结构化 `draftJson.pack`，不新增 Pack 文件格式。Skill Creator 只定义创建方法；资料读取、工作区文档操作、模型调用、校验、试运行和保存由受控 Authoring Toolchain 执行。
 
 ### 5.8 AgentSkillDraft
 
 尚未成为正式 Revision 的可编辑、可预览、可试运行草稿。自然语言创建、自动提炼和导入冲突处理都必须先形成 Draft；用户确认后才能提交为 Skill Definition 与不可变 Revision。
+
+### 5.8.1 AgentSkillAuthoringWorkspace
+
+Skill 创建和更新期间的虚拟文档视图，不新增独立持久化实体：现有 `AgentSkillDraft` 就是工作区，逻辑 `SKILL.md` 和 references 保存在 `draftJson.authoring.documents`。`upsertDraft` 加固为数据库条件更新 CAS 后，每次文档修改复用 `AgentSkillDraft.version` 原子更新 `draftJson`；工作区编译结果写回同一 Draft 的现有 `definition/revision` 或 `skills/pack` 字段。它不对应模型可访问的本地目录，也不能绕过用户审核直接创建正式 Revision。
 
 ### 5.9 Skill Pack
 
@@ -178,8 +182,12 @@ Renderer Agent Workspace
           -> 当前对话 / 当前小说 / 附件 / 本地文档
           -> 全局外部研究能力启用时的 Web Search
           -> 标记为低置信度的模型已有知识
-      -> AgentSkillDraft / SkillPackDraft
-      -> 预览 / 试运行 / 用户确认
+      -> 隔离 AgentSkillAuthoringWorkspace
+          -> workspace.create / read / write / patch / list
+          -> workspace.validate -> 结构化诊断
+          -> 根据诊断读取并修订文件
+      -> 编译到同一 AgentSkillDraft 的 definition/revision 或 skills/pack
+      -> 文档 Diff / 预览 / 试运行 / 用户确认
       -> Electron Main 保存 Revision
   -> AgentSkillResolver
       -> Built-in Skill Registry
@@ -201,12 +209,14 @@ Renderer Agent Workspace
 核心边界：
 
 - Electron Main 是用户和小说级 Skill 持久化的唯一写入边界。
+- Electron Main 同时是 Authoring Workspace 的唯一数据库写入边界；模型只能调用限定现有 `draftId`、逻辑文档路径、文本类型、大小和 Draft version 的受控 Tool，不能直接访问 SQLite、取得数据库句柄或任意文件系统权限。
 - Python Runtime 负责合并 Skill 来源、解析 Skill、编译 Prompt 片段和记录执行快照。
 - Renderer 不直接读取 Skill 文件或数据库表。
 - SkillResolver 只选择 Skill，不决定 Tool 权限。
 - SkillCompiler 只生成受限 Prompt 片段，不执行 Tool。
-- Skill Creator 不能直接访问网络、文件或数据库；Authoring Toolchain 根据 Runtime Policy 和用户选择调用受控来源能力。
-- 所有自然语言创建和更新先生成 AgentSkillDraft，不直接覆盖或创建正式 Revision。
+- Skill Creator 不能直接访问网络、任意本地文件或数据库；Authoring Toolchain 根据 Runtime Policy 和用户选择调用受控来源能力及工作区文档 Tool。
+- 所有自然语言创建和更新先创建 `editing` AgentSkillDraft，以其 Authoring Workspace 视图迭代文档，再把领域字段编译回同一 Draft；任何阶段都不得直接覆盖或创建正式 Revision。
+- 大段 Skill 正文、方法、示例和 references 以工作区文本文档生成和修订，不要求模型一次返回嵌套 AgentSkillDraft JSON；结构化契约只约束 Tool 参数、验证诊断、状态转换和最终编译/发布命令。
 - Skill Pack 只保存解析绑定，不授予工具权限，也不突破单 Operation 的主/辅助 Skill 数量限制。
 - Planner 和 Toolchain 可以消费 Skill，但必须继续经过 Runtime Policy。
 - 任何生成内容继续进入 DraftSession，未经用户确认不写回小说数据。
@@ -276,7 +286,7 @@ Toolchain 不直接按 Skill 文本新增底层工具调用。其允许 Tool 集
 
 ### 8.6 与 Skill Creator 和来源解析
 
-通用 Creator 使用 `builtin.skill-creator` 方法，第一阶段提供以下 Creator Profile：
+通用 Creator 使用内部元能力标识 `builtin.skill-creator`。它对应 `agent.skill.author` 调用中的 Creator Profile 和受版本控制的系统提示，不作为普通 `AgentSkillDefinition` 注册，也不出现在可选择、可绑定 Operation 的运行时 Skill 列表中；`/` 面板的“创建 Skill”动作直接进入该 Authoring 流程。第一阶段提供以下 Creator Profile：
 
 - `blank`：从零创建。
 - `from_conversation`：把当前对话中的稳定要求保存为 Skill。
@@ -584,7 +594,7 @@ class AgentSkillDraft(BaseModel):
 
 规则：
 
-- Creator 输出必须先通过固定 Schema 解析，模型不能直接构造数据库写入参数。
+- Creator 的主要创作输出是 Authoring Workspace 中的受控文本文档，不再要求一次性返回完整 AgentSkillDraft JSON。只有确定性 `workspace.compile` 可以把已验证文档转换为同一 Draft 中固定 Schema 的 `definition/revision` 或 `skills/pack`；模型不能直接构造正式 Skill 的数据库写入参数。
 - User/Novel Scope 的新 Skill 至少包含一个 `triggerHints`；`semanticSelection=auto` 时还必须包含一个有效 `antiTriggerHints`，并通过正反触发验证。
 - `ready_for_review` 要求 Schema 通过且内容质量没有 failed；独立泛化验证不可用时可以带明确 warning 进入审核，但不能显示为已通过。
 - `expectedCurrentRevisionId` 用于更新时的乐观并发校验。
@@ -622,14 +632,133 @@ class AgentSkillPackDraft(BaseModel):
 
 Pack 解析时按当前 Operation 和 Role 选择对应 Binding，再将锁定的主、辅助 Revision 分别交给普通 SkillResolver 校验。`auxiliarySkillId` 与 `auxiliaryRevisionId` 必须同时为空或同时存在。Pack 不是 `composite` Skill，不允许把所有成员正文无条件拼接；成员 Skill 后续更新不会改变旧 Pack Revision 的行为。
 
+### 11.7 SQLite 虚拟文档式 Authoring Workspace
+
+#### 11.7.1 工作区结构
+
+单 Skill 工作区至少包含一条逻辑路径为 `SKILL.md` 的文档记录；多 Skill/Pack 工作区只增加成员逻辑路径。下列是虚拟文档树，不要求磁盘上存在对应目录：
+
+```text
+authoring-workspace/
+  language-style/
+    SKILL.md
+    references/
+      evidence-summary.md
+  suspense-release/
+    SKILL.md
+  ensemble-progression/       # 可选
+    SKILL.md
+```
+
+首期模型可写文档限定为：
+
+- 根目录或一级成员目录中的 `SKILL.md`。
+- `references/**/*.md` 文本资料；不得写入完整来源正文，只保存允许持久化的摘要、方法证据和引用。
+- 可选的产品 UI 元数据文档只能由确定性编译器生成，模型不得自行扩展可执行字段。
+
+Pack 标题、说明和 Operation/Role 主辅助成员绑定继续使用现有 `draftJson.pack` 领域结构，由带小型契约的 `agent_skill.workspace.set_pack` 更新；不得为此新增 `PACK.yaml`、第二套解析器或平行持久化格式。
+
+工作区文档作为现有 `AgentSkillDraft.draftJson.authoring.documents` 保存在 SQLite，不为模型创建物理目录。逻辑路径不允许绝对路径、父目录跳转、隐藏执行文档或任意扩展名；内容不允许脚本、二进制或远程 include。Renderer、模型 Prompt 和会话记录只使用现有不透明 `draftId` 与逻辑相对路径。
+
+#### 11.7.2 工作区状态
+
+```text
+collecting_sources
+  -> authoring
+  -> validating
+  -> revising
+  -> compiled
+
+AgentSkillDraft.status:
+editing -> ready_for_review -> committed
+                         \-> discarded
+```
+
+`collecting_sources/authoring/validating/revising/needs_attention` 是 `draftJson.authoring.phase`，不扩展数据库 `AgentSkillDraft.status`；对外状态继续只使用现有 `editing/ready_for_review/committed/discarded`。发布失败保留 Draft 为 `ready_for_review` 并复用现有提交重试，不新增 `publish_failed` 数据库状态。应用退出、Runtime 重启或模型请求失败后从最近一次 `AgentSkillDraft.version` 恢复，不要求重新读取已经形成 Snapshot 的来源，也不丢弃已通过校验的成员 Skill。
+
+建议嵌入现有 `draftJson` 的结构：
+
+```python
+class AgentSkillAuthoringDocument(BaseModel):
+    logicalPath: str
+    mediaType: Literal["text/markdown", "application/yaml"]
+    contentText: str
+    contentHash: str
+    deleted: bool = False
+
+
+class AgentSkillAuthoringState(BaseModel):
+    schemaVersion: Literal["agent-skill-authoring-v1"]
+    phase: Literal[
+        "collecting_sources", "authoring", "validating", "revising", "needs_attention", "compiled"
+    ]
+    documents: list[AgentSkillAuthoringDocument]
+    sourceSnapshotRefs: list[str] = Field(default_factory=list)
+    validationReport: dict | None = None
+    authoringInputHash: str
+    validatedInputHash: str | None = None
+    compiledInputHash: str | None = None
+```
+
+同一次文档操作读取现有 `draftJson`、修改 `authoring.documents`、重算内容哈希，并使用现有 `expectedVersion` 更新整条 AgentSkillDraft；成功后由现有 Store 递增 `version`。单个 Draft 继续受已有 256 KiB 上限保护；为给编译后的领域字段、来源摘要和验证报告留出空间，`authoring.documents` 正文合计默认不超过 96 KiB，单个 `SKILL.md` 默认不超过 32 KiB。首期不保存完整来源正文或大量中间历史。文档正文不进入普通日志、SSE 事件或会话消息。
+
+`authoringInputHash` 由未删除文档的逻辑路径、媒体类型、内容哈希以及现有 Pack 标题/说明/绑定规范化计算。任何 `write/patch/remove/set_pack` 都必须重算该哈希，将 phase 退回 `authoring`，并清空 `validatedInputHash/compiledInputHash`；可以保留旧领域投影供 Diff，但不得把它当成可提交结果。`validate` 成功写入 `validatedInputHash`，`compile` 只接受相同哈希并写入 `compiledInputHash`。Authoring Draft 提交时必须满足三者相等且 `status=ready_for_review`；否则返回“草稿已变化，需要重新检查”，不允许沿用当前 `commitDraft` 对普通 `editing` Draft 的宽松兼容。
+
+#### 11.7.3 受控文档工具
+
+Authoring Toolchain 只开放以下语义 Tool。Tool 由 Electron Main 通过现有 `AgentSkillStore.getDraft/upsertDraft` 操作 `draftJson.authoring`，不向模型提供通用 SQL、数据库连接、Shell 或任意文件工具：
+
+| Tool | 用途 | 关键约束 |
+| --- | --- | --- |
+| `agent_skill.workspace.create` | 创建空白或基于既有 Revision 的 Draft 工作区 | 返回现有 `draftId/version`；不能覆盖其他 Draft |
+| `agent_skill.workspace.list` | 列出允许文档与哈希 | 只返回逻辑路径，不暴露表结构或数据库路径 |
+| `agent_skill.workspace.read` | 读取一个允许文本文档 | 单次和累计 Token 上限 |
+| `agent_skill.workspace.write` | 创建或完整替换一个文本文档 | 要求 `expectedVersion`，复用 Draft 乐观并发 |
+| `agent_skill.workspace.patch` | 对现有文本文档执行有界修改 | 要求 `expectedVersion + expectedContentHash`，冲突时拒绝 |
+| `agent_skill.workspace.remove` | 标记草稿文档已删除 | 保留在同一 `draftJson` 直到提交或丢弃，便于恢复 |
+| `agent_skill.workspace.set_pack` | 更新 Pack 标题、说明与成员绑定 | 复用现有 `draftJson.pack` Schema，不承载 Skill 正文 |
+| `agent_skill.workspace.validate` | 解析并校验整个工作区 | 只读、确定性，返回文件/行级诊断 |
+| `agent_skill.workspace.compile` | 生成或更新同一 Draft 的领域字段 | 只有验证无阻塞错误时允许 |
+| `agent_skill.workspace.diff` | 从空白或锁定的目标 Skill Revision 生成审核 Diff | 不新增文档 revision 表，不调用模型 |
+
+Tool 调用参数和返回值仍必须使用平台注册的小型结构化契约。文档正文作为字符串传输，由 Main 写入 `draftJson.authoring.documents[].contentText`，不要求模型输出包含全部 Skill/Pack 的业务 JSON。`write/patch/remove` 不能接受任意 SQL、表名、where 条件或数据库路径。
+
+`patch` 首期只接受 `expectedContentHash + oldText + newText`，并要求 `oldText` 在目标文档中恰好出现一次；零次或多次匹配均返回版本/内容冲突并要求重新 `read`。不实现 unified diff、行号补丁、模糊匹配或自动合并。
+
+#### 11.7.4 校验—修订循环
+
+标准 Authoring 回路：
+
+1. Creator 根据用户目标和来源 Snapshot 规划需要创建的逻辑文档，但不生成最终数据库对象。
+2. 模型通过 `write/patch` 形成 `SKILL.md` 和可选 references；需要 Pack 时通过 `set_pack` 写入现有小型领域结构。
+3. Toolchain 调用确定性 `workspace.validate`，检查格式、能力引用、预算、安全、来源覆盖、污染、成员引用和 Pack 绑定。
+4. 如果存在可修复诊断，模型只读取相关文档和诊断，执行最小修改，然后再次验证；不得重做来源检索或覆盖已合法文档。
+5. 自动修订最多 4 轮或达到 Authoring Token/时间预算；耗尽后工作区进入 `needs_attention`，保留文件、诊断和“继续修改”入口，不显示 JSON 修复。
+6. 无阻塞错误后由确定性编译器把 `definition/revision` 或 `skills/pack` 写回同一 AgentSkillDraft，进入文档 Diff、字段投影、试运行和用户审核。
+7. 用户确认后，Electron Main 先校验当前输入、验证和编译哈希一致，再在单一事务中创建不可变 Revision、Pack Revision 和绑定；发布失败保留 `ready_for_review` Draft 并重试提交，不重新调用创作模型。
+
+模型写入文档后必须通过 `read` 或 `validate` 获得当前 Draft version 中的真实已提交状态，不能仅依据上一轮生成文本宣称完成。验证器诊断至少包含稳定 `code`、逻辑 `path`、可选行列、`severity`、产品化说明和可选修复建议；模型可读取技术细节，普通用户默认只看文档 Diff 与可操作问题摘要。
+
+#### 11.7.5 验证边界
+
+工作区验证分为四层：
+
+1. **文档安全**：逻辑路径、媒体类型、大小、数量、编码和累计预算；SQLite 表与任意 SQL 永远不可由模型指定。
+2. **语法与引用**：Frontmatter/YAML、必填段落、Operation/Role/成员 ID、Pack 引用和变量声明。
+3. **产品领域**：触发正反例、指导自由度、权限不扩张、渐进加载、内容预算、来源覆盖和污染检查。
+4. **质量验证**：Prompt 预览、正反触发测试、留出样本或中性任务试运行。
+
+前 3 层无阻塞错误是 `ready_for_review` 的必要条件；第 4 层无法执行时允许带 warning 审核，但不得显示为泛化验证通过。正式发布校验现有 `AgentSkillDraft.version` 与三项 authoring hash，防止审核后文档或 Pack 绑定被静默改变。
+
 ## 12. 持久化设计
 
 ### 12.1 Canonical Source
 
 - Built-in Skill：随 Python Runtime 打包，内容不可变。
 - User/Novel Skill：保存在 Electron Main 管理的 SQLite/Prisma 数据库中。
+- Authoring Workspace：复用 `AgentSkillDraft`；虚拟文档、阶段和验证报告保存在 `draftJson.authoring`，并发与恢复复用 Draft `version/status`。它是可恢复创作视图，不是新增持久化源。
 - Python AgentSkill Registry：运行时合并视图，不是用户 Skill 的持久化源。
-- 导入导出的 Markdown 文件只是交换格式，不是运行时唯一数据源。
+- 发布时由确定性编译器把已验证工作区文档转换为数据库 Definition/Revision；导入导出的 Markdown 文件和 SQLite 工作区文档都不是正式运行时唯一数据源。
 
 ### 12.2 建议表
 
@@ -709,7 +838,9 @@ AgentSkillPackRevision
 - Python Runtime 不直接访问这些表，通过 Electron Automation/IPC 获取。
 - 删除采用归档；被历史 Run 引用的 Revision 不物理删除。
 - Skill 更新使用乐观并发版本，避免多窗口覆盖。
-- 备份恢复应包含 User/Novel Skill、Revision 和 Binding。
+- `draftJson.authoring.documents[].logicalPath` 必须在单个 Draft 内唯一；文档修改通过 `UPDATE ... WHERE id=? AND version=?` 比较交换原子替换整个 `draftJson`，不新增 Workspace/Document/Operation 表。现有 `upsertDraft` 只在更新前读取并比较 version 的实现必须先改为数据库条件更新，避免并发请求同时通过检查。
+- 模型不得提交 SQL、表名或数据库路径；所有读写由 Main 将语义 Tool 参数转换为现有 Draft Store 操作。
+- 备份恢复继续包含 User/Novel Skill、Revision、Binding 和未提交 AgentSkillDraft，无新增备份实体。
 - Skill 内容不得包含或导出 AI API Key、访问令牌和 Provider 私密设置。
 - Draft 和 Derivation Report 只保存来源摘要、引用、哈希、覆盖度和警告；不得复制完整本地小说、网页正文或附件正文。
 - Pack Revision 与 Skill Revision 一样不可变；成员 Skill 更新不会静默改变旧 Pack Revision。
@@ -764,7 +895,9 @@ apps/desktop/
 
 ## 14. Skill 文件格式
 
-导出使用单文件 `SKILL.md` 作为可读交换格式；导入同时支持单文件 `SKILL.md` 和用户授权选择的本地 Skill 目录。目录导入不是把原始目录直接注册为运行时 Skill，而是先形成受控的目录快照，再由模型转换为本产品的声明式 Draft。第一阶段不执行脚本、不读取二进制附件、不自动加载远程引用。
+需要区分两类载体：Authoring Workspace 是 SQLite 中的产品内部虚拟文档；导出的 `SKILL.md` 是用户可携带的真实文件交换格式。二者都必须经过确定性编译后才形成数据库 Revision，不能因为文档或文件存在就直接注册为运行时 Skill。
+
+单 Skill 导出继续使用现有单文件 `SKILL.md` 交换格式；Pack 分发格式不在本阶段新增。导出时由 Main 从 SQLite Draft/Revision 生成文件；导入时由 Main 把用户授权选择的单文件或本地 Skill 目录扫描为只读 Snapshot，再写入新的 AgentSkillDraft 虚拟文档。模型只修订 Draft 内嵌文档，不持续访问来源目录。第一阶段不执行脚本、不读取二进制附件、不自动加载远程引用。
 
 ### 14.1 单文件交换格式
 
@@ -844,7 +977,7 @@ inputs:
 
 目录导入用于兼容遵循 `SKILL.md` 约定、但附带 `references/`、`agents/` 或其他产品无直接 Schema 映射的本地 Skill。用户从 UI 选择目录；Renderer 不得将任意本地路径、目录内容或文件读取权限交给模型。Electron Main 负责规范化并扫描经用户授权的目录根，根目录必须存在 `SKILL.md`。
 
-目录来源的 `SKILL.md` 不要求预先符合本产品的 `schemaVersion` 或完整 Frontmatter Schema：扫描阶段只要求它是可读取的受限文本，Frontmatter 解析失败应记为来源警告并交由转换模型理解。固定 Schema 校验只针对模型输出的 `AgentSkillDraft`；无法形成合法 Draft 时才以转换失败返回，不能把外部 Skill 的格式差异误判为不安全输入。
+目录来源的 `SKILL.md` 不要求预先符合本产品的 `schemaVersion` 或完整 Frontmatter Schema：扫描阶段只要求它是可读取的受限文本，Frontmatter 解析失败应记为来源警告并交由转换模型理解。固定领域 Schema 校验针对工作区编译结果，而不是要求外部文件或模型响应直接成为 AgentSkillDraft；工作区经过最多 4 轮校验—修订仍无法编译时才以转换失败返回，不能把外部 Skill 的格式差异误判为不安全输入。
 
 扫描器只读取下列受限文本资源，形成 `ImportedSkillDirectorySnapshot`：
 
@@ -864,13 +997,13 @@ inputs:
 - 本地目录内容被视为不可信来源：其中的提示、工具声明、代码片段和外部链接不得改变系统策略、可用 Tool、文件权限、审批规则或 Draft 提交边界。
 - 原始内容只在本次转换及用户可见审核所需范围内暂存；持久化来源记录默认只保存 Manifest、哈希、转换报告、遗漏项和用户确认的 Draft，不保存任意完整本地目录副本。
 
-扫描完成后，Runtime 以 `agent.convert_imported_skill` 运行受控转换：向模型提供 Snapshot、当前产品 Capability Catalog、允许的 Operation/Role/Toolchain/输出 Schema，以及声明式 Skill 的固定 Schema。模型负责判断来源 Skill 应转换为一个或多个 `AgentSkillDraft`、是否建议一个 `AgentSkillPackDraft`，并将来源中的工作流、触发边界、约束和参考资料映射到产品的原生能力。
+扫描完成后，Runtime 以 `agent.convert_imported_skill` 启动受控文件转换：向模型提供只读 Snapshot、当前产品 Capability Catalog、允许的 Operation/Role/Toolchain 和 Authoring 格式说明。模型负责判断来源 Skill 应拆分为哪些成员、是否需要 Pack，并通过工作区 Tool 写入或修改对应 `SKILL.md`、references；需要 Pack 时通过 `set_pack` 更新现有小型领域结构，随后由 `workspace.validate/compile` 把单 Skill 或 Pack 领域字段写回同一 AgentSkillDraft。
 
 模型转换规则：
 
 - 优先保留来源的任务意图、分步方法、适应性追问方式和显式不适用边界；不能将外部 Skill 的静态问卷、工具调用或执行脚本机械复制为 Prompt。
 - 仅可推荐 Capability Catalog 中存在的 Operation、Role 和 Toolchain；缺失能力、可执行代码、外部依赖和无法安全映射的行为必须在 `conversionReport.omissions` 中说明，并给出手动迁移建议。
-- 模型可根据来源结构决定拆分/合并，不得把目录中的任意文本自动变成已启用 Skill，也不得直接创建 Revision、Binding 或访问本地文件。转换结果必须先通过现有 Schema、预算、触发边界、权限和污染校验。
+- 模型可根据来源结构决定拆分/合并，不得把目录中的任意文本自动变成已启用 Skill，也不得直接创建 Revision、Binding 或访问来源目录。转换工作区必须先通过文件安全、Schema、预算、触发边界、权限和污染校验。
 - UI 必须展示来源 Manifest、模型的映射理由、生成的 Draft/Pack Draft、跳过文件和遗漏能力；用户可编辑、删除或合并 Draft，只有明确“保存创作技能”后才创建 Revision 和绑定。
 
 建议目录导入预算：最多 40 个可读取文件、总计 256 KiB、单文件 64 KiB、进入模型的目录快照不超过 24,000 估算 Token。实现可以进一步收紧，但不得静默放宽；超预算目录可由用户缩减后重试。
@@ -1117,9 +1250,13 @@ Skill Creator 首屏允许：
 
 Creator 先以对话方式确认用途、至少一个正向使用样例、容易混淆的不适用场景和期望产物。信息已经能从请求或来源可靠推断时直接填入 Draft，不重复追问；需要追问时一次只提出最影响结果的问题。Creator 同时推荐指导自由度，并用“自适应 / 引导式 / 严格”的产品语言解释影响。
 
-一次生成多个 Draft 时先展示拆分建议，用户可以删除、合并、改名或调整适用 Operation，再进入逐项预览。Skill Pack Draft 单独展示各 Operation 的主/辅助绑定，不展示为一段合并 Prompt。
+确认输入后进入可恢复 Authoring Workspace。对话原位展示“正在创建技能文档 / 正在检查 / 正在根据检查结果修改 / 等待审核”，不展示大 JSON、字段路径或内部 Schema；用户可以展开查看虚拟文档树、验证摘要和每轮修改。模型写入后必须调用验证器，并依据文档/行级诊断修改原文档。
 
-Draft 审核至少展示：名称、用途、正向/反向触发样例、指导自由度、来源覆盖、置信度、适用 Role/Operation、方法步骤、约束、禁止事项、输出要求、Token 估算、污染警告和试运行结果。只有“保存创作技能”动作可以提交正式 Revision。
+一次生成多个 Skill 时先在工作区形成成员逻辑路径，并通过 `set_pack` 形成现有 Pack 领域结构，再展示拆分建议。用户可以删除、合并、改名或调整适用 Operation；这些操作修改同一 AgentSkillDraft 并递增 version，然后重新编译。Skill Pack Draft 单独展示各 Operation 的主/辅助绑定，不展示为一段合并 Prompt。
+
+Draft 审核至少展示：虚拟文档树与逻辑路径、相对基线的文本 Diff、名称、用途、正向/反向触发样例、指导自由度、来源覆盖、置信度、适用 Role/Operation、方法步骤、约束、禁止事项、输出要求、Token 估算、污染警告和试运行结果。普通用户默认看到领域投影和可读 Diff，诊断详情按需展开。只有“保存创作技能”动作可以提交正式 Revision。
+
+当 `compiledInputHash != authoringInputHash` 时，Renderer 不得继续展示旧领域投影为“待审核”，只显示“内容已变化，正在重新检查”或当前文档 Diff；重新验证和编译完成后才恢复提交按钮。
 
 ### 19.6 试运行
 
@@ -1155,6 +1292,11 @@ Renderer 不直接访问数据库或本地 Skill 文件。
 | `db:discard-agent-skill-draft` | 丢弃或归档 Draft |
 | `db:get-agent-skill-packs` | 读取可见 Pack 摘要和当前 Revision |
 | `db:commit-agent-skill-pack-draft` | 提交 Pack Revision 与 Operation 绑定 |
+| `agent-skill-workspace:create` | 创建或恢复带 `draftJson.authoring` 的 AgentSkillDraft |
+| `agent-skill-workspace:list/read/write/patch/remove` | 由 Main 对 Draft 内嵌文档执行固定、带 expectedVersion 的原子操作 |
+| `agent-skill-workspace:validate` | 确定性校验工作区并保存诊断报告 |
+| `agent-skill-workspace:compile` | 在无阻塞错误时生成/更新同一 Draft 的领域字段 |
+| `agent-skill-workspace:diff` | 返回基线与指定 workspace revision 的可审核 Diff |
 
 建议 Runtime API：
 
@@ -1163,8 +1305,8 @@ Renderer 不直接访问数据库或本地 Skill 文件。
 | `agent.skills` | 返回合并后的可见 Skill 摘要 |
 | `agent.skill.resolve` | 调试或 UI 预览解析结果；正常 Run 内部直接调用 Resolver |
 | `agent.skill.preview` | 编译 Skill Prompt 区段并返回诊断 |
-| `agent.skill.author` | 启动或继续自然语言 Authoring 流程，返回 Skill Draft/Pack Draft |
-| `agent.convert_imported_skill` | 将受控本地目录 Snapshot 和产品能力目录转换为一个或多个可审核 Skill Draft/Pack Draft |
+| `agent.skill.author` | 启动或继续 SQLite 虚拟文档式 Authoring，返回工作区状态与可审核 Draft 引用，不返回完整 Skill 大 JSON |
+| `agent.convert_imported_skill` | 将受控本地目录 Snapshot 转换到隔离工作区，经验证编译为一个或多个 Draft/Pack Draft |
 | `agent.skill.validate_draft` | 运行 Schema、预算、安全、污染、触发边界、内容精简和可执行性检查 |
 | `agent.skill.test_draft` | 使用模拟或选定上下文试运行，不提交 Revision |
 | `agent.skill.pack.resolve` | 调试或预览 Pack 在当前 Operation 下的主/辅助 Skill |
@@ -1283,7 +1425,7 @@ class ToolchainDefinition(BaseModel):
 ### 创建
 
 - 用户可以通过自然语言、`/skill create`、快捷面板、结构化编辑器或导入文件发起创建。
-- Creator 先生成持久化 AgentSkillDraft；保存前完成 Schema、变量、预算、安全、来源覆盖和污染检查。
+- Creator 先创建 `editing` AgentSkillDraft，并以其 SQLite 虚拟文档视图完成校验—修订循环；确定性编译成功后才补齐同一 Draft 的领域字段。保存前再次完成 Schema、变量、预算、安全、来源覆盖和污染检查。
 - 用户确认 Draft 后才创建 Skill Definition 和第一个 Revision。
 
 ### 编辑
@@ -1479,14 +1621,16 @@ class ToolchainDefinition(BaseModel):
 
 ## 29. 分阶段交付
 
-### 29.0 当前实现快照（2026-08-04）
+### 29.0 当前实现快照（2026-08-22）
 
 - 已完成 AS-0 基础纵切，并新增 `builtin.novel-bootstrap@1.0.0` 与 `builtin.style-skill-extractor@1.0.0`。新建小说复用现有推荐式问答卡；文风提炼固定拆分语言风格、悬念与信息释放，以及证据充分时的群像推进。
 - 已建立 `AgentSkill`、不可变 `AgentSkillRevision`、`AgentSkillBinding`、`AgentSkillDraft`、`AgentSkillPack` 与不可变 `AgentSkillPackRevision` 持久化。Draft 更新使用版本乐观锁，提交要求显式 `confirmed=true`，内容生成 SHA-256 哈希。
-- 已实现 `agent.skill.author`：`/` 面板的“创建 Skill”接受自然语言描述，模型返回结构化候选后只保存 `ready_for_review` Draft，不直接创建 Revision。
-- “文风 Skill 提炼”完成后会同时生成可阅读 Artifact 与可恢复 Pack Draft；产物面板提供“确认发布 / 放弃草稿”。确认发布在单一事务中创建 2–3 个成员 Skill Revision、Pack Revision 和 Operation/Role 主辅助绑定，任一步失败均不留下部分结果。
+- `agent.skill.author` 已切换到 SQLite 虚拟文档链路：先创建 `editing` Workspace，模型只生成完整 `SKILL.md` 文本，Main 通过受控 write 保存后确定性校验；诊断失败时最多修订 4 轮，成功才 compile 为 `ready_for_review`，耗尽则保留 `needs_attention`。旧 `agent.generate_skill_draft` 方法、Prompt 和契约已删除。
+- “文风 Skill 提炼”主链已切换为“小型成员规划 → 同一 SQLite Workspace 逐成员写入 `SKILL.md` → 确定性校验/局部修订 → 编译 Artifact”；完成后同时得到可阅读 Artifact 与可恢复 Pack Draft。产物面板继续提供“确认发布 / 放弃草稿”，确认发布仍在单一事务中创建 2–3 个成员 Revision、Pack Revision 和绑定。
 - `agent.skills` 已合并 Built-in、User 与当前 Novel Skill；已发布 Pack Binding 参与 Resolver，并在 Plan/Run 中锁定成员 Revision 与 contentHash。
-- 尚未完成：通用 Draft 字段编辑器、Prompt 预览与 A/B 试运行、更新既有 Skill 的完整 UI、附件/本地 TXT/Web Search Source Resolver、SKILL.md 导入导出。
+- 已完成 AS-1a 存储与发布内核：`draftJson.authoring`、原子 CAS、受控 create/list/read/write/patch/remove/set_pack/validate/compile/diff、三项输入哈希失效门禁、单 Skill 与 2–3 成员 Pack 确定性编译、旧 Draft 兼容和现有事务发布；未新增 Prisma 表或物理工作区。
+- 尚未完成：工作区虚拟文档树与逐行 Diff UI、通用 Draft 字段编辑器、Prompt 预览与 A/B 试运行、更新既有 Skill 的完整 UI、来源覆盖/污染的更强确定性语义校验、附件/本地 TXT/Web Search Source Resolver、SKILL.md 导入导出。
+- 2026-08-22 已完成平台 SO-0 与 SO-1 首轮门禁：当前 19 个已注册结构化 Agent 方法均使用深层输出契约，生成、上下文预算、原始结果、规范化结果和修复阶段复用同一 TypeScript 契约；恢复链不再忽略 Python 返回的未解决校验问题。旧文风 Pack 大 JSON 方法及其契约已退出注册表。跨 TypeScript/Python 的单一契约源、Fixture 生成与 CI 漂移检查仍按 `retry-failover-resilience-requirements.md` 的 SO-2 推进。
 
 ### Phase AS-0：内置 Skill 基础
 
@@ -1518,17 +1662,55 @@ AS-0b 完成标准：相同章节一致性任务在选用和禁用 Skill 时可�
 
 ### Phase AS-1：用户自定义 Skill
 
-- 建立 AgentSkill、Revision、Binding 持久化。
-- 建立 AgentSkillDraft、Derivation Report、Skill Pack 与 Pack Revision 持久化。
-- 实现通用 `builtin.skill-creator` 和受控 `agent_skill.authoring@1.0.0` Toolchain。
-- 先支持从自然语言、当前对话创建和更新 User Scope Skill，再支持当前小说、附件与本地文档来源。
-- 实现 `/` 快捷面板，分组列出 Built-in、User 和当前 Novel Skill，并支持 Creator/Manager/New Novel 系统动作。
-- 实现 Skill Picker、Creator、Draft 审核、编辑器、Prompt 预览和试运行。
-- 实现触发正反例、指导自由度、三级渐进加载、内容精简检查和独立试运行状态。
-- 支持单文件 `SKILL.md` 交换格式的导入导出，以及由 Main 受控读取本地 Skill 目录、模型转换为审核 Draft 的导入流程。
-- 完成“把当前要求保存为 Skill”和“根据本地作品提炼多个 Skill 并创建 Pack”的端到端验收。
+现有 Definition、Revision、Binding、Draft、Pack 持久化和 `/` 面板继续复用；Creator 生成内核按以下顺序迁移，避免同时重写来源、编辑器和发布链。
 
-#### AS-1b：外部来源提炼
+#### AS-1a：Authoring Workspace 基础
+
+**状态：存储、校验、编译和发布内核已完成；Renderer 专用工作区 UI 待完成。**
+
+1. 不新增 Prisma 表；为现有 `AgentSkillDraft.draftJson` 定义向后兼容的 `authoring-v1` 内嵌文档结构，并复用现有 `status/version/derivationReportJson`。
+2. 先把 `AgentSkillStore.upsertDraft(expectedVersion)` 改为数据库 `updateMany({id, version})` CAS，再实现 `create/list/read/write/patch/remove` 语义操作；完成逻辑路径、256 KiB Draft 总预算、96 KiB 文档预算、编码、内容哈希、并发版本冲突和恢复测试。
+3. 实现确定性 `validate/compile/diff` 和 `authoringInputHash/validatedInputHash/compiledInputHash` 失效门禁；首期只支持单个 `SKILL.md`，编译结果继续写入现有 AgentSkillDraft。
+4. Renderer 增加工作区状态、虚拟文档树、Diff 和诊断摘要；刷新和重启后恢复相同 revision。
+5. 删除 `agent.generate_skill_draft` 与 `agent.generate_style_skill_pack` 的 Prompt、契约、Automation 路由和 Runtime 生成分支；单 Skill 与文风 Pack 只允许走文档工作区链路。
+
+完成标准：可以不用模型，通过 IPC 在现有 AgentSkillDraft 中写入合法虚拟 `SKILL.md`、校验、编译、审核后使用现有事务发布；无需 Prisma migration 或新表，非法文档只产生逻辑路径/行级诊断，不损坏正式 Skill。
+
+#### AS-1b：单 Skill 自然语言 Creator 切换
+
+**状态：主链已切换；取消/超时后的“继续修改”交互与专用 Diff UI 待补。**
+
+1. 将 `builtin.skill-creator + agent_skill.authoring` 改为工具循环：创建工作区、写入 SQLite 文档、验证、根据诊断最多自动修订 4 轮。
+2. 首先覆盖“把当前要求保存为 Skill”和从当前对话创建 User Scope Skill；来源解析与当前实现保持不变。
+3. 模型调用只返回自然语言决策或小型 Tool Call，不再返回完整 AgentSkillDraft JSON。
+4. 加入取消、预算耗尽、模型失败、写入冲突和 `needs_attention` 恢复测试。
+5. 单 Skill 路径稳定后，删除 `agent.generate_skill_draft`，不保留可被历史状态再次调用的大 JSON 兼容适配器。
+
+完成标准：自然语言与 `/skill create` 复用同一虚拟文档链路；模型写入后必经 SQLite 已提交文档的读取/验证，用户能看到 Diff，确认前不创建正式 Revision。
+
+#### AS-1c：文风 Skill Pack 切换
+
+**状态：运行时主链、逐成员持久化、局部修订、编译与现有审核发布衔接已完成；专用文档树/Diff UI 和来源语义校验增强待完成。**
+
+1. 文风提炼在同一 AgentSkillDraft 写入逻辑文档 `language-style/SKILL.md`、`suspense-release/SKILL.md` 和可选群像成员；Pack 标题与绑定通过 `set_pack` 写入现有 `draftJson.pack`。
+2. 验证器检查成员存在、必选维度、Pack Binding、来源覆盖、污染、置信度和 Operation/Role 引用。
+3. 单个成员失败只修订对应文件；已合法成员不重新生成，来源检索不重复执行。
+4. 编译后继续复用现有 Pack Draft 审核和原子发布事务。
+5. 完成现场回归后删除 `agent.generate_style_skill_pack`；命中旧 `generate` 阶段的历史 Run 明确结束并提示新建任务，不再唤醒旧 Prompt。
+
+完成标准：语言风格、悬念和可选群像能逐文件检查、修订和审核；某个成员错误不会让整个工作区丢失，也不会要求用户修复 JSON。
+
+#### AS-1d：更新、导入与旧链路退场
+
+1. 更新既有 Skill 时从锁定 Revision 生成工作区基线，并以 Diff 审核；乐观并发冲突不得覆盖更新期间产生的新 Revision。
+2. 本地 `SKILL.md`/目录导入先形成只读来源 Snapshot，再复制或转换到隔离工作区，不直接生成数据库 Draft。
+3. 补齐附件、本地 TXT、当前小说来源与 Prompt 预览、触发正反例、A/B 或中性任务试运行。
+4. 迁移旧的未提交 AgentSkillDraft；无法无损转换时保留只读审核与重新创建入口，不静默丢弃。
+5. 移除新路径对 Creator 大 JSON 契约和模型 JSON 修复的依赖；平台结构化契约继续保护 Tool、状态、诊断和发布命令。
+
+完成标准：创建、更新、拆分、组合 Pack 和导入全部使用同一工作区状态机；旧结构化 Creator 不再出现在路由表，但历史 Run 仍能明确恢复或结束。
+
+#### AS-1e：外部来源提炼
 
 - **状态：延期。** 当前实现不提供真实互联网检索；`search.query` 继续只检索当前小说，所有现有考据链保持 `externalSearchAvailable=false`。
 - 恢复时接入独立 `web.search` / `web.fetch`，不复用项目内 `search.query`。
@@ -1576,12 +1758,12 @@ AS-3 不进入当前 Agent Phase 2 的交付承诺。
 2. IntentService 输出 `skillAuthoring.action=create`、`creatorProfile=style_from_work` 和作品名称 source hint。
 3. Source Resolver 先查当前小说、附件和本地文档；没有正文样本且全局外部研究能力可用时，自动检索公开资料；能力不可用时仅基于已有知识生成低置信度候选，并说明资料不足。
 4. 外部研究启用时，Toolchain 自动记录查询、公开 URL、资料类型和覆盖度；不得下载来源不明的完整作品。
-5. Creator 根据证据提出三个 Draft：语言风格、悬念与信息释放、群像人物推进，并提出一个 Pack Draft。
-6. 没有正文样本时，语言风格 Draft 标记低置信度；公开评论支持的叙事机制可以标记中等置信度。
-7. 污染检查移除人物名、专有名词、剧情复制、标志性原句和过长连续文本。
-8. 用户在 Draft 审核页修改名称、正反触发样例、指导自由度、规则、Operation 和 Pack 绑定，并使用未参与提炼的中性文本执行 A/B 试运行。
-9. 用户确认后，Electron Main 创建三个 Skill Definition/Revision 和一个 Pack Revision。
-10. 返回会话后再次输入 `/`，新建的 User Scope Skill 和 Pack 出现在“我的创作技能”分组；选择 Skill 或 Pack 后输入区显示对应的结构化芯片。
+5. Creator 创建 `editing` AgentSkillDraft，分别写入逻辑路径对应的语言风格、悬念与信息释放、可选群像人物推进 `SKILL.md` 文档，并通过 `set_pack` 更新小型 Pack 领域结构；不得一次返回包含全部 Skill 正文的 Pack JSON。
+6. Creator 调用 `workspace.validate`。没有正文样本时，语言风格文件被标记为低置信度；公开评论支持的叙事机制可以标记中等置信度。
+7. 污染检查以文件/行级诊断指出人物名、专有名词、剧情复制、标志性原句和过长连续文本；Creator 最小修改对应文件并再次验证，最多自动修订 4 轮。
+8. 验证通过后，确定性编译器在同一 Pack Draft 中生成三个成员领域对象和 Pack 领域对象。用户在审核页查看文档 Diff，修改名称、正反触发样例、指导自由度、规则、Operation 和 Pack 绑定，并使用未参与提炼的中性文本执行 A/B 试运行。
+9. 用户确认后，Electron Main 校验相同 workspace revision，在单一事务中创建三个 Skill Definition/Revision 和一个 Pack Revision。
+10. 返回会话后再次输入 `/`，新建的 User Scope Skill 和 Pack 出现在“我的创作技能”分组；选择 Skill 或 Pack 后输入区显示对应的结构化芯片。工作区转为 committed 并保留 manifest hash 与发布引用。
 
 通过标准：
 
@@ -1589,6 +1771,8 @@ AS-3 不进入当前 Agent Phase 2 的交付承诺。
 - 资料不足时明确降级，不伪造正文访问和来源。
 - Creator 的 Web/File 读取能力不继承到生成的 Skill。
 - 未确认 Draft 不创建正式 Revision。
+- 模型只能通过语义 Tool 修改指定工作区内的允许文本文档；通用 SQL、数据库连接、表名、绝对路径、任意文件、Shell、脚本和正式 Skill 数据写入均不可用。
+- 模型写完后必须以实际 `read/validate` 结果为准；校验失败只修订相关文件，不能用一次性大 JSON 修复替代文件循环。
 - Pack 按 Operation 解析成员，不突破单次主/辅助 Skill 限制。
 - 应用重启后 Draft、正式 Skill、Pack 和来源摘要可恢复。
 - `/` 列表只读取 Skill 索引元数据；未选中的 Skill 正文和示例不进入上下文。
@@ -1643,24 +1827,29 @@ AS-0 与 AS-1 完成时必须满足：
 14. Python 测试、TypeScript 类型检查、Renderer 构建和现有 Agent 回归测试通过。
 15. Skill 定义包含明确的触发边界、指导自由度和语义选择模式；Creator 能以最少追问生成并验证这些字段，User/Novel Skill 默认只建议而不自动套用。
 16. Skill 使用三级渐进加载，真实使用反馈只能产生新的更新 Draft 和不可变 Revision。
+17. Skill Creator 的主要生成产物是 AgentSkillDraft 内的 SQLite 虚拟文档；只有确定性编译器可以补齐同一 Draft 的领域字段，模型不能直接构造正式数据库对象。
+18. 单 Skill 和 Pack 均支持文档写入、读取、校验、最小修订、Diff 审核和应用重启恢复；自动修订耗尽后保留 `needs_attention` 工作区。
+19. 平台契约继续覆盖 Tool Call、验证诊断、工作区状态和原子发布命令，但不得要求模型把大段 Skill 正文封装成一次性嵌套 JSON。
 
 ## 33. 默认设计决策
 
 - 产品名称使用“Agent Skill”或“创作技能”，避免与小说技能混淆。
 - `/` 是会话输入框的统一快捷入口，面板必须列出系统动作、内置 Skill、用户 Skill 和当前小说 Skill；选择结果结构化，不依赖模型解析命令字符串。
 - 自然语言创建、`/skill create` 和 Creator 快捷按钮复用同一个 `agent_skill.authoring` 流程。
+- Creator 使用 AgentSkillDraft 内嵌的 SQLite 虚拟文档式 Authoring Workspace；模型经受控 read/write/patch/validate Tool 迭代逻辑 `SKILL.md` 和 Markdown references，通过 `set_pack` 更新小型 Pack 领域结构，验证通过后再确定性编译到同一 Draft。
 - Creator 以具体使用样例和反例定义触发边界，并按任务脆弱度选择 adaptive、guided 或 strict；已有信息足够时不重复追问。User/Novel Skill 的语义选择默认 suggest，只有正反触发验证通过才允许 auto。
 - Skill 上下文采用索引元数据、核心方法和执行资源三级渐进加载；目录导入可受控读取 `SKILL.md`、Markdown references 和可选 UI 元数据，但第一阶段不执行 Skill 脚本、不读取二进制附件或远程运行时引用。
 - 来源提炼型 Skill 使用留出样本或中性任务独立验证；使用反馈只产生新 Draft/Revision，不修改历史行为。
-- `builtin.skill-creator` 是创建方法；Source Resolver 和 Authoring Toolchain 才能按授权读取当前小说、附件、本地文档或 Web。
+- `builtin.skill-creator` 是内置创建元能力/Profile，不是普通可选择 Skill；Source Resolver 和 Authoring Toolchain 才能按授权读取当前小说、附件、本地文档或 Web。
 - 所有创建、更新、拆分和组合先生成 Draft，用户确认后才创建不可变 Revision。
 - Skill Pack 是按 Operation/Role 的主辅助绑定集合，不是 composite Prompt，也不扩大单次 Skill 数量限制。
 - `builtin.novel-bootstrap` 是内置创作方案，通过 `/novel new` 进入，可以消费 Skill Pack，但不作为用户可编辑 Skill。
 - 旧 OpenClaw Skill 兼容层已删除，不参与本需求；OpenClaw 只保留 Tool/MCP 接入路径。
 - 第一阶段只支持声明式 `prompt_method`，不支持用户代码和可执行 Workflow。
 - Built-in Skill 随 Python Runtime 打包；User/Novel Skill 由 Electron Main 持久化。
+- Authoring Workspace 是 SQLite 中的可恢复草稿介质，不是运行时真源；模型不能直接访问数据库、取得数据库路径或借此访问任意本地文件。
 - Python Registry 是合并视图，不是用户 Skill 的唯一存储源。
-- 导出使用单文件 `SKILL.md`；导入兼容单文件和经用户授权的本地 Skill 目录。目录仅由 Main 受控读取，模型依据目录快照和产品能力目录生成审核 Draft，运行时仍以数据库 Revision 为准。
+- 导出继续使用单文件 `SKILL.md`；Pack 分发格式后续单独评估。导入兼容单文件和经用户授权的本地 Skill 目录。目录仅由 Main 受控读取并形成只读 Snapshot，模型在现有 AgentSkillDraft 虚拟文档中完成转换，确定性编译器补齐审核字段，运行时仍以数据库 Revision 为准。
 - Skill 选择发生在 IntentDecision 后、Planner 前。
 - 用户显式选择优先于所有默认绑定。
 - 默认每个 Operation 最多一个主 Skill 和一个辅助 Skill。

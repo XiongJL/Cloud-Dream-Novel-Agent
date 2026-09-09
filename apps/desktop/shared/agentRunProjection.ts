@@ -2,7 +2,7 @@ export type ProjectedAgentStepStatus = 'pending' | 'running' | 'completed' | 'fa
 export type ProjectedAgentRunStatus = 'idle' | 'waiting_approval' | 'waiting_user_input' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
 
 export type ProjectedAgentRecovery = {
-    failureKind: 'transport' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown';
+    failureKind: 'transport' | 'model_output_truncated' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown';
     failedAtPhase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing';
     retryStrategy: 'retry_request' | 'repair_model_output' | 'reprocess_saved_result' | 'resume_publish' | 'reconcile_side_effect' | 'none';
     canRecover: boolean;

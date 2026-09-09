@@ -2,7 +2,7 @@ import { AiGenerateRequest, AiGenerateResponse, AiHealthCheckResult, AiImageRequ
 import { AiActionError, type AiErrorCode } from '../errors';
 import { devLog, devLogError, redactForLog } from '../../debug/devLogger';
 import { net } from 'electron';
-import { consumeResponsesStream, extractResponsesOutput } from './responsesStream';
+import { consumeResponsesStream, extractResponsesOutput, ResponsesStreamError } from './responsesStream';
 
 function joinUrl(baseUrl: string, path: string): string {
     return `${baseUrl.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
@@ -99,6 +99,34 @@ function providerHttpError(response: Response): AiActionError {
         retryable ? '模型服务暂时不可用。' : '模型服务拒绝了当前请求。',
         undefined,
         { httpStatus: status, retryable },
+    );
+}
+
+function outputTruncatedError(input: {
+    partialText: string;
+    terminationReason: string;
+    responseId?: string;
+    usage?: Record<string, unknown>;
+    model?: string;
+    requestedMaxTokens: number;
+    elapsedMs: number;
+}): AiActionError {
+    return new AiActionError(
+        'MODEL_OUTPUT_TRUNCATED',
+        'Model generation reached the configured output limit before completing.',
+        undefined,
+        {
+            retryable: false,
+            safeToRetryBeforePublish: true,
+            partialText: input.partialText,
+            terminationReason: input.terminationReason,
+            responseId: input.responseId,
+            modelResultRef: input.responseId,
+            usage: input.usage,
+            model: input.model,
+            requestedMaxTokens: input.requestedMaxTokens,
+            elapsedMs: input.elapsedMs,
+        },
     );
 }
 
@@ -223,12 +251,13 @@ export class HttpProvider implements AiProvider {
         };
 
         const apiMode = this.settings.http.apiMode ?? 'chat-completions';
+        const requestedMaxTokens = Math.max(1, Math.floor(req.maxTokens ?? this.settings.http.maxTokens));
         const body = apiMode === 'responses'
             ? {
                 model: this.settings.http.model,
                 ...(req.systemPrompt ? { instructions: req.systemPrompt } : {}),
                 input: prompt,
-                max_output_tokens: req.maxTokens ?? this.settings.http.maxTokens,
+                max_output_tokens: requestedMaxTokens,
                 temperature: req.temperature ?? this.settings.http.temperature,
                 stream: true,
             }
@@ -238,7 +267,7 @@ export class HttpProvider implements AiProvider {
                     ...(req.systemPrompt ? [{ role: 'system', content: req.systemPrompt }] : []),
                     { role: 'user', content: prompt },
                 ],
-                max_tokens: req.maxTokens ?? this.settings.http.maxTokens,
+                max_tokens: requestedMaxTokens,
                 temperature: req.temperature ?? this.settings.http.temperature,
             };
         const url = resolveEndpointUrl(
@@ -285,6 +314,11 @@ export class HttpProvider implements AiProvider {
                 return {
                     text: streamed.text,
                     model: streamed.model || this.settings.http.model,
+                    responseId: streamed.responseId,
+                    usage: streamed.usage,
+                    finishReason: streamed.finishReason,
+                    requestedMaxTokens,
+                    elapsedMs: Date.now() - startedAt,
                 };
             }
 
@@ -311,6 +345,15 @@ export class HttpProvider implements AiProvider {
                 throw providerHttpError(res);
             }
 
+            if (!json || typeof json !== 'object') {
+                throw new AiActionError('MODEL_OUTPUT_INVALID', 'Model service returned an invalid JSON response.', undefined, {
+                    retryable: false,
+                    partialText: text,
+                    requestedMaxTokens,
+                    elapsedMs: Date.now() - startedAt,
+                });
+            }
+
             const output =
                 json?.choices?.[0]?.message?.content ||
                 json?.output_text ||
@@ -318,9 +361,71 @@ export class HttpProvider implements AiProvider {
                 json?.content?.[0]?.text ||
                 '';
 
+            const responseStatus = typeof json?.status === 'string' ? json.status : undefined;
+            const incompleteReason = typeof json?.incomplete_details?.reason === 'string'
+                ? json.incomplete_details.reason
+                : undefined;
+            const finishReason = typeof json?.choices?.[0]?.finish_reason === 'string'
+                ? json.choices[0].finish_reason
+                : incompleteReason || responseStatus;
+            const outputText = typeof output === 'string' ? output : JSON.stringify(output);
+            if (finishReason === 'length' || finishReason === 'max_output_tokens') {
+                throw outputTruncatedError({
+                    partialText: outputText,
+                    terminationReason: finishReason || 'incomplete',
+                    responseId: typeof json?.id === 'string' ? json.id : undefined,
+                    usage: json?.usage && typeof json.usage === 'object' ? json.usage : undefined,
+                    model: typeof json?.model === 'string' ? json.model : this.settings.http.model,
+                    requestedMaxTokens,
+                    elapsedMs: Date.now() - startedAt,
+                });
+            }
+            if (responseStatus === 'incomplete') {
+                const filtered = String(incompleteReason || '').toLowerCase().includes('content_filter');
+                throw new AiActionError(
+                    filtered ? 'PROVIDER_FILTERED' : 'MODEL_OUTPUT_INVALID',
+                    filtered
+                        ? 'Model response was interrupted by the provider content filter.'
+                        : `Model response was incomplete: ${incompleteReason || 'unknown reason'}`,
+                    undefined,
+                    {
+                        retryable: false,
+                        partialText: outputText,
+                        terminationReason: incompleteReason || 'incomplete',
+                        responseId: typeof json?.id === 'string' ? json.id : undefined,
+                        modelResultRef: typeof json?.id === 'string' ? json.id : undefined,
+                        usage: json?.usage && typeof json.usage === 'object' ? json.usage : undefined,
+                        requestedMaxTokens,
+                        elapsedMs: Date.now() - startedAt,
+                    },
+                );
+            }
+            if (responseStatus === 'failed') {
+                const providerErrorCode = String(json?.error?.code || 'response_failed');
+                const filtered = /content_filter|safety/iu.test(providerErrorCode);
+                throw new AiActionError(
+                    filtered ? 'PROVIDER_FILTERED' : 'PROVIDER_UNAVAILABLE',
+                    String(json?.error?.message || 'Model response failed.'),
+                    undefined,
+                    {
+                        retryable: !filtered,
+                        providerErrorCode,
+                        responseId: typeof json?.id === 'string' ? json.id : undefined,
+                        usage: json?.usage && typeof json.usage === 'object' ? json.usage : undefined,
+                        requestedMaxTokens,
+                        elapsedMs: Date.now() - startedAt,
+                    },
+                );
+            }
+
             return {
-                text: typeof output === 'string' ? output : JSON.stringify(output),
+                text: outputText,
                 model: json?.model || this.settings.http.model,
+                responseId: typeof json?.id === 'string' ? json.id : undefined,
+                usage: json?.usage && typeof json.usage === 'object' ? json.usage : undefined,
+                finishReason,
+                requestedMaxTokens,
+                elapsedMs: Date.now() - startedAt,
             };
         } catch (error: any) {
             devLogError('HttpProvider.generate.error', error, {
@@ -351,6 +456,59 @@ export class HttpProvider implements AiProvider {
             }
             if (error instanceof AiActionError) {
                 throw error;
+            }
+            if (error instanceof ResponsesStreamError) {
+                if (error.kind === 'stream_incomplete') {
+                    throw new AiActionError('NETWORK_ERROR', '模型响应流提前结束，未收到生成完成标记。', undefined, {
+                        retryable: true,
+                        partialText: error.partialText,
+                        terminationReason: error.terminationReason,
+                        responseId: error.responseId,
+                        usage: error.usage,
+                        model: error.model || this.settings.http.model,
+                        requestedMaxTokens,
+                        elapsedMs: Date.now() - startedAt,
+                    });
+                }
+                if (error.kind === 'output_truncated') {
+                    throw outputTruncatedError({
+                        partialText: error.partialText,
+                        terminationReason: error.terminationReason || 'max_output_tokens',
+                        responseId: error.responseId,
+                        usage: error.usage,
+                        model: error.model || this.settings.http.model,
+                        requestedMaxTokens,
+                        elapsedMs: Date.now() - startedAt,
+                    });
+                }
+                if (error.kind === 'invalid_event') {
+                    throw new AiActionError('MODEL_OUTPUT_INVALID', error.message, undefined, {
+                        retryable: false,
+                        partialText: error.partialText,
+                        responseId: error.responseId,
+                        modelResultRef: error.responseId,
+                        usage: error.usage,
+                        requestedMaxTokens,
+                        elapsedMs: Date.now() - startedAt,
+                    });
+                }
+                const providerCode = String(error.providerErrorCode || '').toLowerCase();
+                const code: AiErrorCode = /auth|api.?key|unauthori[sz]ed|forbidden/iu.test(providerCode)
+                    ? 'PROVIDER_AUTH'
+                    : providerCode.includes('content_filter') || providerCode.includes('safety')
+                        ? 'PROVIDER_FILTERED'
+                        : 'PROVIDER_UNAVAILABLE';
+                throw new AiActionError(code, error.message, undefined, {
+                    retryable: code === 'PROVIDER_UNAVAILABLE',
+                    partialText: error.partialText,
+                    terminationReason: error.terminationReason,
+                    responseId: error.responseId,
+                    modelResultRef: error.responseId,
+                    usage: error.usage,
+                    providerErrorCode: error.providerErrorCode,
+                    requestedMaxTokens,
+                    elapsedMs: Date.now() - startedAt,
+                });
             }
             throw new AiActionError(
                 'NETWORK_ERROR',

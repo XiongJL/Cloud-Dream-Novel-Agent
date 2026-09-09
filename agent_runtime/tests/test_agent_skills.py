@@ -11,6 +11,7 @@ from novel_agent_runtime.agent_skills.registry import BUILTIN_AGENT_SKILL_REGIST
 from novel_agent_runtime.agent_skills.resolver import AgentSkillResolver
 from novel_agent_runtime.agent_skills.schemas import AgentSkillDefinition, AgentSkillResolveRequest
 from novel_agent_runtime.agent_skills.service import AGENT_SKILL_SERVICE
+from novel_agent_runtime.automation import AutomationInvokeError
 from novel_agent_runtime.roles import list_agent_roles
 from novel_agent_runtime.main import build_app
 from novel_agent_runtime.events import AgentEventBus
@@ -33,9 +34,166 @@ from novel_agent_runtime.schemas import (
     AgentUserInputRequest,
 )
 from novel_agent_runtime.store import AgentStateStore
+from novel_agent_runtime.tool_adapter import FastMcpAgentToolAdapter
 from novel_agent_runtime.toolchains.schemas import StyleSkillExtractionInput, ToolchainInvocation
 from test_runtime import FakeAutomationClient
 from test_chapter_scope_context import _scope_bundle
+
+
+_UNHANDLED = object()
+
+
+def _style_authoring_plan(legacy: dict[str, object]) -> dict[str, object]:
+    skills = []
+    for raw in legacy["skills"]:  # type: ignore[index]
+        item = dict(raw)  # type: ignore[arg-type]
+        item.pop("instructions", None)
+        item["methodDimensions"] = {
+            "language_style": ["句长节奏", "叙述距离", "对白与段落"],
+            "suspense_release": ["问题建立", "线索与误导", "揭示节拍与章末钩子"],
+            "ensemble_progression": ["视角轮换", "人物目标", "交汇节点"],
+        }[str(item["draftKey"])]
+        skills.append(item)
+    return {**legacy, "skills": skills}
+
+
+class FakeStyleAuthoringWorkspace:
+    def __init__(self, plan: dict[str, object], draft_id: str, *, fail_once_path: str | None = None) -> None:
+        self.plan = plan
+        self.draft_id = draft_id
+        self.version = 0
+        self.documents: dict[str, str] = {}
+        self.pack: dict[str, object] = {}
+        self.calls: list[str] = []
+        self.generated_keys: list[str] = []
+        self.fail_once_path = fail_once_path
+        self.failed_validation_once = False
+
+    def _summary(self, *, status: str = "editing", phase: str = "authoring", report: dict[str, object] | None = None) -> dict[str, object]:
+        return {
+            "draftId": self.draft_id,
+            "version": self.version,
+            "status": status,
+            "action": "pack",
+            "phase": phase,
+            "documents": [
+                {"logicalPath": path, "deleted": False, "byteLength": len(content.encode("utf-8"))}
+                for path, content in self.documents.items()
+            ],
+            **({"validationReport": report} if report is not None else {}),
+        }
+
+    def _document(self, member: dict[str, object], scope: str) -> str:
+        lines = [
+            "---",
+            "schemaVersion: novel-editor.agent-skill.v1",
+            f"stableId: {member['stableIdCandidate']}",
+            "version: 1.0.0",
+            f"name: {member['title']}",
+            f"description: {member['description']}",
+            f"scope: {scope}",
+            "skillType: prompt_method",
+            f"category: {'style' if member['draftKey'] == 'language_style' else 'narrative_method'}",
+            f"guidanceMode: {member['guidanceMode']}",
+            "semanticSelection: suggest",
+            "triggerHints:",
+            *[f"  - {item}" for item in member["triggerHints"]],  # type: ignore[index]
+            "antiTriggerHints:",
+            *[f"  - {item}" for item in member["antiTriggerHints"]],  # type: ignore[index]
+            "supportedOperations:",
+            *[f"  - {item}" for item in member["supportedOperations"]],  # type: ignore[index]
+            "allowedRoles:",
+            "  - writer",
+            "  - editor",
+            "outputType: none",
+            "constraints:",
+            *[f"  - {item}" for item in member["constraints"]],  # type: ignore[index]
+            "---",
+            "",
+            "按规划维度执行，并在证据不足时降低结论强度。",
+        ]
+        return "\n".join(lines)
+
+    async def handle(self, method: str, params: dict[str, object]) -> object:
+        self.calls.append(method)
+        if method == "agent.plan_style_skill_pack":
+            return self.plan
+        if method == "agent_skill.workspace.create":
+            self.version = 1
+            self.documents[str(params["logicalPath"])] = ""
+            return self._summary()
+        if method == "agent_skill.workspace.list":
+            return self._summary()
+        if method == "agent_skill.workspace.read":
+            path = str(params["logicalPath"])
+            return {**self._summary(), "logicalPath": path, "contentText": self.documents[path]}
+        if method == "agent.generate_skill_document":
+            source = params["source"]
+            assert isinstance(source, dict)
+            member = source["memberPlan"]
+            assert isinstance(member, dict)
+            assert params["creatorProfile"] == "builtin.style-skill-extractor.member"
+            self.generated_keys.append(str(member["draftKey"]))
+            return {"contentText": self._document(member, str(params["scope"]))}
+        if method == "agent_skill.workspace.write":
+            assert params["expectedVersion"] == self.version
+            self.documents[str(params["logicalPath"])] = str(params["contentText"])
+            self.version += 1
+            return self._summary()
+        if method == "agent_skill.workspace.set_pack":
+            assert params["expectedVersion"] == self.version
+            self.pack = dict(params["pack"])  # type: ignore[arg-type]
+            self.version += 1
+            return self._summary()
+        if method == "agent_skill.workspace.validate":
+            assert params["expectedVersion"] == self.version
+            self.version += 1
+            if self.fail_once_path and not self.failed_validation_once:
+                self.failed_validation_once = True
+                return self._summary(
+                    phase="revising",
+                    report={
+                        "ok": False,
+                        "diagnostics": [{
+                            "code": "SKILL_INSTRUCTIONS_INVALID",
+                            "path": self.fail_once_path,
+                            "severity": "error",
+                            "message": "正文需要补充可执行步骤。",
+                        }],
+                    },
+                )
+            return self._summary(phase="validating", report={"ok": True, "diagnostics": []})
+        if method == "agent_skill.workspace.compile":
+            assert params["expectedVersion"] == self.version
+            self.version += 1
+            return self._summary(status="ready_for_review", phase="compiled", report={"ok": True, "diagnostics": []})
+        if method == "agent_skill.draft.get":
+            skills = []
+            for member in self.plan["skills"]:  # type: ignore[index]
+                assert isinstance(member, dict)
+                key = str(member["draftKey"]).replace("_", "-")
+                skills.append({
+                    "draftKey": key,
+                    "definition": {
+                        "stableId": member["stableIdCandidate"],
+                        "title": member["title"],
+                        "description": member["description"],
+                    },
+                    "revision": {
+                        "version": "1.0.0",
+                        "instructions": "按规划维度执行，并在证据不足时降低结论强度。",
+                        "constraints": member["constraints"],
+                        "manifest": {},
+                    },
+                })
+            return {
+                "id": self.draft_id,
+                "version": self.version,
+                "status": "ready_for_review",
+                "action": "pack",
+                "draft": {"skills": skills, "pack": self.pack},
+            }
+        return _UNHANDLED
 
 
 def test_builtin_registry_exposes_only_level_one_metadata() -> None:
@@ -532,11 +690,15 @@ def test_style_extractor_registry_has_required_multidimensional_contract() -> No
     registration = BUILTIN_AGENT_SKILL_REGISTRY.require("builtin.style-skill-extractor")
     revision = BUILTIN_AGENT_SKILL_REGISTRY.revision(registration.definition.id)
 
+    assert revision.revisionId == "builtin.style-skill-extractor@1.1.0"
     assert registration.definition.supportedOperations == ("agent_skill.style_extract",)
     assert "语言风格" in revision.instructions
     assert "悬念与信息释放" in revision.instructions
     assert "群像人物推进" in revision.instructions
     assert "Skill Pack" in revision.instructions
+    assert "草稿工作区" in revision.instructions
+    assert "不在规划协议中编写长篇 Skill 正文" in revision.instructions
+    assert any("只修订诊断指向的成员文档" in item for item in revision.constraints)
 
 
 def test_named_work_style_request_does_not_become_an_unresolved_chapter(tmp_path) -> None:
@@ -569,17 +731,19 @@ def test_named_work_style_request_does_not_become_an_unresolved_chapter(tmp_path
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
         calls: list[str] = []
+        style_workspace: FakeStyleAuthoringWorkspace | None = None
 
         async def invoke(method: str, params: dict[str, object], origin: str, request_id: str | None = None) -> object:
+            nonlocal style_workspace
             calls.append(method)
             if method == "chapter.scope_context.build":
                 raise AssertionError("A named work must not read the open project chapter scope")
-            if method == "agent.generate_style_skill_pack":
+            if method == "agent.plan_style_skill_pack":
                 source_payload = params["source"]
                 assert isinstance(source_payload, dict)
                 assert source_payload["sourceType"] == "model_prior"
                 assert source_payload["workTitle"] == "十日终焉"
-                return {
+                legacy = {
                     "summary": "仅基于作品名称生成的低置信度创作方法候选。",
                     "sourceCoverage": {"chapterCount": 0, "confidence": "low", "gaps": ["未提供正文样本"]},
                     "skills": [
@@ -615,8 +779,14 @@ def test_named_work_style_request_does_not_become_an_unresolved_chapter(tmp_path
                     "omittedDimensions": ["ensemble_progression：无正文样本"],
                     "warnings": ["仅基于作品名称和模型先验生成。"],
                 }
-            if method == "agent_skill.draft.upsert":
-                return {"id": "named-work-style-draft", "version": 1, **params}
+                style_workspace = FakeStyleAuthoringWorkspace(
+                    _style_authoring_plan(legacy), "named-work-style-draft"
+                )
+                return style_workspace.plan
+            if style_workspace is not None:
+                handled = await style_workspace.handle(method, params)
+                if handled is not _UNHANDLED:
+                    return handled
             return await original_invoke(method, params, origin, request_id=request_id)  # type: ignore[arg-type]
 
         automation.invoke = invoke  # type: ignore[method-assign]
@@ -635,11 +805,14 @@ def test_named_work_style_request_does_not_become_an_unresolved_chapter(tmp_path
             "planId": plan.planId,
             "approval": {"approved": True, "approvedStepIds": [plan.steps[0].stepId]},
         }, {"locale": "zh-CN"})
-        for _ in range(500):
+        for _ in range(1000):
             if runtime.state.runs[run.runId].status in {"completed", "failed", "cancelled"}:
                 break
             await asyncio.sleep(0.01)
-        assert runtime.state.runs[run.runId].status == "completed"
+        assert runtime.state.runs[run.runId].status == "completed", (
+            "\n".join(calls),
+            "\n".join(style_workspace.calls if style_workspace else []),
+        )
         assert "chapter.scope_context.build" not in calls
 
     # The input accepts a named work without a project chapter or database ID.
@@ -844,18 +1017,31 @@ def test_approved_novel_blueprint_initializes_reviewable_project_assets(tmp_path
     asyncio.run(scenario())
 
 
-def test_style_extraction_publishes_separate_skills_and_pack_binding(tmp_path) -> None:
+@pytest.mark.parametrize("transport", ["http", "fastmcp"])
+def test_style_extraction_publishes_separate_skills_and_pack_binding(tmp_path, transport: str) -> None:
     async def scenario() -> None:
         store = AgentStateStore(tmp_path)
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
+        scope_calls: list[dict[str, object]] = []
+        call_deadlines: dict[str, str | None] = {}
+        style_workspace: FakeStyleAuthoringWorkspace | None = None
 
-        async def invoke(method: str, params: dict[str, object], origin: str, request_id: str | None = None) -> object:
+        async def invoke(
+            method: str,
+            params: dict[str, object],
+            origin: str,
+            request_id: str | None = None,
+            **kwargs: object,
+        ) -> object:
+            nonlocal style_workspace
+            call_deadlines[method] = str(kwargs.get("deadline_at") or "") or None
             if method == "chapter.scope_context.build":
+                scope_calls.append(params)
                 return _scope_bundle()
-            if method == "agent.generate_style_skill_pack":
+            if method == "agent.plan_style_skill_pack":
                 assert "builtin.style-skill-extractor" in str(params["agentSkill"])
-                return {
+                legacy = {
                     "summary": "样本支持语言节奏和悬念释放提炼；群像证据不足。",
                     "sourceCoverage": {"chapterCount": 2, "confidence": "medium", "gaps": ["缺少多视角章节"]},
                     "skills": [
@@ -906,15 +1092,25 @@ def test_style_extraction_publishes_separate_skills_and_pack_binding(tmp_path) -
                     "omittedDimensions": ["ensemble_progression：缺少多人物并行样本"],
                     "warnings": [],
                 }
-            if method == "agent_skill.draft.upsert":
-                assert params["action"] == "pack"
-                assert params["status"] == "ready_for_review"
-                assert params["draft"]["kind"] == "skill_pack"  # type: ignore[index]
-                return {"id": "skill_draft_style", "version": 1, **params}
+                style_workspace = FakeStyleAuthoringWorkspace(
+                    _style_authoring_plan(legacy),
+                    "skill_draft_style",
+                    fail_once_path="suspense-release/SKILL.md",
+                )
+                return style_workspace.plan
+            if style_workspace is not None:
+                handled = await style_workspace.handle(method, params)
+                if handled is not _UNHANDLED:
+                    return handled
             return await original_invoke(method, params, origin, request_id=request_id)  # type: ignore[arg-type]
 
         automation.invoke = invoke  # type: ignore[method-assign]
-        runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
+        runtime = NovelAgentRuntime(
+            store,
+            automation,
+            AgentEventBus(store),
+            tool_adapter=FastMcpAgentToolAdapter(automation) if transport == "fastmcp" else None,
+        )
         request = IntentRequest(
             message="根据当前样本提炼文风 Skill Pack",
             conversationId="conv-style",
@@ -945,18 +1141,122 @@ def test_style_extraction_publishes_separate_skills_and_pack_binding(tmp_path) -
             "chapterId": "chapter_2",
             "approval": {"approved": True, "approvedStepIds": [plan.steps[0].stepId]},
         }, {"locale": "zh-CN"})
-        for _ in range(500):
+        for _ in range(2000):
             if runtime.state.runs[run.runId].status in {"completed", "failed", "cancelled"}:
                 break
             await asyncio.sleep(0.01)
         completed = runtime.state.runs[run.runId]
-        assert completed.status == "completed"
+        assert completed.status == "completed", (
+            list(call_deadlines),
+            style_workspace.calls if style_workspace else [],
+        )
+        assert completed.deadlineAt is not None
+        assert len(scope_calls) == 1
+        assert all(value is not None for value in scope_calls[0].values())
+        assert "sourceMode" not in scope_calls[0]
+        assert "sourceWorkTitle" not in scope_calls[0]
+        assert call_deadlines["chapter.scope_context.build"] == completed.deadlineAt
+        assert call_deadlines["agent.plan_style_skill_pack"] == completed.deadlineAt
+        assert call_deadlines["agent.generate_skill_document"] == completed.deadlineAt
+        assert "agent.generate_style_skill_pack" not in call_deadlines
+        assert style_workspace is not None
+        assert style_workspace.generated_keys == [
+            "language_style",
+            "suspense_release",
+            "suspense_release",
+        ]
         artifact = next(item for item in completed.artifacts if item.type == "agent_skill_pack_draft")
         assert [item["draftKey"] for item in artifact.metadata["draft"]["skills"]] == ["language_style", "suspense_release"]
         assert artifact.metadata["draft"]["pack"]["bindings"][0]["auxiliaryDraftKey"] == "suspense_release"
         assert artifact.reference["skillDraftId"] == "skill_draft_style"
         assert artifact.metadata["skillDraft"]["status"] == "ready_for_review"
         assert "未生成维度" in str(artifact.content)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("transport", ["http", "fastmcp"])
+def test_style_extraction_scope_failure_reaches_ordered_terminal_events(tmp_path, transport: str) -> None:
+    class FailingScopeAutomation(FakeAutomationClient):
+        async def invoke(
+            self,
+            method: str,
+            params: dict[str, object],
+            origin: str,
+            request_id: str | None = None,
+            **_kwargs: object,
+        ) -> object:
+            if method == "chapter.scope_context.build":
+                raise AutomationInvokeError("INVALID_INPUT", "scope rejected")
+            return await super().invoke(method, params, origin, request_id=request_id)  # type: ignore[arg-type]
+
+    async def scenario() -> None:
+        store = AgentStateStore(tmp_path)
+        automation = FailingScopeAutomation()
+        runtime = NovelAgentRuntime(
+            store,
+            automation,
+            AgentEventBus(store),
+            tool_adapter=FastMcpAgentToolAdapter(automation) if transport == "fastmcp" else None,
+        )
+        step = AgentPlanStep(
+            stepId="step-style-failure",
+            agent="writer",
+            title="提炼文风 Skill Pack",
+            tools=[],
+            toolchain=ToolchainInvocation(
+                id="agent_skill.style_extract",
+                version="1.0.0",
+                input=StyleSkillExtractionInput(
+                    sourceMode="project_chapter_scope",
+                    sourceWorkTitle=None,
+                    scopeId=None,
+                    novelId="novel_1",
+                    kind="selected_chapters",
+                    chapterId="chapter_2",
+                    chapterIds=["chapter_1", "chapter_2"],
+                    anchorChapterId="chapter_2",
+                    goal="根据当前样本提炼文风 Skill Pack",
+                    maxEstimatedTokens=None,
+                ).model_dump(),
+            ),
+        )
+        plan = AgentPlan(
+            planId="plan-style-failure",
+            threadId="thread-style-failure",
+            title="文风 Skill 提炼",
+            goal="根据当前样本提炼文风 Skill Pack",
+            requiresApproval=True,
+            steps=[step],
+            preferredRole="writer",
+            deliverable="report",
+        )
+        runtime.state.plans[plan.planId] = plan
+        run = await runtime.execute_plan(
+            {
+                "planId": plan.planId,
+                "novelId": "novel_1",
+                "chapterId": "chapter_2",
+                "approval": {"approved": True, "approvedStepIds": [step.stepId]},
+            },
+            {"locale": "zh-CN"},
+        )
+        for _ in range(500):
+            if runtime.state.runs[run.runId].status in {"completed", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.01)
+
+        failed = runtime.state.runs[run.runId]
+        assert failed.status == "failed"
+        event_types = [event.type for event in store.list_events(run.runId)]
+        expected = ["tool_call", "tool_result", "toolchain_failed", "step_failed", "run_failed"]
+        positions = [event_types.index(event_type) for event_type in expected]
+        assert positions == sorted(positions)
+        failed_tool = next(event for event in failed.events if event.type == "tool_result")
+        assert failed_tool.status == "failed"
+        assert failed_tool.payload["code"] == "INVALID_INPUT"
+        terminal = next(event for event in failed.events if event.type == "run_failed")
+        assert terminal.payload["code"] == "INVALID_INPUT"
 
     asyncio.run(scenario())
 
@@ -968,39 +1268,45 @@ def test_agent_skill_author_persists_review_draft_without_committing(tmp_path) -
 
         async def invoke(self, method: str, params: dict[str, object], *_args: object, **_kwargs: object) -> object:
             self.calls.append((method, params))
-            if method == "agent.generate_skill_draft":
+            if method == "agent_skill.workspace.create":
+                assert params["scope"] == "user"
+                return {"draftId": "draft_author_1", "version": 1, "status": "editing", "phase": "authoring"}
+            if method == "agent_skill.workspace.read":
+                return {"draftId": "draft_author_1", "version": 1, "logicalPath": "SKILL.md", "contentText": ""}
+            if method == "agent.generate_skill_document":
+                assert params["attempt"] == 1
+                assert params["creatorProfile"] == "builtin.skill-creator"
+                return {"contentText": "---\nschemaVersion: novel-editor.agent-skill.v1\n---\n\n方法"}
+            if method == "agent_skill.workspace.write":
+                assert params["expectedVersion"] == 1
+                return {"draftId": "draft_author_1", "version": 2, "status": "editing", "phase": "authoring"}
+            if method == "agent_skill.workspace.validate":
+                assert params["expectedVersion"] == 2
                 return {
-                    "definition": {
-                        "stableId": "scene-pressure-builder",
-                        "title": "场景压力构建",
-                        "description": "在规划或续写冲突场景时，逐层增加人物选择压力。",
-                        "category": "narrative_method",
-                        "guidanceMode": "guided",
-                        "semanticSelection": "suggest",
-                        "triggerHints": ["增强场景冲突"],
-                        "antiTriggerHints": ["只校对错别字"],
-                        "allowedRoles": ["team", "writer"],
-                        "supportedOperations": ["chapter.continuation", "chapter.rewrite"],
-                        "recommendedToolchains": [],
-                        "contextNeeds": ["current_chapter"],
-                        "outputType": "none",
-                    },
-                    "revision": {
-                        "version": "1.0.0",
-                        "instructions": "识别人物当前目标，再增加会迫使其付出代价的障碍。",
-                        "constraints": ["压力升级必须来自既有目标或关系"],
-                        "examples": [],
-                        "manifest": {},
-                    },
-                    "rationale": ["需求指向单一叙事方法"],
-                    "warnings": [],
+                    "draftId": "draft_author_1", "version": 3, "status": "editing", "phase": "validating",
+                    "validationReport": {"ok": True, "diagnostics": []},
                 }
-            if method == "agent_skill.draft.upsert":
-                assert params["status"] == "ready_for_review"
-                assert params["draft"]["revision"]["manifest"]["supportedOperations"] == [  # type: ignore[index]
-                    "chapter.continuation", "chapter.rewrite",
-                ]
-                return {"id": "draft_author_1", "version": 1, "status": "ready_for_review", **params}
+            if method == "agent_skill.workspace.compile":
+                assert params["expectedVersion"] == 3
+                return {"draftId": "draft_author_1", "version": 4, "status": "ready_for_review", "phase": "compiled"}
+            if method == "agent_skill.draft.get":
+                return {
+                    "id": "draft_author_1", "version": 4, "status": "ready_for_review",
+                    "draft": {
+                        "definition": {
+                            "stableId": "scene-pressure-builder",
+                            "title": "场景压力构建",
+                            "description": "在规划或续写冲突场景时，逐层增加人物选择压力。",
+                        },
+                        "revision": {
+                            "version": "1.0.0",
+                            "instructions": "识别人物当前目标，再增加会迫使其付出代价的障碍。",
+                            "constraints": ["压力升级必须来自既有目标或关系"],
+                            "examples": [],
+                            "manifest": {"supportedOperations": ["chapter.continuation", "chapter.rewrite"]},
+                        },
+                    },
+                }
             raise AssertionError(f"unexpected method: {method}")
 
     async def scenario() -> None:
@@ -1014,9 +1320,67 @@ def test_agent_skill_author_persists_review_draft_without_committing(tmp_path) -
         assert result["requiresReview"] is True
         assert result["draft"]["id"] == "draft_author_1"
         assert [method for method, _params in automation.calls] == [
-            "agent.generate_skill_draft", "agent_skill.draft.upsert",
+            "agent_skill.workspace.create",
+            "agent_skill.workspace.read",
+            "agent.generate_skill_document",
+            "agent_skill.workspace.write",
+            "agent_skill.workspace.validate",
+            "agent_skill.workspace.compile",
+            "agent_skill.draft.get",
         ]
         assert all(method != "agent_skill.draft.commit" for method, _params in automation.calls)
+
+    asyncio.run(scenario())
+
+
+def test_agent_skill_author_keeps_needs_attention_workspace_after_four_invalid_rounds(tmp_path) -> None:
+    class InvalidAuthorAutomation:
+        def __init__(self) -> None:
+            self.version = 1
+            self.generate_count = 0
+
+        async def invoke(self, method: str, params: dict[str, object], *_args: object, **_kwargs: object) -> object:
+            if method == "agent_skill.workspace.create":
+                return {"draftId": "draft_attention_1", "version": self.version, "phase": "authoring"}
+            if method == "agent_skill.workspace.read":
+                return {"draftId": "draft_attention_1", "version": self.version, "contentText": "invalid"}
+            if method == "agent.generate_skill_document":
+                self.generate_count += 1
+                return {"contentText": "仍然缺少合法 Frontmatter"}
+            if method == "agent_skill.workspace.write":
+                assert params["expectedVersion"] == self.version
+                self.version += 1
+                return {"draftId": "draft_attention_1", "version": self.version, "phase": "authoring"}
+            if method == "agent_skill.workspace.validate":
+                assert params["expectedVersion"] == self.version
+                self.version += 1
+                return {
+                    "draftId": "draft_attention_1",
+                    "version": self.version,
+                    "phase": "needs_attention" if params["finalAttempt"] else "revising",
+                    "validationReport": {
+                        "ok": False,
+                        "errorCount": 1,
+                        "diagnostics": [{"code": "SKILL_FRONTMATTER_MISSING", "path": "SKILL.md"}],
+                    },
+                }
+            if method == "agent_skill.draft.get":
+                return {"id": "draft_attention_1", "version": self.version, "status": "editing", "draft": {}}
+            raise AssertionError(f"unexpected method: {method}")
+
+    async def scenario() -> None:
+        store = AgentStateStore(tmp_path)
+        automation = InvalidAuthorAutomation()
+        runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))  # type: ignore[arg-type]
+        result = await runtime.author_skill(
+            {"goal": "创建一个边界尚不完整的 Skill", "scope": "user"},
+            {"locale": "zh-CN", "_requestId": "request_author_attention"},
+        )
+        assert result["requiresReview"] is False
+        assert result["needsAttention"] is True
+        assert result["workspace"]["phase"] == "needs_attention"
+        assert result["draft"]["id"] == "draft_attention_1"
+        assert automation.generate_count == 4
 
     asyncio.run(scenario())
 
@@ -1085,5 +1449,27 @@ def test_persisted_skill_is_listed_and_pack_binding_selects_locked_revision(tmp_
         assert resolved.steps[0].skills[0].skillId == "skill_user_1"
         assert resolved.steps[0].skills[0].revisionId == "revision_user_1"
         assert resolved.steps[0].skills[0].selectionSource == "preset"
+
+    asyncio.run(scenario())
+
+
+def test_builtin_skills_remain_available_when_automation_bridge_is_unavailable(tmp_path) -> None:
+    class UnavailableAutomation:
+        async def invoke(self, method: str, *_args: object, **_kwargs: object) -> object:
+            raise AutomationInvokeError("AUTOMATION_HTTP_ERROR", f"{method}: HTTP 503", status_code=503)
+
+    async def scenario() -> None:
+        store = AgentStateStore(tmp_path)
+        runtime = NovelAgentRuntime(
+            store,
+            UnavailableAutomation(),
+            AgentEventBus(store),
+        )  # type: ignore[arg-type]
+        listed = await runtime.skills({"locale": "zh-CN"}, {})
+        assert {item["id"] for item in listed} >= {
+            "builtin.continuity-review",
+            "builtin.novel-bootstrap",
+            "builtin.style-skill-extractor",
+        }
 
     asyncio.run(scenario())

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,9 +65,10 @@ class HttpAgentToolAdapter:
     ) -> Any:
         if method not in self._allowed_tools:
             raise AutomationInvokeError("TOOL_NOT_ALLOWED", f"Tool is not registered for Agent use: {method}")
+        normalized_params = normalize_tool_arguments(params or {})
         try:
             return await self.upstream.invoke(
-                method, params, origin,
+                method, normalized_params, origin,
                 request_id=request_id,
                 parent_request_id=parent_request_id,
                 deadline_at=deadline_at,
@@ -74,7 +76,7 @@ class HttpAgentToolAdapter:
         except TypeError as error:
             if "unexpected keyword argument" not in str(error):
                 raise
-            return await self.upstream.invoke(method, params, origin, request_id=request_id)
+            return await self.upstream.invoke(method, normalized_params, origin, request_id=request_id)
 
     async def cancel(self, request_id: str) -> bool:
         return await self.upstream.cancel(request_id)
@@ -95,6 +97,19 @@ _INVOCATION_CONTEXT: ContextVar[_InvocationContext | None] = ContextVar(
     "novel_agent_fastmcp_invocation",
     default=None,
 )
+
+
+def normalize_tool_arguments(value: Any) -> Any:
+    """Normalize JSON tool arguments consistently for every transport."""
+    if isinstance(value, dict):
+        return {
+            key: normalize_tool_arguments(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [normalize_tool_arguments(item) for item in value]
+    return value
 
 
 class _AutomationProxyTool(Tool):
@@ -195,17 +210,30 @@ class FastMcpAgentToolAdapter:
             parent_request_id=parent_request_id,
             deadline_at=deadline_at,
         ))
+        normalized_params = normalize_tool_arguments(params or {})
         try:
             try:
-                async with Client(self.server, timeout=max(self.timeout_seconds, call_timeout)) as client:
-                    result = await client.call_tool(
-                        method,
-                        params or {},
-                        timeout=call_timeout,
-                        raise_on_error=True,
-                    )
+                # FastMCP's call timeout does not cover every part of the client
+                # lifecycle (notably connection setup/teardown). Keep a hard
+                # deadline around the complete in-process invocation so a run
+                # cannot remain indefinitely on a tool_call event.
+                async with asyncio.timeout(call_timeout):
+                    async with Client(self.server, timeout=call_timeout) as client:
+                        result = await client.call_tool(
+                            method,
+                            normalized_params,
+                            timeout=call_timeout,
+                            raise_on_error=True,
+                        )
             except AutomationInvokeError:
                 raise
+            except TimeoutError as error:
+                raise AutomationInvokeError(
+                    "UPSTREAM_TIMEOUT",
+                    f"FastMCP tool timed out after {call_timeout:g}s: {method}",
+                    {"method": method, "timeoutSeconds": call_timeout},
+                    504,
+                ) from error
             except Exception as error:
                 raise AutomationInvokeError("FASTMCP_PROTOCOL_ERROR", str(error)) from error
         finally:

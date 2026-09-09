@@ -297,7 +297,7 @@ try {
                 retryStrategy: 'repair_model_output',
                 canRecover: true,
                 recoveryRevision: 2,
-                actionLabel: '修复 JSON 后继续',
+                actionLabel: '修复结果并继续',
                 completedArtifactIds: ['artifact-draft-1'],
                 affectedArtifactIds: [],
                 diagnosticRef: 'diagnostic-sqlite-recovery',
@@ -349,7 +349,7 @@ try {
     assert.equal(restored[0].run.resumedFrom.nodeId, 'audit.synthesize');
     assert.equal(restored[0].run.completionKind, 'partial');
     assert.equal(restored[0].run.recovery.retryStrategy, 'repair_model_output');
-    assert.equal(restored[0].run.recovery.actionLabel, '修复 JSON 后继续');
+    assert.equal(restored[0].run.recovery.actionLabel, '修复结果并继续');
     assert.equal(restored[0].run.artifacts.length, 1);
     assert.equal(restored[0].run.artifacts[0].artifactId, 'artifact-draft-1');
     assert.deepEqual(restored[0].run.artifacts[0].reference, { draftSessionId: 'draft-session-1' });

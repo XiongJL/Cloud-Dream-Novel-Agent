@@ -26,6 +26,7 @@ _NON_RETRYABLE_CODES = frozenset({
     "INVALID_INPUT",
     "INVALID_STATE",
     "MODEL_OUTPUT_INVALID",
+    "MODEL_OUTPUT_TRUNCATED",
     "MODEL_RESULT_TOO_LARGE",
     "NOT_FOUND",
     "PERSISTENCE_ERROR",
@@ -129,13 +130,17 @@ def is_retryable_agent_error(error: BaseException) -> bool:
     if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):
         return True
 
+    details = _error_details(error)
+    # The provider layer may already have spent its bounded recovery budget.
+    # A familiar transport code must not start another nested retry loop.
+    if details.get("retryable") is False:
+        return False
     code = _error_code(error)
     if code in _NON_RETRYABLE_CODES:
         return False
     if code in _RETRYABLE_CODES:
         return True
 
-    details = _error_details(error)
     if details.get("retryable") is True:
         return True
     status = _http_status(error)
@@ -172,6 +177,8 @@ def normalize_agent_error(error: BaseException, *, attempts: int = 1) -> AgentRe
         user_message = "当前窗口无法同时容纳必要能力描述、任务上下文和回复空间，请减少能力范围或改用更大窗口。"
     elif code == "MODEL_OUTPUT_INVALID":
         user_message = "模型返回的结构不符合要求，已保存结果并可尝试修复。"
+    elif code == "MODEL_OUTPUT_TRUNCATED":
+        user_message = "生成达到本次输出额度，尚未形成完整草稿。"
     elif code == "MODEL_REPAIR_IN_PROGRESS":
         user_message = "JSON 修复仍在处理中，请稍后再次点击恢复按钮。"
     elif retryable:
@@ -197,6 +204,14 @@ def normalize_agent_error(error: BaseException, *, attempts: int = 1) -> AgentRe
                 "contractVersion",
                 "validationIssues",
                 "resultHash",
+                "terminationReason",
+                "responseId",
+                "model",
+                "usage",
+                "requestedMaxTokens",
+                "attemptCount",
+                "attempts",
+                "safeToRetryBeforePublish",
             )
             if key in source_details
         },

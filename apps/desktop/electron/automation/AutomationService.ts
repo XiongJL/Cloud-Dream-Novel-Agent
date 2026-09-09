@@ -66,9 +66,15 @@ import type {
 } from '../../shared/reviewComments';
 import { AgentAttachmentStore } from '../agent/AgentAttachmentStore';
 import { AgentModelResultStore } from './AgentModelResultStore';
-import { getAgentStructuredOutputContract, validateAgentStructuredOutput } from './AgentStructuredOutputContracts';
+import {
+    getAgentStructuredOutputContract,
+    mergeAgentStructuredOutputIssues,
+    validateAgentStructuredOutput,
+} from './AgentStructuredOutputContracts';
 import { parseRepairableJsonObject } from '../../shared/agentJson';
 import { AgentSkillStore } from '../agentSkills/AgentSkillStore';
+import { normalizeAiError } from '../ai/errors';
+import type { AgentStructuredOutputContract } from './AgentStructuredOutputContracts';
 
 const EMPTY_CREATIVE_DRAFT: CreativeAssetsDraft = {
     plotLines: [],
@@ -109,10 +115,10 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'agent.generate_user_input_followup': 120000,
     'agent.revise_plan': 150000,
     'agent.generate_report': 210000,
-    'agent.generate_consistency_review': 240000,
+    'agent.generate_consistency_review': 330000,
     'agent.generate_novel_bootstrap': 240000,
-    'agent.generate_style_skill_pack': 420000,
-    'agent.generate_skill_draft': 240000,
+    'agent.plan_style_skill_pack': 240000,
+    'agent.generate_skill_document': 240000,
     'agent.generate_editor_range_review': 240000,
     'agent.generate_writer_range_revision_plan': 240000,
     'agent.generate_reader_chapter_evaluation': 240000,
@@ -133,6 +139,16 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'agent_skill.draft.upsert': 30000,
     'agent_skill.draft.commit': 30000,
     'agent_skill.draft.discard': 15000,
+    'agent_skill.workspace.create': 30000,
+    'agent_skill.workspace.list': 15000,
+    'agent_skill.workspace.read': 15000,
+    'agent_skill.workspace.write': 30000,
+    'agent_skill.workspace.patch': 30000,
+    'agent_skill.workspace.remove': 30000,
+    'agent_skill.workspace.set_pack': 30000,
+    'agent_skill.workspace.validate': 30000,
+    'agent_skill.workspace.compile': 30000,
+    'agent_skill.workspace.diff': 15000,
     'artifact.review.submit': 30000,
     'review.comment.list': 15000,
     'review.comment.save': 15000,
@@ -180,6 +196,12 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'chapter.revise_draft': 360000,
     'chapter.continuation_context.build': 90000,
 };
+
+const INCOMPLETE_CHAPTER_TEXT_CONTRACT = {
+    contractId: 'chapter.draft.incomplete_text',
+    version: '1.0.0',
+    schema: { type: 'string' },
+} satisfies AgentStructuredOutputContract;
 const DEFAULT_AUTOMATION_TIMEOUT_MS = 30000;
 
 type NormalizedPromptPreviewKind = 'creative_assets' | 'chapter';
@@ -612,10 +634,19 @@ export class AutomationService {
             autoRepair?: boolean;
         } = {},
     ): Promise<T> {
+        const contract = getAgentStructuredOutputContract(method);
+        if (!contract) {
+            return Promise.reject(createAutomationError(
+                'OUTPUT_CONTRACT_MISMATCH',
+                `Structured Agent method is not registered: ${method}`,
+                { method },
+            ));
+        }
         const resultRequestId = checkpointOptions.modelResultRef || context.requestId || randomUUID();
         return this.aiService.withAgentStructuredInvocation({
             requestId: resultRequestId,
             method,
+            contract,
             checkpoint: async (rawText, contract) => {
                 const record = await this.modelResultStore.save(
                     resultRequestId,
@@ -751,7 +782,20 @@ export class AutomationService {
         const localValidationIssues = localPayload
             ? validateAgentStructuredOutput(localPayload, contract)
             : [];
-        if (localPayload && localValidationIssues.length === 0) {
+        const requestedValidationIssues = Array.isArray(params?.validationIssues)
+            ? params.validationIssues.slice(0, 20).map((issue: unknown) => {
+                const value = issue && typeof issue === 'object' ? issue as Record<string, unknown> : {};
+                return {
+                    path: String(value.path || '').slice(0, 500),
+                    message: String(value.message || '').slice(0, 1000),
+                };
+            })
+            : [];
+        const validationIssues = mergeAgentStructuredOutputIssues(
+            localValidationIssues,
+            requestedValidationIssues,
+        );
+        if (localPayload && validationIssues.length === 0) {
             devLog('INFO', 'AutomationService.structuredOutput.localRepair', 'Saved structured JSON repaired locally', {
                 modelResultRef,
                 sourceMethod,
@@ -800,18 +844,6 @@ export class AutomationService {
                 { modelResultRef, repairAttemptId },
             );
         }
-        const requestedValidationIssues = Array.isArray(params?.validationIssues)
-            ? params.validationIssues.slice(0, 20).map((issue: unknown) => {
-                const value = issue && typeof issue === 'object' ? issue as Record<string, unknown> : {};
-                return {
-                    path: String(value.path || '').slice(0, 500),
-                    message: String(value.message || '').slice(0, 1000),
-                };
-            })
-            : [];
-        const validationIssues = localValidationIssues.length > 0
-            ? localValidationIssues.slice(0, 20)
-            : requestedValidationIssues;
         try {
             const repairedPayload = await this.invokeAgentStructured(
                 sourceMethod,
@@ -1286,8 +1318,21 @@ export class AutomationService {
     ): Promise<DraftSessionRecord> {
         assertRequiredString(payload?.novelId, 'novelId');
         assertRequiredString(payload?.brief, 'brief');
-        const result = await this.aiService.generateCreativeAssets(payload, context.signal);
-        const sanitizedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(result.draft));
+        const structuredMethod = type === 'outline-draft'
+            ? 'outline.generate_draft'
+            : 'creative_assets.generate_draft';
+        let generation: import('../ai/types').AiGenerationMetadata | undefined;
+        const generatedDraft = await this.invokeAgentStructured(
+            structuredMethod,
+            context,
+            async () => {
+                const result = await this.aiService.generateCreativeAssets(payload, context.signal);
+                generation = result.generation;
+                return result.draft;
+            },
+            { autoRepair: true },
+        );
+        const sanitizedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(generatedDraft));
         return this.draftStore.create({
             workspace: 'ai-workbench',
             type,
@@ -1299,6 +1344,7 @@ export class AutomationService {
             selection: createSelectionFromDraft(sanitizedDraft),
             previewSummary: summarizeCreativeDraft(sanitizedDraft),
             validation: null,
+            generation,
         });
     }
 
@@ -1378,18 +1424,59 @@ export class AutomationService {
             targetChapterId: _targetChapterId,
             ...chapterGeneratePayload
         } = payload;
-        const result = await this.aiService.continueWriting(
-            chapterGeneratePayload,
-            context.signal,
-            context.onProviderActivity,
-        ) as {
+        let result: {
             text: string;
             usedContext: string[];
             warnings?: string[];
             contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
             contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
             consistency: { ok: boolean; issues: string[] };
+            generation?: import('../ai/types').AiGenerationMetadata;
         };
+        try {
+            result = await this.aiService.continueWriting(
+                chapterGeneratePayload,
+                context.signal,
+                context.onProviderActivity,
+            );
+        } catch (error) {
+            const normalized = normalizeAiError(error);
+            const details = normalized.details ?? {};
+            const firstAttempt = details.firstAttempt && typeof details.firstAttempt === 'object'
+                ? details.firstAttempt as Record<string, unknown>
+                : {};
+            const partialText = typeof details.partialText === 'string' && details.partialText
+                ? details.partialText
+                : typeof firstAttempt.partialText === 'string'
+                    ? firstAttempt.partialText
+                    : '';
+            const containsTruncatedAttempt = normalized.code === 'MODEL_OUTPUT_TRUNCATED'
+                || firstAttempt.terminationReason === 'max_output_tokens';
+            if (!containsTruncatedAttempt || !partialText) throw normalized;
+            const resultRequestId = context.requestId
+                || (typeof details.responseId === 'string' ? details.responseId : '')
+                || randomUUID();
+            const checkpoint = await this.modelResultStore.save(
+                resultRequestId,
+                'chapter.generate_draft',
+                INCOMPLETE_CHAPTER_TEXT_CONTRACT,
+                partialText,
+            );
+            throw createAutomationError(
+                normalized.code,
+                normalized.code === 'MODEL_OUTPUT_TRUNCATED'
+                    ? '生成达到本次输出额度，尚未形成完整草稿。'
+                    : normalized.message,
+                {
+                ...details,
+                modelResultRef: checkpoint.modelResultRef,
+                modelResultRevision: checkpoint.revision,
+                resultHash: checkpoint.resultHash,
+                incomplete: true,
+                safeToRetryBeforePublish: true,
+                },
+            );
+        }
 
         const draftHeadingTitle = await this.resolveChapterDraftTitle({
             chapterId: payload.chapterId,
@@ -1462,6 +1549,7 @@ export class AutomationService {
             contextSnapshot: result.contextSnapshot,
             sourceSnapshot,
             consistency: result.consistency,
+            generation: result.generation,
         };
 
         const sessionInput = {
@@ -1560,27 +1648,72 @@ export class AutomationService {
                 : '';
             return `${index + 1}. ${location}：${comment.body.trim()}${quote}`;
         }).join('\n');
-        const result = await this.aiService.continueWriting({
-            novelId: source.novelId,
-            chapterId: sourcePayload.sourceSnapshot?.chapterId || sourcePayload.chapterId,
-            currentContent: normalizeChapterDraftText(sourcePayload.generatedText, revisedTitle),
-            locale: input.locale || 'zh-CN',
-            mode: 'rewrite_chapter',
-            userIntent: [
-                '根据以下审批意见重写当前待审核草稿。',
-                '只调整被指出的内容；没有审批意见的情节、事实、人物状态、伏笔和文风应尽量保持。',
-                '输出完整的新草稿正文，不要解释修改过程。',
-                instructions,
-            ].join('\n'),
-            presentation: 'silent',
-        }, context.signal) as {
+        let result: {
             text: string;
             usedContext: string[];
             warnings?: string[];
             contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
             contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
             consistency: { ok: boolean; issues: string[] };
+            generation?: import('../ai/types').AiGenerationMetadata;
         };
+        try {
+            result = await this.aiService.continueWriting({
+                novelId: source.novelId,
+                chapterId: sourcePayload.sourceSnapshot?.chapterId || sourcePayload.chapterId,
+                currentContent: normalizeChapterDraftText(sourcePayload.generatedText, revisedTitle),
+                locale: input.locale || 'zh-CN',
+                mode: 'rewrite_chapter',
+                targetLength: sourcePayload.generation?.lengthValidation?.target,
+                userIntent: [
+                    '根据以下审批意见重写当前待审核草稿。',
+                    '只调整被指出的内容；没有审批意见的情节、事实、人物状态、伏笔和文风应尽量保持。',
+                    '输出完整的新草稿正文，不要解释修改过程。',
+                    ...(sourcePayload.generation?.lengthValidation ? [
+                        `保持原定篇幅 ${sourcePayload.generation.lengthValidation.min}—${sourcePayload.generation.lengthValidation.max} ${/^zh/i.test(input.locale || 'zh-CN') ? '汉字' : 'words'}；下方审批意见如明确调整篇幅，则以新要求为准。`,
+                    ] : []),
+                    instructions,
+                ].join('\n'),
+                presentation: 'silent',
+            }, context.signal);
+        } catch (error) {
+            const normalized = normalizeAiError(error);
+            const details = normalized.details ?? {};
+            const firstAttempt = details.firstAttempt && typeof details.firstAttempt === 'object'
+                ? details.firstAttempt as Record<string, unknown>
+                : {};
+            const partialText = typeof details.partialText === 'string' && details.partialText
+                ? details.partialText
+                : typeof firstAttempt.partialText === 'string'
+                    ? firstAttempt.partialText
+                    : '';
+            const containsTruncatedAttempt = normalized.code === 'MODEL_OUTPUT_TRUNCATED'
+                || firstAttempt.terminationReason === 'max_output_tokens';
+            if (!containsTruncatedAttempt || !partialText) throw normalized;
+            const resultRequestId = context.requestId
+                || (typeof details.responseId === 'string' ? details.responseId : '')
+                || randomUUID();
+            const checkpoint = await this.modelResultStore.save(
+                resultRequestId,
+                'chapter.revise_draft',
+                INCOMPLETE_CHAPTER_TEXT_CONTRACT,
+                partialText,
+            );
+            throw createAutomationError(
+                normalized.code,
+                normalized.code === 'MODEL_OUTPUT_TRUNCATED'
+                    ? '生成达到本次输出额度，尚未形成完整草稿。'
+                    : normalized.message,
+                {
+                    ...details,
+                    modelResultRef: checkpoint.modelResultRef,
+                    modelResultRevision: checkpoint.revision,
+                    resultHash: checkpoint.resultHash,
+                    incomplete: true,
+                    safeToRetryBeforePublish: true,
+                },
+            );
+        }
         const generatedText = normalizeChapterDraftText(String(result.text || '').trim(), revisedTitle);
         if (!generatedText) {
             throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty revised draft after chapter title normalization');
@@ -1604,6 +1737,7 @@ export class AutomationService {
                 contextPolicy: result.contextPolicy,
                 contextSnapshot: result.contextSnapshot,
                 consistency: result.consistency,
+                generation: result.generation,
             },
             previewSummary: `审批意见修订草稿 ${generatedText.length} 字符`,
         });
@@ -1652,25 +1786,35 @@ export class AutomationService {
         const promptDraft = JSON.stringify(sourceDraft, (key, value) => (
             key === 'imageBase64' ? '[保留原图片数据]' : value
         ), 2);
-        const result = await this.aiService.generateCreativeAssets({
-            novelId: source.novelId,
-            locale: input.locale || 'zh-CN',
-            brief: '根据审批意见重写当前创作素材审核包。',
-            targetSections,
-            includeExistingEntities: false,
-            filterCompletedPlotLines: false,
-            overrideUserPrompt: [
-                '你正在修订一个待审核的创作素材包。',
-                '必须返回完整 JSON 素材包，结构与原素材包一致。',
-                '只修改审批意见指出的条目或字段；其余情节、角色、设定、物品、技能和地图保持不变。',
-                '不要解释修改过程，不要省略未修改条目。',
-                '原素材包：',
-                promptDraft,
-                '审批意见：',
-                instructions,
-            ].join('\n'),
-        }, context.signal);
-        const revisedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(result.draft));
+        let generation: import('../ai/types').AiGenerationMetadata | undefined;
+        const generatedDraft = await this.invokeAgentStructured(
+            'creative_assets.revise_draft',
+            context,
+            async () => {
+                const result = await this.aiService.generateCreativeAssets({
+                    novelId: source.novelId,
+                    locale: input.locale || 'zh-CN',
+                    brief: '根据审批意见重写当前创作素材审核包。',
+                    targetSections,
+                    includeExistingEntities: false,
+                    filterCompletedPlotLines: false,
+                    overrideUserPrompt: [
+                        '你正在修订一个待审核的创作素材包。',
+                        '必须返回完整 JSON 素材包，结构与原素材包一致。',
+                        '只修改审批意见指出的条目或字段；其余情节、角色、设定、物品、技能和地图保持不变。',
+                        '不要解释修改过程，不要省略未修改条目。',
+                        '原素材包：',
+                        promptDraft,
+                        '审批意见：',
+                        instructions,
+                    ].join('\n'),
+                }, context.signal);
+                generation = result.generation;
+                return result.draft;
+            },
+            { autoRepair: true },
+        );
+        const revisedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(generatedDraft));
         const revisedCount = Object.values(revisedDraft).reduce((total, items) => total + (items?.length ?? 0), 0);
         if (revisedCount === 0) throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty creative assets revision');
 
@@ -1687,6 +1831,7 @@ export class AutomationService {
             selection: createSelectionFromDraft(revisedDraft),
             validation: null,
             previewSummary: summarizeCreativeDraft(revisedDraft),
+            generation,
         });
     }
 
@@ -2125,10 +2270,10 @@ export class AutomationService {
                     return invokeStructured(() => this.aiService.generateAgentConsistencyReview(params, signal));
                 case 'agent.generate_novel_bootstrap':
                     return invokeStructured(() => this.aiService.generateAgentNovelBootstrap(params, signal));
-                case 'agent.generate_style_skill_pack':
-                    return invokeStructured(() => this.aiService.generateAgentStyleSkillPack(params, signal));
-                case 'agent.generate_skill_draft':
-                    return invokeStructured(() => this.aiService.generateAgentSkillDraft(params, signal));
+                case 'agent.plan_style_skill_pack':
+                    return invokeStructured(() => this.aiService.planAgentStyleSkillPack(params, signal));
+                case 'agent.generate_skill_document':
+                    return this.aiService.generateAgentSkillDocument(params, signal);
                 case 'agent.generate_editor_range_review':
                     return invokeStructured(() => this.aiService.generateAgentEditorRangeReview(params, signal));
                 case 'agent.generate_writer_range_revision_plan':
@@ -2169,6 +2314,26 @@ export class AutomationService {
                     return this.agentSkillStore.commitDraft(params);
                 case 'agent_skill.draft.discard':
                     return this.agentSkillStore.discardDraft(String(params?.draftId || params?.id || ''), params?.expectedVersion);
+                case 'agent_skill.workspace.create':
+                    return this.agentSkillStore.createAuthoringWorkspace(params);
+                case 'agent_skill.workspace.list':
+                    return this.agentSkillStore.listAuthoringDocuments(params);
+                case 'agent_skill.workspace.read':
+                    return this.agentSkillStore.readAuthoringDocument(params);
+                case 'agent_skill.workspace.write':
+                    return this.agentSkillStore.writeAuthoringDocument(params);
+                case 'agent_skill.workspace.patch':
+                    return this.agentSkillStore.patchAuthoringDocument(params);
+                case 'agent_skill.workspace.remove':
+                    return this.agentSkillStore.removeAuthoringDocument(params);
+                case 'agent_skill.workspace.set_pack':
+                    return this.agentSkillStore.setAuthoringPack(params);
+                case 'agent_skill.workspace.validate':
+                    return this.agentSkillStore.validateAuthoringWorkspace(params);
+                case 'agent_skill.workspace.compile':
+                    return this.agentSkillStore.compileAuthoringWorkspace(params);
+                case 'agent_skill.workspace.diff':
+                    return this.agentSkillStore.diffAuthoringWorkspace(params);
                 case 'artifact.review.submit':
                     return this.reviewStore.submitArtifactReview(params as ArtifactReviewSubmitInput);
                 case 'review.comment.list':

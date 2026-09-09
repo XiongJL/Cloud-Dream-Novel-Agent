@@ -1,4 +1,4 @@
-import { X, Book, type LucideIcon, Settings as SettingsIcon, Keyboard, Bot } from 'lucide-react';
+import { X, Book, type LucideIcon, Settings as SettingsIcon, Keyboard, Bot, CircleHelp } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { clsx } from 'clsx';
@@ -8,7 +8,9 @@ import { formatShortcut, useShortcuts, KeyBinding, ShortcutAction } from '../hoo
 import { useEditorPreferences } from '../hooks/useEditorPreferences';
 import { BackupRestorePanel } from './Settings/BackupRestorePanel';
 import { AISettingsPanel } from './Settings/AISettingsPanel';
+import { AboutPanel } from './Settings/AboutPanel';
 import { Database } from 'lucide-react';
+import { DEFAULT_CHAPTER_LENGTH, novelChapterLength, normalizeWritingLength } from '../../shared/writingPolicy';
 
 
 interface SettingsModalProps {
@@ -24,7 +26,7 @@ interface SettingsModalProps {
     // currently we share the modal for both, but some tabs might be hidden
 }
 
-type TabId = 'general' | 'novel' | 'shortcuts' | 'backup' | 'ai';
+type TabId = 'general' | 'novel' | 'shortcuts' | 'backup' | 'ai' | 'about';
 
 export default function SettingsModal({ isOpen, onClose, novelContext, initialTab }: SettingsModalProps) {
     const { t, i18n } = useTranslation();
@@ -33,6 +35,7 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
 
     // Novel Formatting State
     const [config, setConfig] = useState({ volume: '', chapter: '' });
+    const [chapterTargetLength, setChapterTargetLength] = useState(String(DEFAULT_CHAPTER_LENGTH));
 
     // Shortcuts State
     const { shortcuts, updateShortcut } = useShortcuts();
@@ -40,6 +43,7 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
 
     useEffect(() => {
         if (isOpen && novelContext) {
+            setChapterTargetLength(String(novelChapterLength(novelContext.initialFormatting) ?? DEFAULT_CHAPTER_LENGTH));
             try {
                 const parsed = JSON.parse(novelContext.initialFormatting || '{}');
                 setConfig({
@@ -63,7 +67,15 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
 
     const handleSaveFormatting = async () => {
         if (novelContext) {
-            await novelContext.onSaveFormatting(JSON.stringify(config));
+            let previous: Record<string, any> = {};
+            try {
+                const parsed = JSON.parse(novelContext.initialFormatting || '{}');
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previous = parsed;
+            } catch { /* Legacy malformed settings use defaults. */ }
+            await novelContext.onSaveFormatting(JSON.stringify({
+                ...previous, ...config,
+                writing: { ...previous.writing, chapterTargetLength: normalizeWritingLength(chapterTargetLength) },
+            }));
             onClose();
         }
     };
@@ -105,6 +117,7 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
         { id: 'shortcuts', label: t('settings.shortcuts.title'), icon: Keyboard },
         { id: 'backup', label: t('backup.title'), icon: Database },
         { id: 'ai', label: t('settings.ai.title', 'AI'), icon: Bot },
+        { id: 'about', label: t('settings.about.title'), icon: CircleHelp },
     ];
 
     if (novelContext) {
@@ -289,8 +302,20 @@ export default function SettingsModal({ isOpen, onClose, novelContext, initialTa
                             <AISettingsPanel isDark={isDark} />
                         )}
 
+                        {activeTab === 'about' && (
+                            <AboutPanel isDark={isDark} />
+                        )}
+
                         {activeTab === 'novel' && novelContext && (
                             <div className="space-y-8 animate-in fade-in slide-in-from-right-4 duration-300">
+                                <label className="block space-y-2">
+                                    <span className="text-sm font-medium">{t('settings.novel.chapterTargetLength')}</span>
+                                    <input type="number" min={100} max={50000} step={100}
+                                        value={chapterTargetLength} onChange={event => setChapterTargetLength(event.target.value)}
+                                        onBlur={() => setChapterTargetLength(String(normalizeWritingLength(chapterTargetLength)))}
+                                        className={clsx('w-full border rounded-xl px-4 py-3', isDark ? 'bg-[#0a0a0f] border-white/10 text-white' : 'bg-white border-gray-200 text-gray-900')} />
+                                    <span className="block text-xs text-gray-500">{t('settings.novel.chapterTargetLengthHint')}</span>
+                                </label>
                                 <div className="space-y-6">
                                     <div className="space-y-4">
                                         <label className={clsx("text-sm font-medium uppercase tracking-widest", isDark ? "text-neutral-400" : "text-gray-500")}>

@@ -21,6 +21,7 @@ export interface AiHttpSettings {
     imageWatermark: boolean;
     timeoutMs: number;
     maxTokens: number;
+    outputBudgetMode: 'auto' | 'manual';
     contextWindowTokens: number;
     temperature: number;
 }
@@ -89,6 +90,24 @@ export interface AiGenerateRequest {
 export interface AiGenerateResponse {
     text: string;
     model?: string;
+    responseId?: string;
+    usage?: Record<string, unknown>;
+    finishReason?: string;
+    requestedMaxTokens?: number;
+    elapsedMs?: number;
+    attemptCount?: number;
+}
+
+export interface AiGenerationMetadata {
+    lengthValidation?: import('../../shared/writingPolicy').WritingLengthTarget & { actual: number; withinRange: boolean; repairAttempted: boolean };
+    taskOutputLimitTokens?: number;
+    responseId?: string;
+    usage?: Record<string, unknown>;
+    finishReason?: string;
+    requestedMaxTokens?: number;
+    elapsedMs?: number;
+    attemptCount: number;
+    budget: import('./TaskOutputBudget').TaskOutputBudget;
 }
 
 export interface AiImageRequest {
@@ -195,6 +214,7 @@ export interface ContinueWritingResult {
         ok: boolean;
         issues: string[];
     };
+    generation?: AiGenerationMetadata;
 }
 
 export interface CreativeAssetsDraft {
@@ -315,6 +335,7 @@ export interface PromptPreviewResult {
     usedContext?: string[];
     usedWorldLore?: PromptPreviewLoreItem[];
     warnings?: string[];
+    outputBudget?: import('./TaskOutputBudget').TaskOutputBudget;
 }
 
 export interface AiMapImageResult {

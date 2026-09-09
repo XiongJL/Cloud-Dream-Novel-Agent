@@ -7,6 +7,7 @@ from .intent.operations import INTENT_OPERATION_REGISTRY
 from .intent.targets import extract_style_work_title
 from .intent.rules import (
     detect_explicit_operations,
+    requests_post_generation_review,
     requested_continuation_chapter_count,
     requested_created_chapter_count,
 )
@@ -133,6 +134,25 @@ def _step_provides_tool(step: AgentPlanStep, tool_name: str) -> bool:
 
 def _sequence_toolchain_input(goal: str) -> dict[str, Any]:
     return {"chapterCount": requested_continuation_chapter_count(goal) or 2}
+
+
+def _chapter_continuation_input(goal: str) -> dict[str, Any]:
+    normalized = goal.strip().lower()
+    requests_review = requests_post_generation_review(normalized)
+    dimensions: list[str] = []
+    dimension_markers = {
+        "logic": ("逻辑", "logic"),
+        "point_of_view": ("视角", "point of view", "pov"),
+        "ending_hook": ("结尾钩子", "章末钩子", "ending hook"),
+        "continuity": ("一致性", "前后", "continuity", "consistency"),
+    }
+    for dimension, markers in dimension_markers.items():
+        if any(marker in normalized for marker in markers):
+            dimensions.append(dimension)
+    return {
+        "editorialReview": requests_review,
+        **({"reviewDimensions": dimensions} if dimensions else {}),
+    }
 
 
 def _build_steps_from_model(result: Any, existing_step_ids: set[str] | None = None) -> tuple[str, list[AgentPlanStep]]:
@@ -270,6 +290,7 @@ def build_plan_from_intent(
             title=(
                 "新增章节草稿" if operation.type == "chapter.create"
                 else "改写章节草稿" if operation.type == "chapter.rewrite"
+                else "生成章节正文草稿并编辑审校" if operation.type == "chapter.continuation" and _chapter_continuation_input(normalized_goal)["editorialReview"]
                 else definition.title
             ),
             tools=[],
@@ -281,6 +302,8 @@ def build_plan_from_intent(
                     if operation.type == "chapter.create"
                     else _sequence_toolchain_input(normalized_goal)
                     if definition.id == "chapter.sequence_continuation"
+                    else _chapter_continuation_input(normalized_goal)
+                    if definition.id == "chapter.continuation"
                     else {
                         "sourceMode": "named_work_model_prior",
                         "sourceWorkTitle": style_work_title,
@@ -346,6 +369,7 @@ def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str,
                 title=(
                     "新增章节草稿" if operation.type == "chapter.create"
                     else "改写章节草稿" if operation.type == "chapter.rewrite"
+                    else "生成章节正文草稿并编辑审校" if operation.type == "chapter.continuation" and _chapter_continuation_input(plan.goal)["editorialReview"]
                     else definition.title
                 ),
                 tools=[],
@@ -357,6 +381,8 @@ def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str,
                         if operation.type == "chapter.create"
                         else _sequence_toolchain_input(plan.goal)
                         if definition.id == "chapter.sequence_continuation"
+                        else _chapter_continuation_input(plan.goal)
+                        if definition.id == "chapter.continuation"
                         else {}
                     ),
                 ),

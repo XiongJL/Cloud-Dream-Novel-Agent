@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from novel_agent_runtime.retry import AgentRequestError, agent_retry_policy, nor
 from novel_agent_runtime.runtime import NovelAgentRuntime
 from novel_agent_runtime.schemas import AgentPlan, AgentPlanStep, AgentRecoveryDescriptor, AgentRun
 from novel_agent_runtime.store import AgentStateStore
+from novel_agent_runtime.toolchains.schemas import ToolchainInvocation
 
 
 class FlakyInvoker:
@@ -119,6 +121,73 @@ def test_run_model_and_read_only_tool_emit_retry_events(tmp_path: Path) -> None:
         assert event_types.count("request_retry_started") == 6
         assert event_types.count("request_retry_succeeded") == 2
         assert all(event.payload.get("retryLimit") == 3 for event in run.events)
+
+    asyncio.run(scenario())
+
+
+def test_run_deadline_guard_finishes_a_stalled_toolchain_with_terminal_events(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, _invoker = create_runtime(tmp_path)
+        step = AgentPlanStep(
+            stepId="step-stalled",
+            agent="writer",
+            title="Stalled style extraction",
+            tools=[],
+            status="running",
+            toolchain=ToolchainInvocation(
+                id="agent_skill.style_extract",
+                version="1.0.0",
+                input={},
+            ),
+        )
+        plan = AgentPlan(
+            planId="plan-stalled",
+            threadId="thread-stalled",
+            title="Stalled plan",
+            goal="Extract style",
+            requiresApproval=True,
+            steps=[step],
+            preferredRole="writer",
+            deliverable="report",
+        )
+        run = AgentRun(
+            runId="run-stalled",
+            threadId=plan.threadId,
+            planId=plan.planId,
+            status="running",
+            currentStepId=step.stepId,
+            deadlineAt=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        )
+        runtime.state.plans[plan.planId] = plan
+        runtime.state.runs[run.runId] = run
+
+        class StalledExecutionGraph:
+            async def run(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+                await runtime._emit(
+                    run,
+                    "tool_call",
+                    step_id=step.stepId,
+                    agent=step.agent,
+                    tool_name="chapter.scope_context.build",
+                    status="running",
+                    payload={
+                        "toolchainId": step.toolchain.id,
+                        "nodeId": "style_source.read",
+                    },
+                )
+                await asyncio.Event().wait()
+                return {"action": "terminal"}
+
+        runtime.execution_graph = StalledExecutionGraph()  # type: ignore[assignment]
+        await runtime._run_graph_guarded(run.runId, initial_state={})  # type: ignore[arg-type]
+
+        assert run.status == "failed"
+        event_types = [event.type for event in runtime.store.list_events(run.runId)]
+        expected = ["tool_call", "tool_result", "toolchain_failed", "step_failed", "run_failed"]
+        positions = [event_types.index(event_type) for event_type in expected]
+        assert positions == sorted(positions)
+        assert next(event for event in run.events if event.type == "tool_result").status == "failed"
+        assert next(event for event in run.events if event.type == "run_failed").payload["code"] == "UPSTREAM_TIMEOUT"
 
     asyncio.run(scenario())
 
@@ -405,7 +474,7 @@ def test_failed_auto_repair_exposes_manual_button_then_allows_fresh_request_with
                 retryStrategy="repair_model_output",
                 canRecover=True,
                 recoveryRevision=1,
-                actionLabel="修复 JSON 后继续",
+                actionLabel="修复结果并继续",
                 diagnosticRef="diagnostic-model-repair",
             ),
         )

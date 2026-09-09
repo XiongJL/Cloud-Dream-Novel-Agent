@@ -14,6 +14,8 @@ from .rules import (
     is_light_conversation,
     prefers_conversation,
     requested_continuation_chapter_count,
+    explicitly_requests_creative_assets,
+    requests_post_generation_review,
 )
 from .schemas import (
     IntentDecision,
@@ -485,6 +487,20 @@ class IntentService:
         if "chapter.batch_rewrite" in normalized and "chapter.rewrite" in normalized:
             normalized = [item for item in normalized if item != "chapter.rewrite"]
             reasons.append("MUTUALLY_EXCLUSIVE_OPERATION_NORMALIZED")
+        has_chapter_draft = any(item in {
+            "chapter.create", "chapter.sequence_continuation", "chapter.batch_rewrite",
+            "chapter.continuation", "chapter.rewrite",
+        } for item in normalized)
+        if has_chapter_draft and "creative_asset.draft" in normalized and not explicitly_requests_creative_assets(message):
+            normalized = [item for item in normalized if item != "creative_asset.draft"]
+            reasons.append("INCIDENTAL_CREATIVE_ASSET_DROPPED")
+        if (
+            has_chapter_draft
+            and "chapter.consistency_review" in normalized
+            and requests_post_generation_review(message)
+        ):
+            normalized = [item for item in normalized if item != "chapter.consistency_review"]
+            reasons.append("DRAFT_EDITORIAL_REVIEW_OWNED_BY_CHAPTER_TOOLCHAIN")
         if "agent_skill.style_extract" in normalized:
             without_redundant_context = [
                 item for item in normalized

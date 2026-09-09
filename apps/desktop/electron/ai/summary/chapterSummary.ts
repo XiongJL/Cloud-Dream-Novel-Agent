@@ -32,6 +32,7 @@ const DEFAULT_AI_SETTINGS: AiSettings = {
         imageWatermark: false,
         timeoutMs: 60000,
         maxTokens: 4096,
+        outputBudgetMode: 'manual',
         contextWindowTokens: 0,
         temperature: 0.7,
     },

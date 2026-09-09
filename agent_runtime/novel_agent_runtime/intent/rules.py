@@ -37,6 +37,13 @@ _DRAFT_OPERATION_IDS = {
 }
 _CREATIVE_ACTIONS = ("新增", "添加", "补充", "生成", "创建", "扩展", "起草", "add", "create", "generate", "extend", "draft")
 _CREATIVE_TARGETS = ("大纲", "剧情线", "故事线", "支线", "角色", "人物", "设定", "世界观", "地图", "物品", "素材", "outline", "plot", "character", "worldbuilding", "setting")
+_EXPLICIT_CREATIVE_ASSET_REQUEST = re.compile(
+    r"(?:新增|添加|创建|扩展|起草|生成|补充|add|create|generate|extend|draft)"
+    r"[^，。；;,.!?！？]{0,10}"
+    r"(?:大纲|剧情线|故事线|支线|角色卡|人物卡|人物设定|世界设定|世界观设定|地图|物品|素材|"
+    r"outline|plotline|character card|worldbuilding asset|setting entry)",
+    re.IGNORECASE,
+)
 _LOOKUP_MARKERS = ("当前", "现有", "已有", "项目里", "这本书", "多少", "有哪些", "列表", "现在的", "current", "existing", "list")
 _PROJECT_OBJECTS = ("小说", "卷", "章节", "大纲", "剧情线", "角色", "人物", "设定", "世界观", "物品", "地图", "novel", "volume", "chapter", "outline", "character")
 _NEGATION_PREFIX = re.compile(
@@ -143,6 +150,31 @@ def marker_is_requested(message: str, marker: str) -> bool:
             return True
         start = position + len(marker)
     return False
+
+
+def explicitly_requests_creative_assets(message: str) -> bool:
+    """Require an asset creation verb to govern an asset noun locally.
+
+    Chapter briefs often mention characters or world rules as constraints. Those
+    nouns alone must not schedule a separate creative-assets deliverable.
+    """
+    normalized = _mask_non_requested_draft_language(message.strip().lower())
+    return any(not _is_negated(normalized, match.start()) for match in _EXPLICIT_CREATIVE_ASSET_REQUEST.finditer(normalized))
+
+
+def requests_post_generation_review(message: str) -> bool:
+    normalized = message.strip().lower()
+    generation_markers = (
+        "续写", "继续写", "接着写", "完整章节", "完整一章", "完成正文", "生成正文", "写完",
+        "continue", "write the chapter", "complete the chapter", "generate the chapter",
+    )
+    review_markers = (
+        "编辑检查", "编辑审核", "编辑审校", "审校", "校对", "检查逻辑", "检查视角",
+        "editor review", "edit and review", "proofread", "continuity review",
+    )
+    generation_positions = [normalized.find(marker) for marker in generation_markers if marker in normalized]
+    review_positions = [normalized.find(marker) for marker in review_markers if marker in normalized]
+    return bool(generation_positions and review_positions and min(generation_positions) < min(review_positions))
 
 
 def build_preflight(request: IntentRequest) -> IntentPreflight:
@@ -282,6 +314,9 @@ def detect_explicit_operations(message: str) -> list[str]:
         matches = [item for item in matches if item[1] != "chapter.continuation"]
     if any(operation_id == "chapter.batch_rewrite" for _, operation_id in matches):
         matches = [item for item in matches if item[1] not in {"chapter.rewrite", "chapter.scope_context", "chapter.context"}]
+    if any(operation_id in _DRAFT_OPERATION_IDS for _, operation_id in matches):
+        if not explicitly_requests_creative_assets(message):
+            matches = [item for item in matches if item[1] != "creative_asset.draft"]
     ordered: list[str] = []
     for _, operation_id in sorted(matches, key=lambda item: item[0]):
         if operation_id not in ordered:

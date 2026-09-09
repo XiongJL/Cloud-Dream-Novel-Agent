@@ -23,6 +23,7 @@
     | 'NETWORK_ERROR'
     | 'PERSISTENCE_ERROR'
     | 'MODEL_OUTPUT_INVALID'
+    | 'MODEL_OUTPUT_TRUNCATED'
     | 'MODEL_RESULT_TOO_LARGE'
     | 'CANCELLED'
     | 'UNKNOWN';
@@ -71,6 +72,7 @@ const AI_ERROR_CODES = new Set<AiErrorCode>([
     'NETWORK_ERROR',
     'PERSISTENCE_ERROR',
     'MODEL_OUTPUT_INVALID',
+    'MODEL_OUTPUT_TRUNCATED',
     'MODEL_RESULT_TOO_LARGE',
     'CANCELLED',
     'UNKNOWN',
@@ -167,6 +169,8 @@ export function formatAiErrorForDisplay(code: AiErrorCode, fallback?: string): s
             return '当前操作与现有数据冲突，请调整后重试。';
         case 'MODEL_OUTPUT_INVALID':
             return '模型返回的结构不符合要求，已保存结果并可尝试修复。';
+        case 'MODEL_OUTPUT_TRUNCATED':
+            return '生成达到本次输出额度，尚未形成完整草稿。';
         case 'MODEL_RESULT_TOO_LARGE':
             return '模型结果超过可恢复存储上限，请缩小任务范围后重试。';
         case 'PROVIDER_AUTH':

@@ -89,7 +89,7 @@ assert.match(generateAgentChat, /persistentSummary: authoritativeSummary/);
 assert.match(generateAgentChat, /adaptOutputReserve\(\{/);
 assert.match(generateAgentChat, /minimumDynamicCount\.contextTokens \+ AGENT_CHAT_DYNAMIC_CONTEXT_HEADROOM_TOKENS/);
 assert.match(generateAgentChat, /outputReserveTokens: outputTokens/);
-assert.match(generateAgentChat, /maxTokens: outputTokens/);
+assert.match(generateAgentChat, /maxTokens: outputBudget\.initialTokens/);
 assert.match(generateAgentChat, /selectionRef: 'protectedContext\.selectionContext'/);
 assert.match(generateAgentChat, /contextPath: 'protectedContext\.selectionContext'/);
 assert.match(generateAgentChat, /chapter\.continuation 表示补写该已有章节/);
@@ -162,7 +162,7 @@ assert.ok(chatResponseIndex >= 0 && clearLiveActivityIndex > chatResponseIndex &
 assert.match(workspace, /仅重试总结/);
 assert.match(workspace, /window\.agent\.retryChatSummary\(/);
 assert.match(workspace, /window\.agent\.recoverChat\(/);
-assert.match(workspace, /修复 JSON 并继续/);
+assert.match(workspace, /修复结果并继续/);
 assert.match(workspace, /recoveryRef/);
 assert.doesNotMatch(workspace, /modelResultRef/);
 assert.match(workspace, /activities: response\.activities/);

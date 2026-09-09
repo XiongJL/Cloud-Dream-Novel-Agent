@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -16,6 +17,7 @@ ToolchainErrorCode = Literal[
     "CONTEXT_INSUFFICIENT",
     "NODE_FAILED",
     "MODEL_OUTPUT_INVALID",
+    "MODEL_OUTPUT_TRUNCATED",
     "SIDE_EFFECT_UNKNOWN",
     "CANCELLED",
 ]
@@ -84,6 +86,8 @@ class ChapterContinuationInput(ChapterContextInput):
     style: str = ""
     tone: str = ""
     pace: str = ""
+    editorialReview: bool = False
+    reviewDimensions: list[str] = Field(default_factory=list, max_length=12)
 
 
 ChapterScopeKind = Literal[
@@ -288,6 +292,29 @@ class StyleSkillDraftPreview(BaseModel):
     evaluationPrompt: str = Field(min_length=1, max_length=2000)
 
 
+class StyleSkillMemberAuthoringPlan(BaseModel):
+    """Small metadata plan used before authoring each member as a SKILL.md document."""
+
+    draftKey: Literal["language_style", "suspense_release", "ensemble_progression"]
+    stableIdCandidate: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$",
+    )
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=1000)
+    guidanceMode: Literal["adaptive", "guided", "strict"] = "guided"
+    confidence: Literal["low", "medium", "high"]
+    triggerHints: list[str] = Field(min_length=1, max_length=8)
+    antiTriggerHints: list[str] = Field(min_length=1, max_length=8)
+    supportedOperations: list[str] = Field(min_length=1, max_length=8)
+    constraints: list[str] = Field(min_length=1, max_length=20)
+    methodDimensions: list[str] = Field(min_length=3, max_length=12)
+    evidenceNotes: list[str] = Field(default_factory=list, max_length=20)
+    contaminationWarnings: list[str] = Field(default_factory=list, max_length=20)
+    evaluationPrompt: str = Field(min_length=1, max_length=2000)
+
+
 class StyleSkillPackBindingPreview(BaseModel):
     operationId: str = Field(min_length=1, max_length=120)
     roleId: str = Field(min_length=1, max_length=80)
@@ -323,6 +350,40 @@ class StyleSkillPackDraftArtifact(BaseModel):
                 binding.auxiliaryDraftKey and binding.auxiliaryDraftKey not in known
             ):
                 raise ValueError("Skill Pack binding references an unknown draft key")
+        return self
+
+
+class StyleSkillPackAuthoringPlan(BaseModel):
+    """Bounded protocol object; long Skill bodies are authored as workspace documents."""
+
+    summary: str = Field(min_length=1, max_length=2000)
+    sourceCoverage: dict[str, Any] = Field(default_factory=dict)
+    skills: list[StyleSkillMemberAuthoringPlan] = Field(min_length=2, max_length=3)
+    pack: StyleSkillPackPreview
+    omittedDimensions: list[str] = Field(default_factory=list, max_length=10)
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_dimensions_and_bindings(self) -> "StyleSkillPackAuthoringPlan":
+        keys = [item.draftKey for item in self.skills]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Style Skill plan draft keys must be unique")
+        if "language_style" not in keys or "suspense_release" not in keys:
+            raise ValueError("Style extraction requires language_style and suspense_release plans")
+        known = set(keys)
+        if not re.fullmatch(
+            r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*",
+            self.pack.stableIdCandidate,
+        ):
+            raise ValueError("Skill Pack stableIdCandidate is invalid")
+        allowed_roles = {"team", "writer", "editor", "reader", "worldbuilding", "research_rag"}
+        for binding in self.pack.bindings:
+            if binding.roleId not in allowed_roles:
+                raise ValueError("Skill Pack plan binding references an unknown role")
+            if binding.primaryDraftKey not in known or (
+                binding.auxiliaryDraftKey and binding.auxiliaryDraftKey not in known
+            ):
+                raise ValueError("Skill Pack plan binding references an unknown draft key")
         return self
 
 

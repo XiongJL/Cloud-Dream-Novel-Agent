@@ -49,9 +49,16 @@ class SideEffectResultUnknown(RuntimeError):
 
 
 class DraftOperationFailed(RuntimeError):
-    def __init__(self, code: str, message: str, operation_id: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        operation_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         self.code = code
         self.operation_id = operation_id
+        self.details = details or {}
         super().__init__(message)
 
 

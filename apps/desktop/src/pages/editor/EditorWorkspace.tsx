@@ -180,6 +180,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
         handleStartContinueWriting,
     } = useContinueWriting({
         novelId,
+        novelFormatting: novel?.formatting,
         currentChapter,
         plotLines,
         contentRef,

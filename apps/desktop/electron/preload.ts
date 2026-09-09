@@ -135,6 +135,7 @@ contextBridge.exposeInMainWorld('db', {
 contextBridge.exposeInMainWorld('electron', {
     toggleFullScreen: () => ipcRenderer.invoke('app:toggle-fullscreen'),
     getUserDataPath: () => ipcRenderer.invoke('app:get-user-data-path'),
+    getUpdateInfo: () => ipcRenderer.invoke('app:get-update-info'),
     openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url),
     onFullScreenChange: (callback: (isFullScreen: boolean) => void) => {
         const listener = (_event: any, state: boolean) => callback(state);

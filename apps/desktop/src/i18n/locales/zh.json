@@ -403,6 +403,8 @@
       "numbering": "章节编号格式",
       "volumeFormat": "卷格式",
       "chapterFormat": "章格式",
+      "chapterTargetLength": "整章默认目标字数",
+      "chapterTargetLengthHint": "默认约 2300 字，允许约 ±10% 的篇幅浮动；本次写作的明确字数要求优先。续写一段默认 500 字。",
       "preview": "预览"
     },
     "shortcuts": {
@@ -420,6 +422,24 @@
         "enter_focus": "进入专注模式",
         "create_idea": "新建灵感"
       }
+    },
+    "about": {
+      "title": "关于",
+      "productName": "云梦小说智能体",
+      "tagline": "为长篇创作而生的智能工作台",
+      "latestVersion": "最新版本",
+      "upToDate": "已是最新版本",
+      "checking": "检查中",
+      "checkForUpdates": "检查更新",
+      "checkUnavailable": "暂时无法检查更新",
+      "updateAvailable": "可更新至 {{version}}",
+      "downloadUpdate": "下载最新版本",
+      "openReleases": "前往 Releases 下载",
+      "github": "GitHub",
+      "feedback": "反馈与建议",
+      "feedbackAction": "提交 Issue",
+      "motto": "让每一个故事，都有抵达远方的勇气。",
+      "copyright": "© 2026 CloudDream. All rights reserved."
     },
     "ai": {
       "title": "AI",
@@ -451,9 +471,14 @@
       "apiKey": "API Key / Token",
       "timeoutMs": "请求超时（毫秒）",
       "maxTokens": "单次最大输出 Token",
-      "maxTokensHint": "控制单层回复的最大长度限制（调小可能造成输出截断）",
-      "contextWindowTokens": "上下文容量",
-      "contextWindowTokensHint": "通常保持自动即可；切换模型后会重新采用该模型的推荐能力档案",
+      "maxTokensHint": "限制单次模型请求的输出额度，可能包含思考内容。它不等于章节字数，也不代表整项任务总用量；仍受模型能力与产品安全上限约束。",
+      "outputBudgetMode": "生成额度",
+      "outputBudgetModeHint": "根据任务和模型能力自动分配额度；生成中断时，在任务预算内尝试恢复。已有手动配置不会自动提高。",
+      "outputBudgetAuto": "自动分配（推荐）",
+      "outputBudgetManual": "自定义单次额度",
+      "generationAdvanced": "高级：接口资源限制",
+      "contextWindowTokens": "模型上下文上限",
+      "contextWindowTokensHint": "这是模型容量上限。系统按需选取前文和设定，不会每次发送整部小说。",
       "contextWindowTokensMcpHint": "通常保持自动即可；只有明确知道外部 CLI 的模型容量时才需要调整",
       "contextWindowAutoProfile": "自动推荐（{{tokens}}）",
       "contextWindowAutoFallback": "自动保守（{{tokens}}）",
@@ -999,6 +1024,7 @@
     "PROVIDER_TIMEOUT": "模型请求超时，请稍后重试或调大超时。",
     "PROVIDER_UNAVAILABLE": "模型暂不可用，请稍后重试或切换模型。",
     "PROVIDER_FILTERED": "请求触发内容策略限制，请调整提示词。",
+    "MODEL_OUTPUT_TRUNCATED": "生成达到本次输出额度，尚未形成完整草稿。",
     "NETWORK_ERROR": "网络连接失败，请检查代理或网络配置。",
     "PERSISTENCE_ERROR": "写入失败，数据未成功保存。",
     "UNKNOWN": "未知错误，请稍后重试。"

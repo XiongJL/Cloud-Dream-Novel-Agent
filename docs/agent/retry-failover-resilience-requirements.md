@@ -51,7 +51,7 @@
 
 - 结构化 Agent 响应在解析前保存原文、契约版本、修复 revision 和内容哈希。
 - 所有已注册结构化 Agent 方法执行统一契约校验；业务 JSON 不与 JSON-RPC 传输层混淆。
-- 非法 JSON/Schema 不匹配自动修复一次；仍失败后显示一次“修复 JSON 后继续”；再次失败后只读流程可直接“重新请求模型”。
+- 非法 JSON/Schema 不匹配自动修复一次；仍失败后显示一次“修复结果并继续”；再次失败后只读流程可直接“重新生成本步骤”。JSON/Schema 仅作为内部诊断术语，不进入主操作文案。
 - 深层 Pydantic/领域模型校验复用同一恢复器，不允许 Electron 校验通过后在 Python 中无恢复地终止。
 - 本地 `AttributeError`、`KeyError`、`TypeError` 等程序缺陷保存原始结果，但同一处理器版本不显示必然失败的按钮；处理器版本变化后显示“继续处理已保存结果”，且不调用原创作模型。
 - 终态恢复创建关联 Run；失败 Run 不重新改回 `running`，恢复版本和按钮状态持久化并可在刷新/重启后恢复。
@@ -59,7 +59,7 @@
 - 计划卡中的“会话背景”默认折叠，仅在用户点击“查看会话背景”后展开。
 - 计划创建前的普通聊天也属于结构化恢复边界，不能因为尚未创建 Run 而跳过自动修复或直接恢复入口。
 - `agent.chat.response@1.0.0` 的 `inputRequest` 明确接受 `object | null`；`null` 表示无需用户补充输入，不能被结构校验误报。
-- 聊天结构校验失败时自动修复 1 次；若仍失败，Runtime 持久化后端恢复记录，Renderer 只保存不透明 `recoveryRef` 并显示“修复 JSON 并继续”。
+- 聊天结构校验失败时自动修复 1 次；若仍失败，Runtime 持久化后端恢复记录，Renderer 只保存不透明 `recoveryRef` 并显示“修复结果并继续”。
 - 用户点击聊天恢复按钮后先以当前契约重处理已保存结果；仍不合法时才执行第 2 次 JSON 修复。第 2 次失败后按钮切换为“重新生成回答”，不继续形成修复循环。
 - 旧失败记录若没有恢复引用，允许在同一用户消息上直接重新请求模型；不得重复追加用户消息，也不得要求用户发送“重试”。
 
@@ -372,7 +372,7 @@ type RetryRunRequest = {
 2. 每个结构化 Agent 方法必须注册稳定的 `contractId + contractVersion + JSON Schema`。模型负责修复业务 JSON payload；JSON-RPC 仅是 Automation 的传输协议，模型不得生成或修改 JSON-RPC envelope。
 3. `reprocess_saved_result` 只能执行无外部副作用的确定性转换；仅当处理器版本变化、存在不同兼容转换器或瞬时前置条件恢复后才允许。处理器版本相同且失败指纹不变时设置 `retryStrategy=none`。
 4. `resume_publish` 使用稳定的 Artifact key、事件去重键和数据库唯一约束；重复点击不会产生重复报告、草稿或活动项。
-5. `repair_model_output` 先自动执行一次；仍失败时保留原结果并提供一次“修复 JSON 后继续”。手动修复再次失败后停止修复循环，只读流程可转为重新请求原任务。
+5. `repair_model_output` 先自动执行一次；仍失败时保留原结果并提供一次“修复结果并继续”。手动修复再次失败后停止修复循环，只读流程可转为“重新生成本步骤”。用户界面不显示 JSON、Schema 或字段路径术语。
 6. 修复调用使用稳定 `repairAttemptId` 和调用账本；重复点击、响应丢失或刷新不得导致重复模型调用和重复计费。
 7. 恢复前重新校验章节 version/contentHash、计划 revision、Artifact revision 和权限。依赖已过期时转为 `stale` 并提示重新规划，不静默覆盖新内容。
 8. 恢复操作由 `retryStrategy` 驱动。前端、IntentService 和 `agent.retry_run` 不得以是否存在 `request_retry_exhausted` 作为唯一准入条件。
@@ -412,6 +412,37 @@ type ReprocessSavedStructuredOutputResult = {
 
 修复模型只接收保存的错误 JSON、服务端注册的目标 Schema 和最多 20 条脱敏校验错误，不重新接收项目上下文，不重新执行原创作任务。`reprocess_saved_structured_output` 只读取、解析和校验已保存结果，不调用模型。原始响应单条默认上限 4 MiB，不得静默截断；随会话/Run 删除并清理，不进入普通日志、SSE 或 Renderer。
 
+#### 9.3.1 结构化模型输出统一治理
+
+2026-08-22 的文风 Skill Pack 开发版故障暴露了跨运行时契约漂移：Electron 只校验 `skills` 为对象数组，Python 则校验每个 Skill 的枚举、字符串、数组和 Pack 绑定。第一次修复只满足浅层契约，第二次恢复又被 Electron 误判为“本地已经合法”而跳过模型修复。该类故障不能按单个 Prompt 零散修补，统一要求如下：
+
+1. 每个结构化模型方法只有一个权威契约源。`contractId + contractVersion` 同时生成或派生 TypeScript 校验器、Python 模型、修复用 JSON Schema、Prompt 输出说明和测试 Fixture；不得手工维护互不校验的浅层/深层两套定义。
+2. Electron 在返回成功前必须完成完整嵌套结构校验；Python 继续执行同等或更严格的领域语义校验。数组元素、枚举、必填字段、长度、跨字段引用和唯一性都属于输出契约，不得只判断顶层字段类型。
+3. 下游校验错误是恢复请求的权威输入之一。只要 `validationIssues` 仍非空，`repair_structured_output` 就不得因本地浅层校验通过而短路；本地问题与下游问题去重合并后再决定本地复用或模型修复。
+4. 修复顺序固定为：JSON 语法提取/`jsonrepair` → 契约专用的确定性、无信息损失规范化 → 完整 Schema 与领域校验 → 有界模型修复。禁止为了通过校验静默丢字段、臆造证据或重做原创作任务。
+5. Provider 支持原生 JSON Schema/Structured Outputs 时优先在生成阶段约束；不支持时仍使用相同权威 Schema 构造明确字段类型、枚举和最小示例。Provider 原生约束不能替代本地最终校验。
+6. Schema、领域校验器和确定性规范化器分别记录版本或内容哈希。破坏兼容性的 Schema 修改升级 `contractVersion`；仅修正错误实现但维持既有产品语义时可以保留版本，并必须增加捕获现场 Payload 形状的回归测试。
+7. 所有结构化方法进入统一契约一致性测试：合法 Fixture 双端通过、字段类型变异能在最早边界失败、TypeScript/Python 问题路径可映射、自动修复结果可再次通过双端校验、手动恢复不会被本地误短路。
+8. 观测按 `sourceMethod + contractVersion + provider + model` 聚合首次合法率、语法修复率、模型修复率、修复后仍失败率、字段问题路径 Top N、额外延迟和额外 Token；日志只保存路径、类型和引用，不记录原始小说内容。
+
+统一治理分三批落地：
+
+- **SO-0（已完成，2026-08-22）**：先补齐当时的文风 Pack 深层契约和 Prompt 类型约束以止血；随后随文档工作区切换删除该旧方法、Prompt 和契约。上下游校验问题继续合并，禁止带未解决问题的本地修复短路，并保留现场错误形状回归。
+- **SO-1（已完成首轮门禁，2026-08-22）**：已枚举当前全部 19 个已注册结构化方法（含轻量文风 Pack 规划），补齐聊天、Planner、新建小说、报告、专家审核、研究、范围综合与章节节拍的嵌套契约；Automation 与契约注册表建立 100% 对齐测试，结构化生成统一注入契约并在规范化后再次验收。后续新增方法继续受同一门禁约束。
+- **SO-2（单一来源）**：选定可生成双方类型与校验器的 Schema 源，加入 CI 漂移检查、契约 Fixture 生成、Provider 原生 Structured Outputs 能力路由和结构化输出质量仪表盘；完成后禁止业务代码新增手写平行 Schema。
+
+#### 9.3.2 结构化协议与文档式产物的边界
+
+统一契约治理不要求所有模型产物都采用一次性嵌套 JSON。协议对象和创作产物必须分开选择承载方式：
+
+- Tool Call、计划状态、恢复描述、验证诊断、领域对象编译结果、持久化和发布命令继续使用版本化结构化契约。
+- 长文本、多个相互引用的文档以及需要模型反复修改的产物，优先写入应用管理的 Draft 工作区；Skill Creator 首期把 SQLite `AgentSkillDraft.draftJson.authoring.documents` 作为虚拟文档区，不新增表或物理目录。模型通过受控文档 Tool 修改，系统以 Draft version 对应的数据库真实提交状态运行确定性校验。
+- 文档 Tool 的参数和返回值必须注册契约，但文档正文作为受控文本内容处理，不要求嵌入包含所有正文的业务 JSON。模型不得获得通用 SQL、表名或数据库连接。
+- 校验失败时保留已写文档和合法成员，只把相关逻辑路径/行级诊断交给下一轮修改；不得重新生成整个工作区，也不得把文档诊断转成要求用户点击“修复 JSON”的错误卡。
+- 正式发布前，确定性编译器把已验证工作区转换为领域 Draft，并在事务边界再次验证 workspace revision、内容哈希和发布参数；模型没有正式存储写权限。
+
+Skill Creator 是首个采用该模式的能力。迁移完成后，`agent.generate_skill_draft` 和 `agent.generate_style_skill_pack` 已从 Prompt、契约、Automation 路由和 Runtime 生成分支删除，结构化方法覆盖基线同步更新为 19。历史失败 Run 若停留在已退役阶段，应明确结束并要求新建任务，不能重新暴露旧链路。
+
 ### 9.4 恢复入口与任务连续性
 
 统一恢复接口接受明确策略，不让客户端自行猜测失败原因：
@@ -431,7 +462,7 @@ type ResumeRunRequest = {
 
 服务端必须校验请求策略与当前持久化 `AgentRecoveryDescriptor` 一致；不一致返回最新 descriptor，不执行客户端要求的更高风险动作。
 
-- 当 `canRecover=true` 时，失败卡必须直接提供与策略对应的主操作：`重新处理`、`继续发布`、`修复 JSON 后继续`、`重试模型请求`或`检查执行结果`。
+- 当 `canRecover=true` 时，失败卡必须直接提供与策略对应的主操作：`重新处理`、`继续发布`、`修复结果并继续`、`重新生成本步骤`或`检查执行结果`。
 - 点击恢复按钮直接调用结构化恢复接口，只携带 `failedRunId`、`failureRevision` 和预期策略；服务端解析内部 checkpoint，不向聊天插入伪造的用户消息，也不重新走普通意图分类。
 - 已进入终态后的任何恢复都创建关联 Recovery Run；Renderer 将恢复链折叠在原任务卡中，不把终态 Run 重新改回 `running`。
 - 用户自然输入“重试”仍可作为便捷入口，但它只能映射到同一恢复接口，不能成为唯一入口。
@@ -659,13 +690,17 @@ type NodeRecoveryRecord = {
 26. 改写批次的第 1、2 个子项分别指向目录第 2、3 章：所有审核页签、节拍预览、恢复提示和计划标题显示第 2、3 章；提交与重生成仍使用原 `childIndex` 和 `targetChapterId`，没有串章。
 27. 普通聊天返回 `inputRequest: null`：结构校验通过并展示回答，不调用 JSON 修复模型。
 28. 普通聊天返回非法 JSON：原文先落 checkpoint，自动修复 1 次；修复成功后继续同一聊天流程，不新增用户消息、不创建替代任务。
-29. 聊天自动修复仍失败：刷新或重启后“修复 JSON 并继续”仍存在；点击时 Renderer 只提交 `recoveryRef`，内部 `modelResultRef`、契约和校验详情不进入会话持久化数据。
+29. 聊天自动修复仍失败：刷新或重启后“修复结果并继续”仍存在；点击时 Renderer 只提交 `recoveryRef`，内部 `modelResultRef`、契约和校验详情不进入会话持久化数据。
 30. 已保存聊天结果在代码升级后可通过新契约直接通过：点击恢复只做本地重处理，不请求模型；只有本地重处理仍失败时才执行第 2 次 JSON 修复。
+31. 文风 Skill Pack 返回 `guidanceMode=prescriptive`、`instructions` 为数组、`omittedDimensions` 为对象数组：Electron 在首次返回前报告所有嵌套问题；自动修复后必须再次通过 Electron 与 Python 双端校验。
+32. Python 领域校验返回 Electron Schema 尚未表达的问题：手动“修复结果并继续”不得被本地合法判断短路，修复模型收到合并后的问题列表。
+33. 任一结构化方法的 TypeScript 与 Python 契约发生字段、枚举、必填项或版本漂移：CI 失败并指出 `sourceMethod` 和差异路径，不允许进入安装包。
 
 ## 16. 建议实施顺序
 
 ### P0：先解决当前问题
 
+0. 已完成 SO-0：文风 Skill Pack 使用完整嵌套契约，Prompt 明确字段类型，恢复链合并下游校验问题并覆盖真实错误形状。
 1. 在所有模型调用边界先持久化 `model_received` checkpoint，再执行严格解析、Pydantic/TypeScript 转换和 Artifact 发布；盘点聊天、计划、全部 Toolchain、团队综合、报告、修订批次和草稿 Operation，禁止仅修复当前报错链。
 2. 落地统一 `AgentRecoveryDescriptor` 与阶段恢复接口，解除 `agent.retry_run` 对 `request_retry_exhausted` 的唯一依赖；先支持 `reprocess_saved_result`、`resume_publish` 和 `repair_model_output`。
 3. 将审核可用性改为 Artifact capability 计算，父 Run 失败时保留 ready/non-stale 产物的查看、批注和允许操作；补齐多章有效前缀与团队部分结果。
@@ -673,6 +708,7 @@ type NodeRecoveryRecord = {
 5. 统一错误分类和脱敏，移除隐式 transport 二次派发。
 6. 拆分现有大 `advance`/专家执行单元，在模型与只读网络节点落地 LangGraph `RetryPolicy(max_attempts=4)`、节点超时和尝试事件。
 7. `AiService` 改为单次派发并落地错误分类、熔断/限流门禁；对齐 LangGraph、Automation 与 Provider 超时并让取消信号贯穿到底层。
+8. 已完成 SO-1 首轮全量契约盘点与注册门禁；下一步进入 SO-2 单一来源、双端生成和 CI 漂移检查。
 
 ### P1：并发可靠性
 
@@ -707,3 +743,4 @@ type NodeRecoveryRecord = {
 | 恢复资格 | 由 `AgentRecoveryDescriptor.retryStrategy` 决定，不依赖单一耗尽事件 |
 | 父 Run 失败后的审核 | ready 且未过期 Artifact 继续可查看、批注和执行其允许操作 |
 | 用户恢复入口 | 失败卡直接操作为主，聊天输入“重试”为可选别名 |
+| 结构化结果的用户语言 | 主界面只说“检查结果 / 修复结果 / 重新生成本步骤”；JSON、Schema、字段路径仅进入受限诊断 |

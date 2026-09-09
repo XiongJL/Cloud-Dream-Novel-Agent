@@ -108,6 +108,27 @@ class PendingThenSuccessAutomation(RecordingAutomation):
         }
 
 
+class DefinitivePrePublishFailureAutomation(RecordingAutomation):
+    async def invoke(
+        self,
+        method: str,
+        params: dict[str, Any],
+        origin: str,
+        request_id: str | None = None,
+    ) -> Any:
+        self.calls.append((method, params, request_id))
+        raise AutomationInvokeError(
+            "MODEL_OUTPUT_TRUNCATED",
+            "generation stopped at the output limit",
+            {
+                "safeToRetryBeforePublish": True,
+                "terminationReason": "max_output_tokens",
+                "requestedMaxTokens": 16384,
+                "attemptCount": 2,
+            },
+        )
+
+
 def test_draft_operation_pending_is_a_control_flow_signal_not_a_business_exception() -> None:
     pending = DraftOperationPending(
         "draft_operation_1",
@@ -619,6 +640,41 @@ def test_side_effect_error_becomes_unknown_and_is_never_replayed(tmp_path: Path)
         assert len(records) == 1
         assert records[0].status == "unknown"
         assert records[0].error and records[0].error["code"] == "INVOCATION_ERROR"
+
+    asyncio.run(scenario())
+
+
+def test_known_pre_publish_generation_failure_is_not_marked_unknown(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = AgentStateStore(tmp_path)
+        automation = DefinitivePrePublishFailureAutomation()
+        runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
+        run = AgentRun(
+            runId="run_known_failure",
+            threadId="thread_1",
+            planId="plan_1",
+            status="running",
+            currentStepId="step_draft",
+        )
+
+        with pytest.raises(AutomationInvokeError) as raised:
+            await runtime._tool_invoke(  # noqa: SLF001
+                run,
+                "creative_assets.generate_draft",
+                {"novelId": "novel_1", "brief": "生成角色"},
+            )
+
+        assert raised.value.code == "MODEL_OUTPUT_TRUNCATED"
+        record = store.list_invocations(run.runId)[0]
+        assert record.status == "failed"
+        assert record.error == {
+            "code": "MODEL_OUTPUT_TRUNCATED",
+            "message": "MODEL_OUTPUT_TRUNCATED: generation stopped at the output limit",
+            "terminationReason": "max_output_tokens",
+            "requestedMaxTokens": 16384,
+            "attemptCount": 2,
+            "safeToRetryBeforePublish": True,
+        }
 
     asyncio.run(scenario())
 

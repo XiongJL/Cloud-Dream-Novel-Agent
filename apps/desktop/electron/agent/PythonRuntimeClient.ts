@@ -427,7 +427,11 @@ export class PythonRuntimeClient {
             : Number.NaN;
         const invokeTimeoutMs = Number.isFinite(requestedDeadline)
             ? Math.max(1_000, requestedDeadline - Date.now() + 15_000)
-            : envelope.method === 'agent.chat' ? 315_000 : 180_000;
+            : envelope.method === 'agent.chat'
+                ? 315_000
+                : envelope.method === 'agent.skill.author'
+                    ? 495_000
+                    : 180_000;
         let lastSequence = 0;
         let polling = false;
         const pollProgress = async () => {

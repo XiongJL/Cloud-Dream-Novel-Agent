@@ -403,6 +403,8 @@
       "numbering": "Numbering Format",
       "volumeFormat": "Volume Format",
       "chapterFormat": "Chapter Format",
+      "chapterTargetLength": "Default chapter length",
+      "chapterTargetLengthHint": "About 2300 words/Chinese characters, with a ±10% range. Explicit instructions for the current task take priority. A continuation defaults to 500.",
       "preview": "Preview"
     },
     "shortcuts": {
@@ -420,6 +422,24 @@
         "enter_focus": "Enter Focus Mode",
         "create_idea": "Create Idea"
       }
+    },
+    "about": {
+      "title": "About",
+      "productName": "CloudDream Novel Agent",
+      "tagline": "An intelligent workspace for long-form storytelling",
+      "latestVersion": "Latest version",
+      "upToDate": "Up to date",
+      "checking": "Checking…",
+      "checkForUpdates": "Check for updates",
+      "checkUnavailable": "Unable to check for updates",
+      "updateAvailable": "Update to {{version}} available",
+      "downloadUpdate": "Download latest version",
+      "openReleases": "Open Releases",
+      "github": "GitHub",
+      "feedback": "Feedback & suggestions",
+      "feedbackAction": "Open an issue",
+      "motto": "Every story deserves the courage to go far.",
+      "copyright": "© 2026 CloudDream. All rights reserved."
     },
     "ai": {
       "title": "AI",
@@ -451,9 +471,14 @@
       "apiKey": "API Key / Token",
       "timeoutMs": "Request timeout (ms)",
       "maxTokens": "Max output tokens",
-      "maxTokensHint": "Limits maximum output length (too small may cause truncation)",
-      "contextWindowTokens": "Context capacity",
-      "contextWindowTokensHint": "Automatic is recommended; switching models reapplies that model's recommended capability profile",
+      "maxTokensHint": "Limits one model request, including reasoning where applicable. This is neither chapter length nor total task usage. Model capacity and product safety limits still apply.",
+      "outputBudgetMode": "Generation allowance",
+      "outputBudgetModeHint": "Allocate by task and model. Recover interrupted generation within the task budget. Existing manual settings are preserved.",
+      "outputBudgetAuto": "Automatic (recommended)",
+      "outputBudgetManual": "Custom per-request allowance",
+      "generationAdvanced": "Advanced: API resource limits",
+      "contextWindowTokens": "Model context limit",
+      "contextWindowTokensHint": "This is model capacity. Relevant context is selected as needed; the whole novel is not sent on every request.",
       "contextWindowTokensMcpHint": "Automatic is recommended; adjust this only when the external CLI model capacity is known",
       "contextWindowAutoProfile": "Automatic recommendation ({{tokens}})",
       "contextWindowAutoFallback": "Conservative automatic ({{tokens}})",
@@ -999,6 +1024,7 @@
     "PROVIDER_TIMEOUT": "Request timed out. Please retry later or increase the timeout.",
     "PROVIDER_UNAVAILABLE": "Model is currently unavailable. Please retry later or switch models.",
     "PROVIDER_FILTERED": "Request was filtered by content policy. Please adjust your prompt.",
+    "MODEL_OUTPUT_TRUNCATED": "Generation reached its output limit before a complete draft was produced.",
     "NETWORK_ERROR": "Network connection failed. Please check your proxy or network settings.",
     "PERSISTENCE_ERROR": "Write failed. Data was not saved.",
     "UNKNOWN": "Unknown error. Please try again later."

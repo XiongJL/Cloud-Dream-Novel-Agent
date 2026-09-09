@@ -92,6 +92,9 @@ def test_default_toolchain_registry_exposes_stable_contracts() -> None:
     assert contracts["novel.scope_audit"]["approvalPolicy"] == "always"
     assert contracts["chapter.continuation"]["sideEffect"] == "draft_write"
     assert "chapter.generate_draft" in contracts["chapter.continuation"]["requiredTools"]
+    assert "draft.get" in contracts["chapter.continuation"]["requiredTools"]
+    assert "chapter.revise_draft" in contracts["chapter.continuation"]["requiredTools"]
+    assert contracts["chapter.continuation"]["budget"]["maxToolCalls"] == 5
     assert contracts["chapter.sequence_continuation"]["outputSchema"]["title"] == "ChapterDraftBatchResult"
     assert "draft.batch.create" in contracts["chapter.sequence_continuation"]["requiredTools"]
     assert "draft.batch.update_outline" in contracts["chapter.sequence_continuation"]["requiredTools"]
@@ -282,6 +285,37 @@ def test_create_one_chapter_reuses_sequence_chain_with_one_child() -> None:
     assert plan.steps[0].toolchain is not None
     assert plan.steps[0].toolchain.id == "chapter.sequence_continuation"
     assert plan.steps[0].toolchain.input["chapterCount"] == 1
+
+
+def test_chapter_continuation_plan_embeds_post_draft_editorial_review() -> None:
+    capability = match_operation_capability(INTENT_OPERATION_REGISTRY.require("chapter.continuation"), "writer")
+    decision = IntentDecision(
+        interaction="task",
+        route="plan",
+        operations=[IntentOperation(
+            type="chapter.continuation",
+            target=IntentTargetRef(kind="chapter", source="explicit_id", id="chapter-1"),
+            suggestedToolchainId=capability.toolchainId,
+            suggestedToolchainVersion=capability.toolchainVersion,
+            requestedEffect="draft_write",
+            confidence=0.98,
+        )],
+        deliverable="chapter_draft",
+        requestedEffect="draft_write",
+        confidence=0.98,
+        responseContent="\u751f\u6210\u5e76\u5ba1\u6821\u3002",
+    )
+    plan = build_plan_from_intent(
+        "\u7eed\u5199\u7b2c\u4e00\u7ae0\u6b63\u6587\uff0c\u5199\u5b8c\u540e\u7531\u7f16\u8f91\u68c0\u67e5\u903b\u8f91\u3001\u89c6\u89d2\u4e0e\u7ed3\u5c3e\u94a9\u5b50",
+        decision,
+        preferred_role="writer",
+        has_chapter=True,
+    )
+    assert plan is not None
+    assert plan.steps[0].title == "\u751f\u6210\u7ae0\u8282\u6b63\u6587\u8349\u7a3f\u5e76\u7f16\u8f91\u5ba1\u6821"
+    assert plan.steps[0].toolchain is not None
+    assert plan.steps[0].toolchain.input["editorialReview"] is True
+    assert plan.steps[0].toolchain.input["reviewDimensions"] == ["logic", "point_of_view", "ending_hook"]
 
 
 def test_create_multiple_chapters_reuses_sequence_chain_with_requested_count() -> None:

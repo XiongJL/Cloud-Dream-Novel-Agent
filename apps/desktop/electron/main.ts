@@ -48,6 +48,80 @@ process.env.APP_ROOT = path.join(__dirname, '..')
 
 // 🚧 Use ['ENV_NAME'] avoid vite:define plugin - Vite@2.x
 export const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
+
+const GITHUB_REPOSITORY = 'XiongJL/Cloud-Dream-Novel-Agent';
+const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPOSITORY}/releases`;
+const GITHUB_LATEST_RELEASE_API_URL = `https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest`;
+
+type AppUpdateInfo = {
+    currentVersion: string;
+    latestVersion: string | null;
+    releaseUrl: string;
+    updateAvailable: boolean;
+    status: 'available' | 'up-to-date' | 'unavailable';
+};
+
+function compareVersions(left: string, right: string): number | null {
+    const parse = (value: string): number[] | null => {
+        const match = value.trim().match(/^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$/i);
+        if (!match) return null;
+        return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
+    };
+
+    const parsedLeft = parse(left);
+    const parsedRight = parse(right);
+    if (!parsedLeft || !parsedRight) return null;
+
+    for (let index = 0; index < 3; index += 1) {
+        if (parsedLeft[index] !== parsedRight[index]) return parsedLeft[index] - parsedRight[index];
+    }
+    return 0;
+}
+
+async function getAppUpdateInfo(): Promise<AppUpdateInfo> {
+    const currentVersion = app.getVersion();
+    const fallback: AppUpdateInfo = {
+        currentVersion,
+        latestVersion: null,
+        releaseUrl: GITHUB_RELEASES_URL,
+        updateAvailable: false,
+        status: 'unavailable',
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+
+    try {
+        const response = await fetch(GITHUB_LATEST_RELEASE_API_URL, {
+            headers: {
+                Accept: 'application/vnd.github+json',
+                'User-Agent': 'CloudDream-Novel-Agent-Desktop',
+            },
+            signal: controller.signal,
+        });
+        if (!response.ok) return fallback;
+
+        const release: unknown = await response.json();
+        if (!release || typeof release !== 'object' || typeof (release as { tag_name?: unknown }).tag_name !== 'string') {
+            return fallback;
+        }
+
+        const latestVersion = (release as { tag_name: string }).tag_name;
+        const comparison = compareVersions(latestVersion, currentVersion);
+        return {
+            currentVersion,
+            latestVersion,
+            releaseUrl: GITHUB_RELEASES_URL,
+            updateAvailable: comparison !== null && comparison > 0,
+            status: comparison !== null && comparison > 0 ? 'available' : 'up-to-date',
+        };
+    } catch (error) {
+        console.warn('[Update] Failed to check GitHub releases:', error);
+        return fallback;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 export const MAIN_DIST = path.join(process.env.APP_ROOT, 'dist-electron')
 export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 
@@ -663,6 +737,8 @@ ipcMain.handle('app:toggle-fullscreen', () => {
 ipcMain.handle('app:get-user-data-path', () => {
     return app.getPath('userData');
 });
+
+ipcMain.handle('app:get-update-info', () => getAppUpdateInfo());
 
 ipcMain.handle('app:open-external', async (_event, value: unknown) => {
     if (typeof value !== 'string' || value.length > 4096) return false;
@@ -1923,6 +1999,16 @@ ipcMain.handle('automation:invoke', async (_, payload: { method: string; params?
             'review.comment.mark_sent',
             'revision_task.create_plan',
             'revision_task.update_status',
+            'agent_skill.draft.upsert',
+            'agent_skill.draft.commit',
+            'agent_skill.draft.discard',
+            'agent_skill.workspace.create',
+            'agent_skill.workspace.write',
+            'agent_skill.workspace.patch',
+            'agent_skill.workspace.remove',
+            'agent_skill.workspace.set_pack',
+            'agent_skill.workspace.validate',
+            'agent_skill.workspace.compile',
         ]);
         if (dataChangingMethods.has(payload.method)) {
             win?.webContents.send('automation:data-changed', { method: payload.method });

@@ -364,6 +364,34 @@ STYLE_SKILL_EXTRACTOR_REVISION = build_revision(
     created_at="2026-08-04T00:00:00Z",
 )
 
+STYLE_SKILL_EXTRACTOR_WORKSPACE_REVISION = build_revision(
+    skill_id=STYLE_SKILL_EXTRACTOR_DEFINITION.id,
+    revision_id="builtin.style-skill-extractor@1.1.0",
+    version="1.1.0",
+    instructions=(
+        "先记录获准来源的范围、样本覆盖、缺口和不确定性，只生成有界成员规划，不在规划协议中编写长篇 Skill 正文。"
+        "规划必须包含语言风格、悬念与信息释放；只有样本确实包含多人物并行推进时，才增加群像人物推进。语言风格的"
+        "方法维度覆盖句长与节奏、叙述距离、视角、用词密度、对白、描写、修辞和段落组织；悬念维度覆盖问题建立、"
+        "线索、误导、揭示节拍、章末钩子和读者认知差；群像维度覆盖视角轮换、角色目标、交汇节点、出场节奏和辨识度。"
+        "规划确认后，把每个成员分别写入同一可恢复草稿工作区的独立 SKILL.md，并通过小型 Skill Pack 绑定关联 Operation/Role。"
+        "每个文档都要包含清楚的正反触发边界、可执行方法、质量标准、证据边界、污染警告与中性试运行建议。"
+    ),
+    constraints=(
+        "提炼抽象、可复用的方法，不复制来源中的长句、专有名词、人物、设定或情节。",
+        "每项结论关联样本证据类型或明确标记为低置信度推断；只有作品名称或模型先验时不得输出高置信度结论。",
+        "语言风格、悬念方法和可选群像推进必须保持为独立文档；Pack 不得合并为 composite Prompt。",
+        "规划对象只承载短元数据、方法维度、来源覆盖和绑定，不得承载多个 Skill 的长正文。",
+        "校验失败时只修订诊断指向的成员文档，保留已经合法的成员和已读取来源，不重新生成整个 Pack。",
+        "不得安装、启用、提交或直接写入正式 Skill；确定性编译通过后仍需用户审核。",
+    ),
+    manifest={
+        "coreConstraints": [0, 1, 2, 3, 4, 5],
+        "draftKind": "multi_dimensional_style_pack",
+        "authoringMode": "sqlite_workspace_documents",
+    },
+    created_at="2026-08-22T00:00:00Z",
+)
+
 BUILTIN_AGENT_SKILL_REGISTRY = AgentSkillRegistry(
     [
         AgentSkillRegistration(
@@ -391,7 +419,7 @@ BUILTIN_AGENT_SKILL_REGISTRY = AgentSkillRegistry(
         ),
         AgentSkillRegistration(
             definition=STYLE_SKILL_EXTRACTOR_DEFINITION,
-            revisions=(STYLE_SKILL_EXTRACTOR_REVISION,),
+            revisions=(STYLE_SKILL_EXTRACTOR_REVISION, STYLE_SKILL_EXTRACTOR_WORKSPACE_REVISION),
             localized_titles={"zh": "文风 Skill 提炼", "en": "Writing Style Skill Extractor"},
             localized_descriptions={
                 "zh": STYLE_SKILL_EXTRACTOR_DEFINITION.description,

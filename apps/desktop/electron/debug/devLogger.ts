@@ -14,6 +14,10 @@ const SENSITIVE_KEYS = new Set([
     'token',
     'access_token',
     'refresh_token',
+    'contenttext',
+    'beforetext',
+    'aftertext',
+    'currentdocument',
 ]);
 
 let logFilePath: string | null = null;

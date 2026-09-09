@@ -115,8 +115,16 @@ def chapter_draft_params(
     current_content = input_data.currentContent or str(context.chapter.get("content") or "")
     fills_existing_empty_chapter = (
         isinstance(resolved_target, dict)
-        and resolved_target.get("hasContent") is False
-        and _has_usable_prior_chapter_context(input_data.chapterId, context.adjacentChapters)
+        and str(resolved_target.get("chapterId") or "") == input_data.chapterId
+        and not current_content.strip()
+        and (
+            resolved_target.get("hasContent") is False
+            or str(context.chapter.get("id") or "") == input_data.chapterId
+        )
+        and (
+            _has_usable_prior_chapter_context(input_data.chapterId, context.adjacentChapters)
+            or _requests_blank_chapter_draft(input_data.goal)
+        )
     )
     if not current_content.strip() and not fills_existing_empty_chapter:
         raise ToolchainError(
@@ -142,6 +150,19 @@ def chapter_draft_params(
     if prepared_context:
         params["preparedContext"] = prepared_context
     return params
+
+
+def _requests_blank_chapter_draft(goal: str) -> bool:
+    # An explicitly requested first draft does not require prose that has not
+    # been written yet. Keep the prior-context guard for ordinary continuation.
+    request = goal.split("会话背景（仅用于理解当前任务）", 1)[0].lower()
+    blank_target = any(marker in request for marker in (
+        "空白章", "首章", "第一章", "blank chapter", "first chapter",
+    ))
+    draft_request = any(marker in request for marker in (
+        "创作", "撰写", "生成正文", "完成正文", "写出", "write", "draft",
+    ))
+    return blank_target and draft_request
 
 
 def _has_usable_prior_chapter_context(

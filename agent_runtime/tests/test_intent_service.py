@@ -105,6 +105,34 @@ def test_compound_review_then_continuation_preserves_order_and_capabilities() ->
     assert decision.route == "plan"
 
 
+def test_complete_chapter_then_editor_review_drops_incidental_assets_and_owns_review() -> None:
+    message = "续写当前章节，完成约 1800—2200 字正文；人物和世界规则保持一致，写完后由编辑审校逻辑、视角与结尾钩子。"
+    decision = decide(
+        request(message),
+        proposal(
+            should_plan=True,
+            operations=["creative_asset.draft", "chapter.continuation", "chapter.consistency_review"],
+            deliverable="chapter_draft",
+        ),
+    )
+    assert [item.type for item in decision.operations] == ["chapter.continuation"]
+    assert "INCIDENTAL_CREATIVE_ASSET_DROPPED" in decision.reasonCodes
+    assert "DRAFT_EDITORIAL_REVIEW_OWNED_BY_CHAPTER_TOOLCHAIN" in decision.reasonCodes
+
+
+def test_explicit_asset_creation_remains_separate_from_chapter_draft() -> None:
+    message = "创建角色卡，然后续写当前章节。"
+    decision = decide(
+        request(message),
+        proposal(
+            should_plan=True,
+            operations=["creative_asset.draft", "chapter.continuation"],
+            deliverable="chapter_draft",
+        ),
+    )
+    assert [item.type for item in decision.operations] == ["creative_asset.draft", "chapter.continuation"]
+
+
 def test_ambiguous_creative_request_waits_for_user_answer() -> None:
     decision = decide(
         request("大纲新增一部分"),

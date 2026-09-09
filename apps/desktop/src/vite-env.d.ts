@@ -329,6 +329,7 @@ interface AISettings {
         imageWatermark: boolean
         timeoutMs: number
         maxTokens: number
+        outputBudgetMode: 'auto' | 'manual'
         contextWindowTokens: number
         temperature: number
     }
@@ -1133,7 +1134,7 @@ interface AgentUserInputResolution {
 }
 
 interface AgentRecoveryDescriptor {
-    failureKind: 'transport' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown'
+    failureKind: 'transport' | 'model_output_truncated' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown'
     failedAtPhase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing'
     retryStrategy: 'retry_request' | 'repair_model_output' | 'reprocess_saved_result' | 'resume_publish' | 'reconcile_side_effect' | 'none'
     canRecover: boolean
@@ -1150,6 +1151,7 @@ interface AgentRun {
     threadId: string
     planId: string
     status: AgentRunStatus
+    deadlineAt?: string
     currentStepId?: string
     progress: number
     events: AgentRunEvent[]
@@ -1186,6 +1188,7 @@ interface AgentRunStatusResult {
     planId: string
     threadId: string
     status: AgentRunStatus
+    deadlineAt?: string
     currentStepId?: string
     currentStepTitle?: string
     totalSteps: number
@@ -1582,6 +1585,13 @@ interface Window {
     electron: {
         toggleFullScreen: () => Promise<boolean>
         getUserDataPath: () => Promise<string>
+        getUpdateInfo: () => Promise<{
+            currentVersion: string
+            latestVersion: string | null
+            releaseUrl: string
+            updateAvailable: boolean
+            status: 'available' | 'up-to-date' | 'unavailable'
+        }>
         openExternal: (url: string) => Promise<boolean>
         onFullScreenChange: (callback: (isFullScreen: boolean) => void) => () => void
     }

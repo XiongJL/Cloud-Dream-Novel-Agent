@@ -116,6 +116,21 @@ try {
                     details: { retryable: true },
                 });
             }
+            if (payload.mode === 'truncated') {
+                throw Object.assign(new Error('生成达到本次输出额度，尚未形成完整草稿。'), {
+                    code: 'MODEL_OUTPUT_TRUNCATED',
+                    details: {
+                        retryable: false,
+                        safeToRetryBeforePublish: true,
+                        modelResultRef: 'model-result-1',
+                        modelResultRevision: 1,
+                        terminationReason: 'max_output_tokens',
+                        requestedMaxTokens: 16384,
+                        usage: { output_tokens: 16384 },
+                        incomplete: true,
+                    },
+                });
+            }
             if (payload.mode === 'cancel') {
                 await new Promise((resolve, reject) => {
                     if (signal.aborted) {
@@ -154,6 +169,25 @@ try {
     );
     assert.equal(retrySucceeded.attempt, 2);
     assert.equal(attempts.get(retryStarted.operation.operationId), 2);
+
+    const truncatedStarted = await coordinator.start(input('truncated'));
+    const truncated = await waitForStatus(
+        coordinator,
+        truncatedStarted.operation.operationId,
+        new Set(['definitive_failed']),
+    );
+    assert.equal(attempts.get(truncatedStarted.operation.operationId), 1);
+    assert.equal(truncated.error.code, 'MODEL_OUTPUT_TRUNCATED');
+    assert.equal(truncated.error.retryEligible, false);
+    assert.deepEqual(truncated.error.details, {
+        modelResultRef: 'model-result-1',
+        modelResultRevision: 1,
+        terminationReason: 'max_output_tokens',
+        usage: { output_tokens: 16384 },
+        requestedMaxTokens: 16384,
+        safeToRetryBeforePublish: true,
+        incomplete: true,
+    });
 
     const cancelStarted = await coordinator.start(input('cancel'));
     const running = await waitForStatus(
@@ -198,7 +232,7 @@ try {
     await restarted.shutdown();
 
     const outbox = await store.listPendingOutbox();
-    assert.equal(outbox.filter((item) => item.eventType === 'draft.operation.completed').length, 4);
+    assert.equal(outbox.filter((item) => item.eventType === 'draft.operation.completed').length, 5);
 
     const delivered = [];
     const dispatcher = new DraftOperationCoordinator(store, {
@@ -216,8 +250,8 @@ try {
     while ((await store.listPendingOutbox()).length > 0 && Date.now() < deliveryDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    assert.equal(delivered.length, 4);
-    assert.equal(new Set(delivered.map((item) => item.outboxId)).size, 4);
+    assert.equal(delivered.length, 5);
+    assert.equal(new Set(delivered.map((item) => item.outboxId)).size, 5);
     assert.ok(delivered.every((item) => item.payload.operationId === item.operationId));
     assert.equal((await store.listPendingOutbox()).length, 0);
     await dispatcher.shutdown();

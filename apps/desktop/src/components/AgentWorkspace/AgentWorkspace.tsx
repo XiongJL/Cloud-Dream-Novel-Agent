@@ -2950,7 +2950,23 @@ function AgentWorkspace({
           ...(novelScoped ? { novelId } : {}),
           locale,
           context: contextPayload,
-        }) as { draft?: { id?: string; version?: number }; proposal?: { definition?: { title?: string; stableId?: string } } };
+        }) as {
+          draft?: { id?: string; version?: number };
+          proposal?: { definition?: { title?: string; stableId?: string } };
+          requiresReview?: boolean;
+          needsAttention?: boolean;
+          validationReport?: { errorCount?: number };
+        };
+        if (authored.requiresReview === false || authored.needsAttention) {
+          const errorCount = Number(authored.validationReport?.errorCount || 0);
+          appendMessage(conversationId, {
+            role: 'assistant',
+            kind: 'workflow_notice',
+            content: `Skill 文档已保留为可继续修改的草稿，但尚未通过校验${errorCount ? `（${errorCount} 项待处理）` : ''}。它不会参与任务，也不能发布；草稿 ID：\`${authored.draft?.id || 'unknown'}\`。`,
+          });
+          clearPendingStatus(conversationId);
+          return;
+        }
         const title = authored.proposal?.definition?.title || '未命名 Skill';
         const stableId = authored.proposal?.definition?.stableId;
         appendMessage(conversationId, {
@@ -4359,9 +4375,9 @@ function AgentWorkspace({
                 isDark={isDark}
                 title={recoverableChatMessage.failure?.recovery ? '模型回答可安全恢复' : '本次对话可直接重试'}
                 description={recoverableChatMessage.failure?.recovery
-                  ? '先重新校验已保存结果；若仍不合格，只让模型修复 JSON 后继续，不会重新执行原问题。'
+                  ? '先重新检查已保存结果；若仍不合格，只修复结果格式后继续，不会重新执行原任务。'
                   : '这条失败记录没有可用的模型结果引用。点击后会重新请求回答，但不会重复追加用户消息或要求你发送“重试”。'}
-                actionLabel={recoverableChatMessage.failure?.recovery ? '修复 JSON 并继续' : '重新生成回答'}
+                actionLabel={recoverableChatMessage.failure?.recovery ? '修复结果并继续' : '重新生成回答'}
                 onAction={() => void sendChat(recoverableChatMessage.content, {
                   sourceMessage: recoverableChatMessage,
                   repair: recoverableChatMessage.failure?.recovery,
