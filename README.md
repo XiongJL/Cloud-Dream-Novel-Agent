@@ -177,12 +177,9 @@ pnpm mcp:config
 - [MCP CLI 接入说明](docs/mcp-cli-setup.md)
 - [MCP CLI Setup (English)](docs/mcp-cli-setup-en.md)
 
-## 当前边界
+## 产品截图
+<img width="3454" height="2052" alt="image" src="https://github.com/user-attachments/assets/59b84682-74d5-4c29-b277-a04d07ad9a56" />
 
-- 考据 Agent 当前只使用项目内章节、设定、RAG 和全文搜索；外部网络检索尚未接入。
-- `完全控制` 工作模式仍禁用，正文和结构化数据写回必须经过人工审核。
-- Spring Boot 云同步服务不是本地写作与 Agent 模式的必需依赖，完整云同步仍在持续开发。
-- 0.2.0 的真实模型长任务、刷新/取消和各平台安装包仍需按手动验收清单验证。
 
 ## 发布
 
