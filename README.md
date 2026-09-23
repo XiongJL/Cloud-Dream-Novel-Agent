@@ -180,6 +180,9 @@ pnpm mcp:config
 ## 产品截图
 <img width="3454" height="2052" alt="image" src="https://github.com/user-attachments/assets/59b84682-74d5-4c29-b277-a04d07ad9a56" />
 
+<img width="1919" height="1006" alt="be0ec54e253dd0a4629c1f65a2141971" src="https://github.com/user-attachments/assets/4d01fd52-a3c0-4c73-b994-d546873c98c3" />
+
+
 
 ## 发布
 
