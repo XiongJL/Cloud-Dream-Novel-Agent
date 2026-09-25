@@ -4,7 +4,7 @@ import { resolveModelOutputCapability, PRODUCT_OUTPUT_SAFETY_LIMIT } from '../..
 import type { AiHttpApiMode, AiProviderType } from './types';
 
 export type OutputBudgetMode = 'auto' | 'manual';
-export type OutputBudgetTask = 'title' | 'intent' | 'plan' | 'chapter_draft' | 'editor_review' | 'creative_assets';
+export type OutputBudgetTask = 'title' | 'intent' | 'plan' | 'chapter_draft' | 'editor_review' | 'creative_assets' | 'rag_qa' | 'research_report';
 
 export interface TaskOutputBudget {
     mode: OutputBudgetMode;
@@ -42,6 +42,8 @@ function taskRequestedTokens(task: OutputBudgetTask, targetLength?: number, item
         case 'intent': return 4_096;
         case 'plan': return 4_096;
         case 'editor_review': return 8_192;
+        case 'rag_qa': return 4_096;
+        case 'research_report': return 16_384;
         case 'creative_assets': return Math.min(16_384, Math.max(8_192, (itemCount || 1) * 2_048));
         case 'chapter_draft':
             void targetLength;
@@ -94,6 +96,10 @@ export function resolveTaskOutputBudget(input: {
         128,
         input.mode === 'auto' && input.task === 'creative_assets'
             ? Math.min(8_192, desired)
+            : input.mode === 'auto' && input.task === 'rag_qa'
+                ? Math.min(2_048, desired)
+                : input.mode === 'auto' && input.task === 'research_report'
+                    ? Math.min(8_192, desired)
             : desired,
     );
     const recoveryTokens = input.mode === 'auto'

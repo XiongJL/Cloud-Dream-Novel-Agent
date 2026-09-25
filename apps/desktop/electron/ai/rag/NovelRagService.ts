@@ -1,4 +1,4 @@
-import type { AiProvider } from '../types';
+import type { AiGenerateRequest, AiGenerateResponse, AiProvider } from '../types';
 import type { AiEmbeddingSettings } from '../types';
 import { detectRagQuestion } from './intent';
 import { collectRagEvidence, getKnownRagEntityNames } from './evidence';
@@ -14,10 +14,14 @@ function buildRawPromptPreview(systemPrompt: string | undefined, userPrompt: str
 }
 
 function parseConfidence(text: string, evidenceCount: number): 'high' | 'medium' | 'low' {
+    // Read the answer's stated confidence before checking uncertainty elsewhere.
+    // A well-supported answer may still describe specific facts as unknown.
+    const stated = text.match(/(?:^|\n)\s*(?:#{1,6}\s*)?(?:\*{1,2})?(?:置信度|confidence)(?:\*{1,2})?\s*[:：]?\s*(?:\*{1,2})?\s*(高|中|低|high|medium|low)(?=$|[\s*—，。-])/im)?.[1]?.toLowerCase();
+    if (stated === '高' || stated === 'high') return 'high';
+    if (stated === '中' || stated === 'medium') return 'medium';
+    if (stated === '低' || stated === 'low') return 'low';
     const lower = text.toLowerCase();
     if (/不足以判断|资料不足|无法判断|insufficient|not enough/.test(lower)) return 'low';
-    if (/confidence\s*[:：]\s*high|置信度\s*[:：]\s*高/.test(lower)) return 'high';
-    if (/confidence\s*[:：]\s*low|置信度\s*[:：]\s*低/.test(lower)) return 'low';
     if (evidenceCount >= 5) return 'high';
     if (evidenceCount >= 2) return 'medium';
     return 'low';
@@ -109,9 +113,9 @@ export class NovelRagService {
         };
     }
 
-    async ask(payload: RagAskPayload, provider: AiProvider, settings: { maxTokens?: number; temperature?: number; embeddingSettings?: AiEmbeddingSettings; signal?: AbortSignal }): Promise<RagAskResult> {
+    async ask(payload: RagAskPayload, provider: AiProvider, settings: { maxTokens?: number; temperature?: number; embeddingSettings?: AiEmbeddingSettings; signal?: AbortSignal; generate?: (request: AiGenerateRequest) => Promise<AiGenerateResponse> }): Promise<RagAskResult> {
         const bundle = await this.buildPromptBundle(payload, settings.embeddingSettings);
-        const response = await provider.generate({
+        const response = await (settings.generate || ((request) => provider.generate(request)))({
             systemPrompt: bundle.systemPrompt,
             prompt: bundle.effectiveUserPrompt,
             maxTokens: settings.maxTokens,

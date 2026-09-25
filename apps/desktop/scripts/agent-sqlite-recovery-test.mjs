@@ -19,13 +19,17 @@ const transpileModule = async (sourceUrl, outputPath, transform = (value) => val
 const summaryModulePath = path.join(tempRoot, 'electron', 'ai', 'context', 'AgentConversationSummaryV2.mjs');
 const storeModulePath = path.join(tempRoot, 'electron', 'agent', 'AgentConversationStore.mjs');
 await transpileModule(
+    new URL('../shared/agentRunProjection.ts', import.meta.url),
+    path.join(tempRoot, 'shared', 'agentRunProjection.mjs'),
+);
+await transpileModule(
     new URL('../electron/ai/context/AgentConversationSummaryV2.ts', import.meta.url),
     summaryModulePath,
 );
 await transpileModule(
     new URL('../electron/agent/AgentConversationStore.ts', import.meta.url),
     storeModulePath,
-    (output) => output.replace(
+    (output) => output.replace("'../../shared/agentRunProjection'", "'../../shared/agentRunProjection.mjs'").replace(
         /(['"])\.\.\/ai\/context\/AgentConversationSummaryV2\1/,
         "'../ai/context/AgentConversationSummaryV2.mjs'",
     ),
@@ -469,6 +473,34 @@ try {
     assert.equal(afterArchive[0].contextSummary.version, 'agent-conversation-summary-v2');
     assert.equal(afterArchive[0].contextSummary.revision, 2);
     assert.equal(afterArchive[0].contextSummary.generation, 2);
+
+    const missedBlueprint = {
+        artifactId: 'artifact-blueprint-missed', runId: runningRun.runId, planId: 'plan-1',
+        type: 'novel_bootstrap_draft', title: 'Recovered blueprint', status: 'ready',
+        content: 'Saved blueprint content', reference: { novelId: 'novel-1' },
+        metadata: { draft: { targetChapterCount: 10 } }, createdAt: '2026-07-11T00:00:05.000Z',
+    };
+    await restoredStore.upsert({
+        ...baseConversation,
+        run: { ...runningRun, status: 'completed', events: [...runningRun.events, event(5, 'artifact_created', { artifact: missedBlueprint })] },
+    });
+    const recoveredBlueprintConversation = (await restoredStore.list('novel-1'))[0];
+    assert.equal(recoveredBlueprintConversation.run.artifacts.filter(item => item.artifactId === missedBlueprint.artifactId).length, 1);
+    assert.deepEqual(recoveredBlueprintConversation.run.artifacts.find(item => item.artifactId === missedBlueprint.artifactId).metadata, missedBlueprint.metadata);
+    await restoredStore.upsert(recoveredBlueprintConversation);
+    const recoveredAgain = (await restoredStore.list('novel-1'))[0];
+    assert.equal(recoveredAgain.run.artifacts.filter(item => item.artifactId === missedBlueprint.artifactId).length, 1);
+
+    const revisedArtifact = {
+        ...missedBlueprint, artifactId: 'artifact-final-revision', type: 'chapter_draft',
+        reference: { draftSessionId: 'final-revision', revisionOfDraftSessionId: 'original-draft' },
+    };
+    await restoredStore.upsert({
+        ...recoveredAgain,
+        run: { ...recoveredAgain.run, draftSessionId: 'original-draft',
+            events: [...recoveredAgain.run.events, event(6, 'artifact_created', { artifact: revisedArtifact })] },
+    });
+    assert.equal((await restoredStore.list('novel-1'))[0].run.draftSessionId, 'final-revision');
 
     await restoredStore.delete('conversation-1');
     assert.deepEqual(await restoredStore.list('novel-1'), []);

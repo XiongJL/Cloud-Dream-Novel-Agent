@@ -10,6 +10,7 @@ assert.match(workspace, /failedRun\.recovery\?\.retryStrategy/);
 assert.match(workspace, /conversation\.run\.recovery\?\.failureKind === 'local_transform_failed'/);
 assert.match(workspace, /recovery: latestStatus\.recovery/);
 assert.match(workspace, /response\.intentDecision\?\.route === 'retry_failed_run'/);
+assert.match(workspace, /activeConversation\.runs\?\.find\(\(run\) => run\.runId === recovery\.failedRunId\)/);
 assert.match(workspace, /!recovery && !response\.pendingUserInput \? \[\{/);
 assert.match(workspace, /重试失败步骤/);
 assert.match(workspace, /调整并重新规划/);

@@ -130,7 +130,11 @@ def normalize_research_fact_check(
     search_evidence: dict[str, list[ContextEvidence]],
     extraction_warnings: list[str],
 ) -> ResearchFactCheckArtifact:
-    report = ResearchFactCheckArtifact.model_validate(value)
+    # Search statistics are derived below from the actual project-search
+    # results. Ignore model-supplied values before validation: a model may
+    # include lists or prose here even when its findings are otherwise valid.
+    report_input = {**value, "searchStats": {}} if isinstance(value, dict) else value
+    report = ResearchFactCheckArtifact.model_validate(report_input)
     claim_by_id = {claim.claimId: claim for claim in claims}
     bundle_source_ids = {
         *(chapter.chapterId for chapter in bundle.chapters),

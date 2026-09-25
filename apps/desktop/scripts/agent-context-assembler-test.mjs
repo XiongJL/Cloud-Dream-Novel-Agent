@@ -57,6 +57,27 @@ assert.deepEqual(resolveAgentContextWindow('http', 'custom', 12_000), {
 });
 
 const assembler = new AgentContextAssembler();
+// Exercise the actual generation prompt path: long blueprints must not become
+// unresolvable "context-builder" excerpts before the model can read them.
+const aiSource = fs.readFileSync(path.join(desktopRoot, 'electron', 'ai', 'AiService.ts'), 'utf8');
+const aiAst = ts.createSourceFile('AiService.ts', aiSource, ts.ScriptTarget.Latest, true);
+const aiClass = aiAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'AiService');
+const draftPromptMethod = aiClass.members.find(node => node.name?.getText(aiAst) === 'assembleDraftGenerationPrompt').getText(aiAst);
+const harnessJs = ts.transpileModule(`class PromptHarness { ${draftPromptMethod} }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const PromptHarness = new Function(`${harnessJs}; return PromptHarness;`)();
+const promptHarness = new PromptHarness();
+promptHarness.assembleAgentPrompt = input => assembler.assemble({
+    ...input, providerType: 'http', model: 'custom-model', contextWindowTokens: 131072,
+}).prompt;
+const longBlueprint = `${'前期设定。'.repeat(1800)}中段角色必须保留：陈修平、林晓、老郑。${'后期章纲。'.repeat(1800)}`;
+const blueprintPrompt = promptHarness.assembleDraftGenerationPrompt({
+    operation: 'creative_assets.generate_draft', systemPrompt: 'Return JSON.', outputTokens: 16384,
+    structured: { goal: 'Initialize approved blueprint' }, effectiveUserPrompt: longBlueprint, usedContext: [],
+});
+assert.ok(blueprintPrompt.includes(longBlueprint), 'Generation must preserve the complete source when it fits');
+assert.doesNotMatch(blueprintPrompt, /reference excerpt omitted/);
 const smallWindowSystemPrompt = 's'.repeat(5_394);
 const smallWindowCounter = new AgentContextTokenCounter();
 const smallWindowSelection = {

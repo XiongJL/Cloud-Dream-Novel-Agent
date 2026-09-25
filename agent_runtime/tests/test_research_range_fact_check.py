@@ -212,7 +212,7 @@ def _model_report() -> dict[str, Any]:
         ],
         "recommendations": ["为法律陈述补充适用地区和来源。"],
         "warnings": [],
-        "searchStats": {},
+        "searchStats": {"projectSearchEvidenceClaimIds": ["claim_bones"]},
     }
 
 
@@ -237,6 +237,8 @@ def test_research_normalization_filters_sources_and_downgrades_unsupported_verdi
     assert report.findings[0].evidenceRefs == ["chapter_reference"]
     assert report.findings[1].verdict == "unverified"
     assert report.findings[1].confidence == 0.3
+    assert report.searchStats["searchedClaimCount"] == 1
+    assert "projectSearchEvidenceClaimIds" not in report.searchStats
     assert any("未配置外部网络搜索" in warning for warning in report.warnings)
     assert any("无法关联" in warning for warning in report.warnings)
     assert any("无法在范围" in warning for warning in report.warnings)

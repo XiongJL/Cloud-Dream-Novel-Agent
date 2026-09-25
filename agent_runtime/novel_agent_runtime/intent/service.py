@@ -468,6 +468,18 @@ class IntentService:
         reasons: list[str],
     ) -> list[str]:
         normalized = list(dict.fromkeys(operation_ids))
+        if (
+            "research.fact_check" in normalized
+            and "research.range_fact_check" in normalized
+            and "rag.ask" in message.lower()
+            and "search.query" in message.lower()
+            and "research.range_fact_check" not in detect_explicit_operations(message)
+        ):
+            normalized = [item for item in normalized if item != "research.range_fact_check"]
+            reasons.append("EXPLICIT_RAG_TOOLS_OVERRIDE_RANGE_FACT_CHECK")
+        if "novel.project_initialize" in normalized and "creative_asset.draft" in normalized:
+            normalized = [item for item in normalized if item != "creative_asset.draft"]
+            reasons.append("PROJECT_INITIALIZATION_OWNS_CREATIVE_ASSET_DRAFT")
         continuation_pair = {"chapter.continuation", "chapter.sequence_continuation"}
         if continuation_pair.issubset(normalized):
             if requested_continuation_chapter_count(message) is not None:

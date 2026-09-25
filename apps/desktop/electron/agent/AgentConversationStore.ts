@@ -1,6 +1,7 @@
 import type { PrismaClientType } from '@novel-editor/core';
 import type { AgentConversationMessageKind } from '../../shared/agentConversationContext';
 import type { AgentChapterScopeSelection } from '../../shared/agentChapterScopeSelection';
+import { artifactFromRunEvent } from '../../shared/agentRunProjection';
 import {
     normalizeAgentConversationSummaryV2,
     validateAgentConversationSummaryCoverageV2,
@@ -39,7 +40,9 @@ export type AgentArtifactRecord = {
         | 'reader_journey'
         | 'worldbuilding_consistency'
         | 'research_fact_check'
-        | 'scope_audit';
+        | 'scope_audit'
+        | 'novel_bootstrap_draft'
+        | 'agent_skill_pack_draft';
     title: string;
     status: 'ready' | 'committed' | 'discarded' | 'failed';
     summary?: string | null;
@@ -302,6 +305,27 @@ function storedDraftBatchId(value: unknown): string | null {
 }
 
 function mapAgentRun(row: AgentRunRow, events: AgentRunEventRow[], artifacts: AgentArtifactRow[]): AgentRunRecord {
+    // Older renderers discarded newly introduced artifact types while retaining
+    // their creation events. Recover missing artifacts without regenerating them.
+    const storedIds = new Set(artifacts.map((artifact) => artifact.artifactId));
+    let recoveredDraftSessionId = row.draftSessionId;
+    const recoveredArtifacts = events.flatMap((event) => {
+        const artifact = artifactFromRunEvent({
+            eventId: event.eventId,
+            runId: event.runId,
+            sequence: event.sequence,
+            type: event.type,
+            payload: (parseJsonField(event.payloadJson) || {}) as Record<string, unknown>,
+            createdAt: dateTimeString(event.createdAt),
+        });
+        if (artifact && ['chapter_draft', 'creative_assets_draft'].includes(artifact.type)
+            && typeof artifact.reference?.draftSessionId === 'string') {
+            recoveredDraftSessionId = artifact.reference.draftSessionId;
+        }
+        if (!artifact || storedIds.has(artifact.artifactId)) return [];
+        storedIds.add(artifact.artifactId);
+        return [artifact];
+    });
     const recoveredDraftBatchId = row.draftBatchId
         || [...events].reverse().map((event) => storedDraftBatchId(parseJsonField(event.payloadJson))).find(Boolean)
         || [...artifacts].reverse().map((artifact) => storedDraftBatchId(parseJsonField(artifact.referenceJson))).find(Boolean)
@@ -313,7 +337,7 @@ function mapAgentRun(row: AgentRunRow, events: AgentRunEventRow[], artifacts: Ag
         status: row.status,
         currentStepId: row.currentStepId,
         progress: Number(row.progress || 0),
-        draftSessionId: row.draftSessionId,
+        draftSessionId: recoveredDraftSessionId,
         draftBatchId: recoveredDraftBatchId,
         draftOperationId: row.draftOperationId,
         draftOperationKey: row.draftOperationKey,
@@ -332,7 +356,7 @@ function mapAgentRun(row: AgentRunRow, events: AgentRunEventRow[], artifacts: Ag
         resumedFrom: (parseJsonField(row.resumedFromJson) || null) as Record<string, unknown> | null,
         completionKind: row.completionKind === 'partial' ? 'partial' : 'complete',
         recovery: (parseJsonField(row.recoveryJson) || null) as Record<string, unknown> | null,
-        artifacts: artifacts.map((artifact) => ({
+        artifacts: [...artifacts.map((artifact) => ({
             artifactId: artifact.artifactId,
             runId: artifact.runId,
             planId: artifact.planId,
@@ -349,7 +373,7 @@ function mapAgentRun(row: AgentRunRow, events: AgentRunEventRow[], artifacts: Ag
             reviewStaleChapterIds: (parseJsonField(artifact.reviewStaleChapterIdsJson) || []) as string[],
             reviewedAt: artifact.reviewedAt ? dateTimeString(artifact.reviewedAt) : null,
             createdAt: dateTimeString(artifact.createdAt),
-        })),
+        })), ...recoveredArtifacts],
         events: events.map((event) => ({
             eventId: event.eventId,
             sequence: Number(event.sequence || 0),

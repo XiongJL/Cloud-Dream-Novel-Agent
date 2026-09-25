@@ -32,6 +32,7 @@ export function useChapterLifecycle({
     const titleRef = useRef(title);
     const chapterRef = useRef(currentChapter);
     const isSwitchingChapterRef = useRef(false);
+    const isCreatingChapterRef = useRef(false);
     const activeChapterIdRef = useRef<string | null>(null);
     const chapterCacheRef = useRef(new Map<string, Chapter>());
     const saveQueueRef = useRef(Promise.resolve());
@@ -408,14 +409,18 @@ export function useChapterLifecycle({
     }, [clearEditorChapterState, handleDeleteRecent, novelId, syncChapterIntoEditor]);
 
     const handleCreateChapter = useCallback(async (volumeId: string) => {
+        if (isCreatingChapterRef.current) return;
+        isCreatingChapterRef.current = true;
         const volume = volumes.find((item) => item.id === volumeId);
-        const order = volume ? volume.chapters.length + 1 : 1;
         try {
+            const order = volume ? Math.max(0, ...volume.chapters.map((chapter) => chapter.order)) + 1 : 1;
             const newChapter = await window.db.createChapter({ volumeId, title: '', order });
             await loadVolumes();
             await handleSelectChapter(newChapter.id);
         } catch (error) {
             console.error('Failed to create chapter:', error);
+        } finally {
+            isCreatingChapterRef.current = false;
         }
     }, [handleSelectChapter, loadVolumes, volumes]);
 

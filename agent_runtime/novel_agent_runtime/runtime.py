@@ -2377,13 +2377,19 @@ class NovelAgentRuntime:
         ):
             return None
         exhausted = next((event for event in reversed(events) if event.type == "request_retry_exhausted"), None)
-        if exhausted is None or exhausted.payload.get("retryable") is not True:
+        # Toolchain nodes can fail after request-level retry handling (for
+        # example, a truncated synthesis). Their terminal event is retryable
+        # even when no request_retry_exhausted event was emitted.
+        if not (
+            (exhausted is not None and exhausted.payload.get("retryable") is True)
+            or (terminal is not None and terminal.payload.get("retryable") is True)
+        ):
             return None
         return FailedRunRef(
             runId=failed_run.runId,
             failureRevision=failed_run.failureRevision,
             retryable=True,
-            code=str(exhausted.payload.get("code") or terminal_code) or None,
+            code=str((exhausted.payload.get("code") if exhausted else None) or terminal_code) or None,
         )
 
     def _latest_retryable_failed_run_ref(
@@ -3038,9 +3044,12 @@ class NovelAgentRuntime:
             strategy == "retry_request"
             and not retry_after_repair_exhausted
             and not retry_saved_draft_review
-            and (exhausted is None or exhausted.payload.get("retryable") is not True)
+            and not (
+                (exhausted is not None and exhausted.payload.get("retryable") is True)
+                or (terminal is not None and terminal.payload.get("retryable") is True)
+            )
         ):
-            raise ValueError("The failed run has no retryable exhausted request")
+            raise ValueError("The failed run has no retryable failure")
 
         checkpoint_state = self.execution_graph.load_checkpoint_state(f"run:{failed_run.runId}")
         if checkpoint_state is None:
@@ -4249,7 +4258,9 @@ class NovelAgentRuntime:
 
         automatic_flow = graph_state.get("approval_mode") == "full_control"
 
-        if not automatic_flow and tool_name == "rag.ask" and not any(
+        if not automatic_flow and tool_name == "rag.ask" and not (
+            "rag.ask" in plan.goal.lower() and "search.query" in plan.goal.lower()
+        ) and not any(
             response.get("checkpointType") == "analysis_scope" for response in run.approvalResponses
         ):
             checkpoint = self._analysis_scope_checkpoint(step.stepId)
@@ -9321,12 +9332,35 @@ class NovelAgentRuntime:
                 "estimatedTokens": int(chain_state.get("estimatedTokens") or 0),
             },
         )
+        report_output = output
+        if isinstance(output, dict) and output.get("draftSessionId"):
+            report_output = {
+                **output,
+                "generationCompleted": True,
+                "editorialReviewCompleted": bool(chain_state.get("draftReviewArtifactId")),
+                "editorialRevisionCompleted": bool(chain_state.get("draftRevisionArtifactId")),
+                "reviewArtifactId": chain_state.get("draftReviewArtifactId"),
+                "reviewSummary": (chain_state.get("draftReview") or {}).get("summary", ""),
+                "warningScope": "Context retrieval warnings do not mean draft generation failed.",
+            }
+        if invocation.id == "novel.bootstrap" and isinstance(output, dict):
+            report_output = {
+                "type": "novel_bootstrap_draft",
+                "status": "ready",
+                "artifactId": artifact_id,
+                "summary": output.get("corePremise", ""),
+                "titleCandidates": output.get("titleCandidates", []),
+                "targetChapterCount": output.get("targetChapterCount"),
+                "targetWordsPerChapter": output.get("targetWordsPerChapter"),
+                "chapterPlan": output.get("chapterPlan", []),
+                "warnings": output.get("warnings", []),
+            }
         findings = [
             *graph_state["report_findings"],
             {
                 "toolName": f"toolchain:{invocation.id}@{invocation.version}",
                 "stepTitle": step.title,
-                "data": self._compact_report_result(output),
+                "data": report_output if invocation.id == "novel.bootstrap" else self._compact_report_result(report_output),
             },
         ]
         return {
@@ -10570,6 +10604,19 @@ class NovelAgentRuntime:
                 return {"skipped": True, "reason": "chapterId missing"}
             return await self._tool_invoke(run, "chapter.get", {"chapterId": chapter_id})
         if tool_name == "rag.ask":
+            if "rag.ask" in goal.lower() and "search.query" in goal.lower():
+                return await self._tool_invoke(
+                    run,
+                    "rag.ask",
+                    {
+                        "novelId": novel_id,
+                        "chapterId": chapter_id,
+                        "question": goal.split("\n\n会话背景（仅用于理解当前任务）：\n", 1)[0].strip(),
+                        "analysisScope": "novel",
+                        "locale": locale,
+                        "maxEvidenceItems": 20,
+                    },
+                )
             scope_response = next(
                 (response for response in reversed(run.approvalResponses) if response.get("checkpointType") == "analysis_scope"),
                 {},
@@ -10628,7 +10675,15 @@ class NovelAgentRuntime:
                 },
             )
         if tool_name == "search.query":
-            return await self._tool_invoke(run, tool_name, {"novelId": novel_id, "keyword": goal})
+            keyword_match = re.search(
+                r"search\.query[^。；;\n]{0,40}?(?:查找|查询|搜索|检索|查)\s*[\"“「']?([^\s，。；;”\"」]{1,80})",
+                goal,
+                re.IGNORECASE,
+            )
+            return await self._tool_invoke(run, tool_name, {
+                "novelId": novel_id,
+                "keyword": keyword_match.group(1) if keyword_match else goal,
+            })
         if tool_name in {"plotline.list", "character.list", "item.list", "worldsetting.list", "map.list"}:
             return await self._tool_invoke(run, tool_name, {"novelId": novel_id})
         raise ValueError(f"Unsupported Agent tool mapping: {tool_name}")
@@ -11541,11 +11596,14 @@ class NovelAgentRuntime:
                 "answer", "summary", "title", "name", "content", "excerpt", "snippet",
                 "preview", "confidence", "warnings", "evidence", "issues", "draftSessionId",
                 "type", "order", "wordCount", "status", "skipped", "reason",
+                "draftType", "previewSummary", "artifactId", "version", "generationCompleted",
+                "editorialReviewCompleted", "editorialRevisionCompleted", "reviewArtifactId",
+                "reviewSummary", "warningScope",
             }
             for key, value in result.items():
                 if key in preferred_keys and value is not None:
                     compact[str(key)] = self._compact_report_result(value, depth + 1)
-                if len(compact) >= 16:
+                if len(compact) >= 32:
                     break
             return compact or {"summary": str(result)[:1000]}
         if isinstance(result, list):

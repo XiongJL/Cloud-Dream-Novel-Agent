@@ -1021,7 +1021,8 @@ export class AiService {
                     kind: 'artifact',
                     priority: 'required',
                     value: input.effectiveUserPrompt,
-                    sourceRef: 'context-builder',
+                    // This is the generation input, not a retrievable artifact.
+                    // A synthetic sourceRef would replace long blueprints with excerpts.
                 },
                 {
                     id: 'context-references',
@@ -1697,14 +1698,16 @@ export class AiService {
             : '';
         const systemPrompt = [baseSystemPrompt, revisionPrompt].filter(Boolean).join(' ');
         const contextText = JSON.stringify(payload.context ?? {}).slice(0, 60000);
-        const response = await this.generateStructured({
+        const prompt = `Goal=${goal}\n\nRevisionInstruction=${revisionInstruction}\n\nPreviousBeats=${JSON.stringify(previousBeats)}\n\nAnchorChapterId=${chapterId}\n\nTargetChapterIds=${JSON.stringify(payload.targetChapterIds || [])}\n\nContext=${contextText}`;
+        const outputBudget = this.resolveGenerationBudget('plan', { systemPrompt, promptInput: prompt });
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
-            prompt: `Goal=${goal}\n\nRevisionInstruction=${revisionInstruction}\n\nPreviousBeats=${JSON.stringify(previousBeats)}\n\nAnchorChapterId=${chapterId}\n\nTargetChapterIds=${JSON.stringify(payload.targetChapterIds || [])}\n\nContext=${contextText}`,
-            maxTokens: Math.min(this.settingsCache.http.maxTokens, 3200),
+            prompt,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.55),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 120000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_chapter_beats');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         const rawBeats = Array.isArray(parsed?.beats) ? parsed.beats : [];
         if (rawBeats.length !== chapterCount) {
@@ -1992,9 +1995,7 @@ export class AiService {
                 'Prefer one synthesis question; allow 2-3 only for independent blockers. Each question needs 2-3 mutually exclusive options, recommended first.',
                 'Return strict JSON with needsFollowUp and optional inputRequest.',
             ].join(' ');
-        const response = await this.generateStructured({
-            systemPrompt,
-            prompt: [
+        const prompt = [
                 `Goal=${goal}`,
                 `Role=${trimText(payload.role, 40) || 'team'}`,
                 `Request=${JSON.stringify(request).slice(0, 12000)}`,
@@ -2005,12 +2006,16 @@ export class AiService {
                 `DecisionHistory=${JSON.stringify(decisionHistory).slice(0, 24000)}`,
                 `ExistingEvidence=${JSON.stringify(Array.isArray(payload.evidence) ? payload.evidence.slice(0, 20) : []).slice(0, 12000)}`,
                 ...(isNovelBootstrap ? [`Novel=${JSON.stringify(novel ?? {}).slice(0, 2000)}`] : []),
-            ].join('\n\n'),
-            maxTokens: Math.min(this.settingsCache.http.maxTokens, 1800),
+        ].join('\n\n');
+        const outputBudget = this.resolveGenerationBudget('intent', { systemPrompt, promptInput: prompt });
+        const response = await this.generateStructuredWithBudgetRecovery({
+            systemPrompt,
+            prompt,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.15),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 90000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_user_input_followup');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || typeof parsed.needsFollowUp !== 'boolean') {
             this.invalidAgentStructuredOutput('User input follow-up returned invalid JSON', [
@@ -2590,6 +2595,7 @@ export class AiService {
                 '不得生成网址、书名、作者、机构、引文、来源 ID 或查询结果中不存在的证据。需要外部资料但当前证据不足时，verdict 必须是 unverified，并说明应补充何种可靠来源。',
                 'supported 表示现有可追溯证据支持；contradicted 表示证据明确相反；mixed 表示来源或条件冲突；not_applicable 表示抽取项并非可核验事实。',
                 'claimId 只能来自输入 claims；chapterIds 固定为该声明章节。evidence.sourceId 与 evidenceRefs 只能使用输入中真实存在的章节、项目实体、RAG 或项目搜索来源 ID。',
+                '逐条简洁核验：每条 finding 的 summary 不超过 80 字，evidence 最多 2 条、每条 excerpt 不超过 100 字，recommendation 和 uncertainty 各不超过 60 字；不要重复输入原文或输出额外解释。',
                 'confidence 范围 0 到 1；没有证据时不得高于 0.3。只返回严格 JSON，不要 Markdown 或代码围栏。',
                 '格式：{"overallReliabilityScore":0,"summary":"摘要","claims":[],"findings":[{"findingId":"finding-1","claimId":"真实claimId","statement":"原声明","summary":"核验判断","verdict":"supported|contradicted|mixed|unverified|not_applicable","confidence":0.8,"category":"historical|scientific|medical|legal|technical|geographic|cultural|economic|other","severity":"critical|high|medium|low|info","chapterIds":["真实章节ID"],"evidenceRefs":["真实来源ID"],"evidence":[{"sourceType":"chapter|rag|project_search","sourceId":"真实ID","title":"来源","excerpt":"短证据","confidence":0.8,"metadata":{}}],"recommendation":"修订或补证建议","recommendedRole":"writer|editor|research_rag","uncertainty":"不确定性"}],"recommendations":[],"warnings":[],"searchStats":{}}。',
             ].join(' ')
@@ -2597,13 +2603,17 @@ export class AiService {
                 'Fact-check only the supplied claims using the ChapterScopeBundle, imported RAG evidence, and actual projectSearchEvidence.',
                 'Project search is internal novel search, not internet search, and externalSearchAvailable is false. Never fabricate URLs, publications, authors, institutions, quotes, IDs, or sources.',
                 'Claims requiring unavailable external evidence must remain unverified. Use only real claim, chapter, and evidence IDs from the input.',
+                'Keep each finding concise: summary at most 80 characters, at most two evidence items with excerpts under 100 characters, and recommendation and uncertainty under 60 characters each. Do not repeat full source text.',
                 'Return strict JSON with overallReliabilityScore, summary, findings, recommendations, warnings, and searchStats.',
             ].join(' ');
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 6000);
+        const outputBudget = capTaskOutputBudget(this.resolveGenerationBudget('research_report', {
+            systemPrompt,
+            promptInput: JSON.stringify({ goal, claims: payload.claims, projectSearchEvidence: payload.projectSearchEvidence || {} }),
+        }), 16_384);
         const prompt = this.assembleAgentPrompt({
             operation: 'agent.generate_research_fact_check',
             systemPrompt,
-            outputTokens,
+            outputTokens: outputBudget.recoveryTokens,
             currentRequest: {
                 goal,
                 claims: payload.claims,
@@ -2618,14 +2628,14 @@ export class AiService {
                 sourceRef: 'research.range_fact_check@1.0.0',
             }],
         });
-        const response = await this.generateStructured({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
             prompt,
-            maxTokens: outputTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.1),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_research_fact_check');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || typeof parsed.summary !== 'string' || !Array.isArray(parsed.findings)) {
             this.invalidAgentStructuredOutput('Research fact-check reviewer did not return valid structured JSON');
@@ -2776,12 +2786,15 @@ export class AiService {
                 '只返回严格 JSON：titleCandidates(1-5)、genrePromise、readerPromise、corePremise、centralQuestion、narrativeShape、characters[{name,role,desire,cost,change}]、worldRules、conflictEscalation、suspenseStrategy、openingBeats、volumePlan[{title,dramaticQuestion,turningPoint,chapterRange}]、chapterPlan[{chapterNumber,title,sceneGoal,conflict,hook}]、writingModeRecommendation、targetChapterCount、targetWordsPerChapter、validationChecklist、userDecisionSummary、assumptions、warnings。',
             ].join(' ')
             : 'Create a reviewable new-novel blueprint from the confirmed product questions. Do not ask again, write project data, or generate long prose. Include a volume route, a six-to-twelve chapter serial plan with scene goal, conflict, and hook for every chapter, plus a writing-mode recommendation, target chapter count, target words per chapter, and validation checklist. Return strict JSON with titleCandidates, genrePromise, readerPromise, corePremise, centralQuestion, narrativeShape, characters, worldRules, conflictEscalation, suspenseStrategy, openingBeats, volumePlan, chapterPlan, writingModeRecommendation, targetChapterCount, targetWordsPerChapter, validationChecklist, userDecisionSummary, assumptions, and warnings.';
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 5000);
         const skillPrompt = trimText(payload.agentSkill?.prompt, 48000);
+        const outputBudget = this.resolveGenerationBudget('creative_assets', {
+            systemPrompt,
+            promptInput: JSON.stringify({ goal, userDecisions: payload.userDecisions || {}, skillPrompt }),
+        });
         const prompt = this.assembleAgentPrompt({
             operation: 'agent.generate_novel_bootstrap',
             systemPrompt,
-            outputTokens,
+            outputTokens: outputBudget.recoveryTokens,
             currentRequest: { goal },
             sections: [
                 {
@@ -2800,14 +2813,14 @@ export class AiService {
                 }] : []),
             ],
         });
-        const response = await this.generateStructured({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
             prompt,
-            maxTokens: outputTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.65),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 210000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_novel_bootstrap');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         if (!parsed || !Array.isArray(parsed.titleCandidates) || !Array.isArray(parsed.characters) || !Array.isArray(parsed.openingBeats)) {
             this.invalidAgentStructuredOutput('Novel bootstrap returned an invalid blueprint');
@@ -3030,11 +3043,14 @@ export class AiService {
                 'It may direct the user to the artifact for details, but must not invent artifact names or counts.',
                 'Return strict JSON only: {"content":"complete Markdown report","conversationSummary":"concise Markdown completion handoff"}. Do not mention internal event names.',
             ].join(' ');
-        const outputTokens = Math.min(this.settingsCache.http.maxTokens, 4000);
+        const outputBudget = this.resolveGenerationBudget('plan', {
+            systemPrompt,
+            promptInput: JSON.stringify(payload),
+        });
         const prompt = this.assembleAgentPrompt({
             operation: 'agent.generate_report',
             systemPrompt,
-            outputTokens,
+            outputTokens: outputBudget.recoveryTokens,
             currentRequest: {
                 goal,
                 preferredRole: payload.role || 'team',
@@ -3072,14 +3088,14 @@ export class AiService {
                 },
             ],
         });
-        const response = await this.generateStructured({
+        const response = await this.generateStructuredWithBudgetRecovery({
             systemPrompt,
             prompt,
-            maxTokens: outputTokens,
+            maxTokens: outputBudget.initialTokens,
             temperature: Math.min(this.settingsCache.http.temperature, 0.45),
             timeoutMs: Math.max(this.settingsCache.http.timeoutMs, 180000),
             signal,
-        });
+        }, outputBudget, 'agent.generate_report');
         const parsed = await this.checkpointAndParseStructuredResponse(response.text);
         const content = trimText(parsed?.content, 20000);
         const conversationSummary = trimText(parsed?.conversationSummary, 4000);
@@ -3543,11 +3559,17 @@ export class AiService {
             providerType: this.settingsCache.providerType,
         });
         const provider = this.getProvider();
+        const outputBudget = capTaskOutputBudget(this.resolveGenerationBudget('rag_qa', {
+            promptInput: payload.question,
+        }), 4_096);
         const result = await this.novelRagService.ask(payload, provider, {
-            maxTokens: Math.min(2048, this.settingsCache.http.maxTokens || 2048),
+            maxTokens: outputBudget.initialTokens,
             temperature: 0.2,
             embeddingSettings: this.settingsCache.embedding,
             signal,
+            generate: (request) => this.generateWithBudgetRecovery(
+                (attempt) => provider.generate(attempt), request, outputBudget, 'rag.ask',
+            ),
         });
         devLog('INFO', 'AiService.askNovel.success', 'Novel RAG ask success', {
             novelId: payload.novelId,

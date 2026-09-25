@@ -161,7 +161,13 @@ function lexicalScore(query: string, text: string): number {
     for (const token of queryTokens) {
         if (haystack.includes(token)) hits += 1;
     }
-    return hits / queryTokens.length;
+    const tokenScore = hits / queryTokens.length;
+    // Tokenization splits `23:10` into `23` and `10`, which can rank a chunk
+    // containing the wrong time above one with the exact timestamp.
+    const timestamps = Array.from(new Set(query.match(/(?<!\d)(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)/g) || []));
+    if (timestamps.length === 0) return tokenScore;
+    const exactTimeScore = timestamps.filter((timestamp) => haystack.includes(timestamp)).length / timestamps.length;
+    return (tokenScore * 0.45) + (exactTimeScore * 0.55);
 }
 
 function chunkText(text: string): string[] {

@@ -22,10 +22,10 @@ _OPERATION_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("chapter.create", ("新增一章", "新建一章", "创建一章", "写下一章", "新增章节", "新建章节", "create next chapter")),
     ("chapter.sequence_continuation", ("续写多章", "连续写两章", "连续写三章", "续写两章", "续写三章", "写后续几章", "continue multiple chapters")),
     ("chapter.batch_rewrite", ("批量改写章节", "批量改写", "改写多章", "重写多章", "重写选中章节", "batch rewrite")),
-    ("chapter.continuation", ("续写", "继续写", "接着写", "往下写", "continue the chapter", "continue writing")),
+    ("chapter.continuation", ("续写", "继续写", "接着写", "往下写", "创作完整正文", "生成完整正文", "chapter.continuation", "continue the chapter", "continue writing")),
     ("chapter.rewrite", ("改写", "重写", "润色", "rewrite", "polish")),
     ("reader.feedback", ("读者反馈", "读者视角", "弃读", "追更", "reader feedback")),
-    ("research.fact_check", ("考据", "事实核查", "资料来源", "fact check", "research")),
+    ("research.fact_check", ("考据", "事实核查", "资料来源", "fact check", "research", "rag.ask")),
 )
 
 _DRAFT_OPERATION_IDS = {
@@ -165,7 +165,8 @@ def explicitly_requests_creative_assets(message: str) -> bool:
 def requests_post_generation_review(message: str) -> bool:
     normalized = message.strip().lower()
     generation_markers = (
-        "续写", "继续写", "接着写", "完整章节", "完整一章", "完成正文", "生成正文", "写完",
+        "续写", "继续写", "接着写", "完整章节", "完整一章", "完整正文", "完成正文", "生成正文", "写完",
+        "chapter.continuation",
         "continue", "write the chapter", "complete the chapter", "generate the chapter",
     )
     review_markers = (

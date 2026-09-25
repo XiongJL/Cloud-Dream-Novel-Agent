@@ -267,6 +267,29 @@ def build_plan_from_intent(
 
     normalized_goal = goal.strip() or "创作任务"
     normalized_role = preferred_role if preferred_role in ALLOWED_ROLES else "team"
+    if (
+        len(operations) == 1
+        and operations[0].type == "research.fact_check"
+        and "rag.ask" in normalized_goal.lower()
+        and "search.query" in normalized_goal.lower()
+    ):
+        plan = AgentPlan(
+            planId=new_id("plan"),
+            threadId=new_id("thread"),
+            title="作品知识库问答与全文检索",
+            goal=normalized_goal,
+            steps=[AgentPlanStep(
+                stepId=new_id("step"),
+                agent="research_rag",
+                title="核对知识库回答与章节原文",
+                tools=["rag.ask", "search.query"],
+            )],
+            preferredRole="research_rag",
+            deliverable="report",
+            requestedEffect="read_only",
+        )
+        validate_plan_effect(plan)
+        return plan
     style_work_title = extract_style_work_title(normalized_goal)
     steps: list[AgentPlanStep] = []
     seen_chain_ids: set[str] = set()

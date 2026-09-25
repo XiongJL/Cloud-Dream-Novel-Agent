@@ -219,6 +219,8 @@ export function artifactFromRunEvent(event: ProjectedAgentRunEvent): ProjectedAg
             'worldbuilding_consistency',
             'research_fact_check',
             'scope_audit',
+            'novel_bootstrap_draft',
+            'agent_skill_pack_draft',
         ].includes(String(item.type))
         || typeof item.title !== 'string'
     ) return null;
@@ -539,7 +541,11 @@ export function applyAgentRunEvent(
     const approvalSubmitted = event.type === 'message' && payload.kind === 'approval_submitted';
     const userInput = userInputFromRunEvent(event);
     const userInputResolved = event.type === 'user_input_resolved';
-    const draftSessionId = event.type === 'draft_created' && typeof payload.draftSessionId === 'string'
+    const eventArtifact = artifactFromRunEvent(event);
+    const artifactDraftId = eventArtifact && ['chapter_draft', 'creative_assets_draft'].includes(eventArtifact.type)
+        ? eventArtifact.reference?.draftSessionId : undefined;
+    const draftSessionId = typeof artifactDraftId === 'string' ? artifactDraftId
+        : event.type === 'draft_created' && typeof payload.draftSessionId === 'string'
         ? payload.draftSessionId
         : current.run.draftSessionId;
     const draftBatchId = typeof payload.draftBatchId === 'string'
@@ -557,7 +563,6 @@ export function applyAgentRunEvent(
     const draftOperationVersion = typeof payload.operationVersion === 'number'
         ? payload.operationVersion
         : current.run.draftOperationVersion;
-    const eventArtifact = artifactFromRunEvent(event);
     const artifacts = eventArtifact && !(current.run.artifacts ?? []).some((item) => item.artifactId === eventArtifact.artifactId)
         ? [...(current.run.artifacts ?? []), eventArtifact]
         : current.run.artifacts;

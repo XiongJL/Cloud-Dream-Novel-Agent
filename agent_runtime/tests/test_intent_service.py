@@ -19,6 +19,7 @@ from novel_agent_runtime.intent.schemas import (
 )
 from novel_agent_runtime.intent.service import IntentService
 from novel_agent_runtime.intent.targets import resolve_intent_chapter_target
+from novel_agent_runtime.planner import build_plan_from_intent
 
 
 def request(
@@ -73,6 +74,28 @@ def test_greeting_stays_conversation_even_if_model_suggests_plan() -> None:
     assert "LIGHT_CONVERSATION" in decision.reasonCodes
 
 
+def test_explicit_rag_tools_do_not_expand_to_range_fact_check() -> None:
+    message = "只读检索：用 rag.ask 核对两次记录，再用 search.query 查 23:10，列出原文和来源。"
+    assert detect_explicit_operations(message) == ["research.fact_check"]
+    decision = decide(request(message, role="research_rag"), proposal(
+        should_plan=True, operations=["research.range_fact_check"],
+    ))
+    assert [operation.type for operation in decision.operations] == ["research.fact_check"]
+    assert "EXPLICIT_RAG_TOOLS_OVERRIDE_RANGE_FACT_CHECK" in decision.reasonCodes
+    plan = build_plan_from_intent(message, decision, preferred_role="research_rag", has_chapter=True)
+    assert plan is not None
+    assert len(plan.steps) == 1
+    assert plan.steps[0].toolchain is None
+    assert plan.steps[0].tools == ["rag.ask", "search.query"]
+
+    range_message = "对当前卷做多章节事实核查，用 rag.ask 和 search.query 收集证据。"
+    assert detect_explicit_operations(range_message) == ["research.range_fact_check"]
+    range_decision = decide(request(range_message, role="research_rag"), proposal(
+        should_plan=True, operations=["research.range_fact_check"],
+    ))
+    assert [operation.type for operation in range_decision.operations] == ["research.range_fact_check"]
+
+
 def test_project_fact_lookup_responds_after_read_only_exploration() -> None:
     intent_request = request("当前小说已有多少个章节？")
     service = IntentService()
@@ -105,8 +128,12 @@ def test_compound_review_then_continuation_preserves_order_and_capabilities() ->
     assert decision.route == "plan"
 
 
-def test_complete_chapter_then_editor_review_drops_incidental_assets_and_owns_review() -> None:
-    message = "续写当前章节，完成约 1800—2200 字正文；人物和世界规则保持一致，写完后由编辑审校逻辑、视角与结尾钩子。"
+@pytest.mark.parametrize("message", [
+    "续写当前章节，完成约 1800—2200 字正文；人物和世界规则保持一致，写完后由编辑审校逻辑、视角与结尾钩子。",
+    "为当前空白章节创作完整正文，约2300汉字，然后进行编辑审校。",
+    "执行 chapter.continuation，生成约2300汉字正文草稿，然后进行编辑审校。",
+])
+def test_complete_chapter_then_editor_review_drops_incidental_assets_and_owns_review(message: str) -> None:
     decision = decide(
         request(message),
         proposal(

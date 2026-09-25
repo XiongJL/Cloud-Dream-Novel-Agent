@@ -388,6 +388,79 @@ def test_retry_run_rejects_side_effect_unknown_before_loading_checkpoint(tmp_pat
     asyncio.run(scenario())
 
 
+def test_retryable_toolchain_failure_without_request_exhaustion_resumes_failed_node(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime, _ = create_runtime(tmp_path)
+        plan = AgentPlan(
+            planId="plan-research-retry",
+            threadId="thread-research-retry",
+            title="只读考据",
+            goal="核对证据",
+            steps=[AgentPlanStep(stepId="step-research", agent="research_rag", title="综合证据")],
+        )
+        failed = AgentRun(
+            runId="run-research-retry",
+            threadId=plan.threadId,
+            planId=plan.planId,
+            status="failed",
+            currentStepId=plan.steps[0].stepId,
+            failureRevision=1,
+        )
+        runtime.state.plans[plan.planId] = plan
+        runtime.state.runs[failed.runId] = failed
+        await runtime._emit(failed, "run_failed", payload={
+            "code": "NODE_FAILED", "nodeId": "research.synthesize", "retryable": True,
+        })
+        assert not any(event.type == "request_retry_exhausted" for event in failed.events)
+        assert runtime._retryable_failed_run_ref(failed.runId) is not None
+        intent = await runtime.chat({
+            "message": "重试失败步骤",
+            "conversationId": "conversation-research-retry",
+            "conversationContext": {"priorRuns": [{"runId": failed.runId, "status": "failed"}]},
+        }, {})
+        assert intent.intentDecision and intent.intentDecision.route == "retry_failed_run"
+        assert intent.intentDecision.recovery and intent.intentDecision.recovery.failedRunId == failed.runId
+        runtime.execution_graph.load_checkpoint_state = lambda _thread_id: {  # type: ignore[method-assign]
+            "run_id": failed.runId,
+            "approved_step_ids": [plan.steps[0].stepId],
+            "novel_id": "novel-1",
+            "volume_id": None,
+            "chapter_id": "chapter-1",
+            "current_content": "",
+            "locale": "zh-CN",
+            "step_index": 0,
+            "tool_index": 0,
+            "phase": "toolchain",
+            "action": "continue",
+            "checkpoint": None,
+            "resume_response": None,
+            "latest_analysis_summary": "",
+            "report_findings": [],
+            "creative_direction_checked": False,
+            "toolchain_state": {"claimsExtracted": True, "researchSearchIndex": 1, "researchSearchQueue": ["claim-1"]},
+            "pending_operation": None,
+        }
+
+        resumed_states: list[Any] = []
+
+        async def no_op_guarded(*_args: Any, **kwargs: Any) -> None:
+            resumed_states.append(kwargs.get("initial_state"))
+            return None
+
+        runtime._run_graph_guarded = no_op_guarded  # type: ignore[method-assign]
+        linked = await runtime.retry_run({
+            "failedRunId": failed.runId,
+            "expectedFailureRevision": 1,
+            "mode": "failed_node",
+        }, {})
+        assert linked.retryOfRunId == failed.runId
+        assert linked.resumedFrom and linked.resumedFrom["phase"] == "toolchain"
+        await asyncio.sleep(0)
+        assert resumed_states and resumed_states[0]["toolchain_state"]["researchSearchIndex"] == 1
+
+    asyncio.run(scenario())
+
+
 def test_context_budget_error_keeps_actionable_message_without_retry() -> None:
     failure = normalize_agent_error(AutomationInvokeError(
         "CONTEXT_BUDGET_UNSATISFIABLE",

@@ -1784,7 +1784,7 @@ export class AutomationService {
             return `${index + 1}. ${location}：${comment.body.trim()}${quote}`;
         }).join('\n');
         const promptDraft = JSON.stringify(sourceDraft, (key, value) => (
-            key === 'imageBase64' ? '[保留原图片数据]' : value
+            key === 'imageBase64' && value ? '[保留原图片数据]' : value
         ), 2);
         let generation: import('../ai/types').AiGenerationMetadata | undefined;
         const generatedDraft = await this.invokeAgentStructured(
@@ -1803,6 +1803,7 @@ export class AutomationService {
                         '必须返回完整 JSON 素材包，结构与原素材包一致。',
                         '只修改审批意见指出的条目或字段；其余情节、角色、设定、物品、技能和地图保持不变。',
                         '不要解释修改过程，不要省略未修改条目。',
+                        'imageBase64 为保留标记时保持该标记；没有图片数据时保持空值，不得编造图片数据。',
                         '原素材包：',
                         promptDraft,
                         '审批意见：',
@@ -1815,6 +1816,13 @@ export class AutomationService {
             { autoRepair: true },
         );
         const revisedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(generatedDraft));
+        for (const map of revisedDraft.maps || []) {
+            if (map.imageBase64 !== '[保留原图片数据]') continue;
+            const originals = (sourceDraft.maps || []).filter((item) => item.name === map.name);
+            const originalImage = originals.length === 1 ? originals[0].imageBase64 : undefined;
+            // Resolve the redaction locally; a marker is never image data.
+            map.imageBase64 = originalImage && originalImage !== '[保留原图片数据]' ? originalImage : '';
+        }
         const revisedCount = Object.values(revisedDraft).reduce((total, items) => total + (items?.length ?? 0), 0);
         if (revisedCount === 0) throw createAutomationError('EMPTY_RESULT', 'Agent returned an empty creative assets revision');
 

@@ -42,6 +42,16 @@ const apply = (nextEvent) => {
     );
 };
 
+for (const type of ['novel_bootstrap_draft', 'agent_skill_pack_draft']) {
+    const artifact = {
+        artifactId: `artifact-${type}`, runId: 'run-recovery', planId: 'plan-1',
+        type, title: 'Saved creative artifact', content: 'Full saved content',
+        metadata: { draft: { titleCandidates: ['Test'] } }, reference: {}, status: 'ready',
+    };
+    assert.deepEqual(projection.artifactFromRunEvent(event(0, 'artifact_created', { artifact }))?.metadata, artifact.metadata);
+    assert.equal(projection.artifactFromRunEvent(event(0, 'artifact_created', { artifact }))?.content, artifact.content);
+}
+
 apply(event(1, 'step_started', {}, 'step-1'));
 apply(event(2, 'message', { content: '读取当前章节上下文' }, 'step-1'));
 assert.equal(state.messages.length, 0);
@@ -273,4 +283,14 @@ assert.equal(checkpoints.at(-1).active, true);
 assert.equal(checkpoints.at(-1).approval.revisionError, 'Provider 暂时不可用');
 assert.equal(checkpoints.at(-1).approval.beats[0].title, '第 2 版');
 
+const revisionArtifact = {
+    artifactId: 'revision-artifact', runId: 'run-recovery', planId: 'plan-1',
+    type: 'chapter_draft', title: 'Revised draft', status: 'ready',
+    reference: { draftSessionId: 'revised-session', revisionOfDraftSessionId: 'original-session' },
+};
+const revisedProjection = projection.applyAgentRunEvent({
+    ...state, run: { ...state.run, lastSequence: 0, events: [], draftSessionId: 'original-session' },
+}, event(100, 'artifact_created', { artifact: revisionArtifact }), () => ({ id: 'unused', createdAt: '' }));
+assert.equal(revisedProjection.run.draftSessionId, 'revised-session');
+assert.equal(revisedProjection.run.artifacts.at(-1).artifactId, 'revision-artifact');
 console.log('Agent run projection and refresh recovery tests passed.');

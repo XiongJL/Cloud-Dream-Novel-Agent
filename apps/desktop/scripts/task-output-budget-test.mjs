@@ -95,6 +95,24 @@ const automaticPlan = resolveTaskOutputBudget({
 });
 assert.equal(automaticPlan.initialTokens, 4096);
 assert.equal(automaticPlan.recoveryTokens, 8192);
+for (const [task, initial, recovery] of [
+    ['rag_qa', 2048, 4096],
+    ['research_report', 8192, 16384],
+]) {
+    const automatic = resolveTaskOutputBudget({
+        task, mode: 'auto', providerType: 'http', model: 'test',
+        manualMaxTokens: 4096, promptInput: 'short',
+    });
+    assert.equal(automatic.initialTokens, initial);
+    assert.equal(automatic.recoveryTokens, recovery);
+    assert.equal(automatic.canIncreaseOnce, true);
+    const manual = capTaskOutputBudget(resolveTaskOutputBudget({
+        task, mode: 'manual', providerType: 'http', model: 'test',
+        manualMaxTokens: 16384, promptInput: 'short',
+    }), recovery);
+    assert.equal(manual.initialTokens, recovery);
+    assert.equal(manual.canIncreaseOnce, false);
+}
 const limitedRecovery = capTaskOutputBudget(automaticPlan, 6000);
 assert.equal(limitedRecovery.initialTokens, 4096);
 assert.equal(limitedRecovery.recoveryTokens, 6000);
@@ -146,5 +164,8 @@ assert.match(aiServiceSource, /resolveGenerationBudget\('editor_review'/u);
 assert.match(aiServiceSource, /agent\.generate_consistency_review'\);/u);
 assert.match(aiServiceSource, /capTaskOutputBudget\(taskOutputBudget, outputTokens\)/u);
 assert.match(aiServiceSource, /agent\.generate_chat'\);/u);
+assert.match(aiServiceSource, /resolveGenerationBudget\('research_report'/u);
+assert.match(aiServiceSource, /agent\.generate_research_fact_check'\);/u);
+assert.match(aiServiceSource, /resolveGenerationBudget\('rag_qa'/u);
 
 console.log('Task output budget tests passed.');

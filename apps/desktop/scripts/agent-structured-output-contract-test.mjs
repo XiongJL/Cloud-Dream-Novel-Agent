@@ -54,10 +54,11 @@ assert.doesNotMatch(aiServiceSource, /generateAgentSkillDraft|generateAgentStyle
 assert.doesNotMatch(aiServiceSource, /角色-\$\{suffix\}|完成使命/u);
 assert.doesNotMatch(aiServiceSource, /你是 Agent Skill Creator。把用户自然语言需求整理成|你是创作 Skill 提炼器。只从输入中获准/);
 const structuredGenerateCallCount = [...aiServiceSource.matchAll(/this\.generateStructured\(/g)].length;
+const budgetRecoveryCallCount = [...aiServiceSource.matchAll(/this\.generateStructuredWithBudgetRecovery\(/g)].length;
 assert.equal(
-    structuredGenerateCallCount,
-    registeredStructuredMethods.length - 4,
-    'Direct structured generators must remain contract-aware; budget-recovery wrapper call sites are asserted separately',
+    structuredGenerateCallCount + budgetRecoveryCallCount,
+    registeredStructuredMethods.length,
+    'Each structured generator must use a direct contract-aware call or the budget-recovery wrapper',
 );
 assert.match(aiServiceSource, /generateStructuredWithBudgetRecovery\([\s\S]*agent\.generate_consistency_review'\)/u);
 assert.match(

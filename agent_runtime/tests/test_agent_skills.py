@@ -905,6 +905,12 @@ def test_novel_bootstrap_executes_with_locked_builtin_skill_and_publishes_draft(
         assert "连载章节表" in str(artifact.content)
         assert plan.requiresApproval is True
         assert completed.skillSnapshot[0].revisionId == "builtin.novel-bootstrap@1.3.0"
+        report_params = next(params for method, params, _ in automation.calls if method == "agent.generate_report")
+        blueprint_finding = next(item["data"] for item in report_params["findings"] if item["toolName"].startswith("toolchain:novel.bootstrap"))
+        assert blueprint_finding["artifactId"] == artifact.artifactId
+        assert blueprint_finding["status"] == "ready"
+        assert blueprint_finding["summary"] == artifact.metadata["draft"]["corePremise"]
+        assert len(blueprint_finding["chapterPlan"]) == 3
 
     asyncio.run(scenario())
 
@@ -984,7 +990,10 @@ def test_approved_novel_blueprint_initializes_reviewable_project_assets(tmp_path
         decision = IntentService().finalize(
             request,
             IntentService().preflight(request),
-            SemanticProposal(responseContent="生成初始化草稿。", shouldPlan=True, confidence=0.95),
+            SemanticProposal(
+                responseContent="生成初始化草稿。", shouldPlan=True, confidence=0.95,
+                requestedOperations=["novel.project_initialize", "creative_asset.draft"],
+            ),
         )
         plan = await runtime.plan({
             "goal": "根据已确认蓝图初始化当前小说项目",
@@ -995,6 +1004,7 @@ def test_approved_novel_blueprint_initializes_reviewable_project_assets(tmp_path
         }, {"novelId": "novel_1", "locale": "zh-CN"})
 
         assert plan.requiresApproval is True
+        assert len(plan.steps) == 1, "Initialization already owns the creative-assets draft"
         assert plan.steps[0].toolchain and plan.steps[0].toolchain.id == "novel.project_initialize"
         assert plan.steps[0].skills[0].stableId == "builtin.novel-bootstrap"
         run = await runtime.execute_plan({
@@ -1012,6 +1022,7 @@ def test_approved_novel_blueprint_initializes_reviewable_project_assets(tmp_path
         completed = runtime.state.runs[run.runId]
         assert completed.status == "completed"
         assert {name for name, _ in calls}.issuperset({"creative_assets.generate_draft", "creative_assets.validate_draft"})
+        assert sum(name == "creative_assets.generate_draft" for name, _ in calls) == 1
         artifact = next(item for item in completed.artifacts if item.type == "creative_assets_draft")
         assert artifact.metadata["bootstrapArtifactId"] == "artifact_blueprint_1"
         assert artifact.reference["draftSessionId"] == "creative_init_1"

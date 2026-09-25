@@ -21,7 +21,6 @@ function toPromptPreviewData(result: RagAskResult | null, t: TFunction): PromptP
       contextRefs: (result.usedContext || []).map((item) => t(`aiWorkbench.rag.contextRef.${item}`, { defaultValue: item })),
       params: {
         intent: result.intent,
-        confidence: result.confidence,
         evidenceCount: result.evidence.length,
       },
       constraints: [
@@ -102,7 +101,7 @@ export default function NovelAskPanel({ novelId, theme, currentChapterId, curren
     try {
       const preview = await window.ai.previewNovelAskPrompt(buildPayload());
       setPromptPreview(preview);
-      setPromptOverride((prev) => prev || preview.editableUserPrompt || '');
+      setPromptOverride((prev) => promptDirty ? prev : (preview.editableUserPrompt || ''));
     } catch (err) {
       console.error('[NovelAskPanel] prompt preview failed:', err);
       setPromptPreviewError(t('aiWorkbench.rag.promptPreviewFailed'));
@@ -172,7 +171,14 @@ export default function NovelAskPanel({ novelId, theme, currentChapterId, curren
       <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
         <textarea
           value={question}
-          onChange={(event) => setQuestion(event.target.value)}
+          onChange={(event) => {
+            setQuestion(event.target.value);
+            setResult(null);
+            setError('');
+            setPromptPreview(null);
+            setPromptOverride('');
+            setPromptDirty(false);
+          }}
           rows={4}
           placeholder={t('aiWorkbench.rag.questionPlaceholder')}
           className={clsx(

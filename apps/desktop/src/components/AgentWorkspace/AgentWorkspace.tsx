@@ -3083,8 +3083,14 @@ function AgentWorkspace({
           }] : []),
         ],
       }));
-      if (recovery && activeConversation.run) {
-        await beginRetryRun(conversationId, activeConversation.run, recovery);
+      if (recovery) {
+        const failedRun = activeConversation.run?.runId === recovery.failedRunId
+          ? activeConversation.run
+          : activeConversation.runs?.find((run) => run.runId === recovery.failedRunId);
+        if (!failedRun) {
+          throw new Error('Failed Agent run is no longer available in this conversation');
+        }
+        await beginRetryRun(conversationId, failedRun, recovery);
         startedRun = true;
         clearPendingStatus(conversationId);
       } else if (shouldDraftPlan) {
