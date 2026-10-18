@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { PrismaClient } from '@novel-editor/core';
 import ts from 'typescript';
 
@@ -19,18 +20,34 @@ const dbPath = path.join(tempRoot, 'checkpoint.db');
 const client = new PrismaClient({ datasources: { db: { url: `file:${dbPath.replaceAll('\\', '/')}?connection_limit=1` } } });
 const contract = { contractId: 'test.analysis', version: '1.0.0', schema: { type: 'object' } };
 let holder;
-let releaseTimer;
 try {
     const store = new AgentModelResultStore(client);
     await store.ensureSchema();
     await client.$queryRawUnsafe('PRAGMA busy_timeout = 20');
-    holder = new DatabaseSync(dbPath);
-    holder.exec('BEGIN EXCLUSIVE');
-    let released = false;
-    releaseTimer = setTimeout(() => { holder.exec('COMMIT'); released = true; }, 350);
+    // POSIX file locks are process-scoped: another SQLite connection closing
+    // in this process can release them. Hold the real lock in a separate process.
+    holder = spawn(process.execPath, ['--input-type=module', '-e', `
+        import { DatabaseSync } from 'node:sqlite';
+        const database = new DatabaseSync(process.argv[1]);
+        database.exec('BEGIN EXCLUSIVE');
+        process.send('locked');
+        process.once('message', () => {
+            database.exec('COMMIT');
+            database.close();
+            process.send('released', () => process.disconnect());
+        });
+    `, dbPath], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'] });
+    assert.equal((await once(holder, 'message'))[0], 'locked');
     const captured = '{"summary":"Captured once","findings":[]}';
-    const saved = await store.save('response-once', 'agent.analyze_skill_work_unit', contract, captured);
-    assert.equal(released, true, 'the real SQLite lock must be released before the checkpoint is committed');
+    let settled = false;
+    const saving = store.save('response-once', 'agent.analyze_skill_work_unit', contract, captured);
+    saving.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(settled, false, 'checkpoint persistence must wait while another process holds the SQLite lock');
+    const released = once(holder, 'message');
+    holder.send('release');
+    assert.equal((await released)[0], 'released');
+    const saved = await saving;
     assert.equal(saved.rawText, captured);
     assert.equal(saved.revision, 1);
     assert.equal((await store.getLatest('response-once')).rawText, captured);
@@ -71,8 +88,7 @@ try {
     assert.equal(afterFailure.rawText, captured, 'the failed queue must release subsequent writes');
     console.log('Checkpoint real SQLite lock recovery, bounded failure, revision serialization and non-busy isolation passed.');
 } finally {
-    clearTimeout(releaseTimer);
-    holder?.close();
+    holder?.kill();
     await client.$disconnect();
     assert.ok(path.resolve(tempRoot).startsWith(scratch + path.sep));
     await fs.rm(tempRoot, { recursive: true, force: true });
