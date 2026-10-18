@@ -956,11 +956,9 @@ def test_executor_graph_interrupt_persists_and_resumes_once(tmp_path: Path) -> N
             {"novelId": "novel_1", "chapterId": "chapter_3", "locale": "zh-CN"},
         )
 
-        for _ in range(100):
-            task = runtime._run_tasks.get(run.runId)  # noqa: SLF001 - verifies interrupt releases the worker task.
-            if runtime.state.runs[run.runId].status == "waiting_user_input" and (task is None or task.done()):
-                break
-            await asyncio.sleep(0.01)
+        task = runtime._run_tasks.get(run.runId)  # noqa: SLF001 - wait for the persisted graph interrupt.
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
         waiting = runtime.state.runs[run.runId]
         assert waiting.status == "waiting_user_input"
@@ -980,10 +978,9 @@ def test_executor_graph_interrupt_persists_and_resumes_once(tmp_path: Path) -> N
                 "selectedOptionIds": ["current_chapter"],
             }
         )
-        for _ in range(200):
-            if runtime.state.runs[run.runId].status in {"completed", "failed"}:
-                break
-            await asyncio.sleep(0.01)
+        resumed_task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
+        if resumed_task is not None:
+            await asyncio.wait_for(asyncio.shield(resumed_task), timeout=30)
 
         assert runtime.state.runs[run.runId].status == "completed"
         assert [method for method, _, _ in automation.calls].count("rag.ask") == 1
@@ -1022,11 +1019,9 @@ def test_executor_graph_user_input_close_cancels_run_idempotently(tmp_path: Path
             },
             {"novelId": "novel_1", "chapterId": "chapter_3"},
         )
-        for _ in range(100):
-            task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
-            if runtime.state.runs[run.runId].status == "waiting_user_input" and (task is None or task.done()):
-                break
-            await asyncio.sleep(0.01)
+        task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
         pending_request = runtime.state.runs[run.runId].pendingUserInput
         assert pending_request is not None
@@ -1073,11 +1068,9 @@ def test_executor_graph_resumes_waiting_approval_after_runtime_restart(tmp_path:
             },
             {"novelId": "novel_1", "chapterId": "chapter_3"},
         )
-        for _ in range(100):
-            task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
-            if runtime.state.runs[run.runId].status == "waiting_user_input" and (task is None or task.done()):
-                break
-            await asyncio.sleep(0.01)
+        task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
         pending = runtime.state.runs[run.runId].pendingApproval
         assert pending is not None
@@ -1102,10 +1095,9 @@ def test_executor_graph_resumes_waiting_approval_after_runtime_restart(tmp_path:
                 "selectedOptionIds": ["current_chapter"],
             }
         )
-        for _ in range(200):
-            if restarted.state.runs[run.runId].status in {"completed", "failed"}:
-                break
-            await asyncio.sleep(0.01)
+        resumed_task = restarted._run_tasks.get(run.runId)  # noqa: SLF001
+        if resumed_task is not None:
+            await asyncio.wait_for(asyncio.shield(resumed_task), timeout=30)
 
         assert restarted.state.runs[run.runId].status == "completed"
         assert [method for method, _, _ in automation.calls].count("rag.ask") == 1
