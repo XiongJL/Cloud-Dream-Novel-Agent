@@ -256,6 +256,8 @@ export function useChapterLifecycle({
         return queued;
     }, [addToRecentFiles, clearSaveStatusTimer, loadVolumes, scheduleSaveStatusReset, t]);
 
+    useEffect(() => window.backup.onFlush(() => saveChanges('lifecycle')), [saveChanges]);
+
     useEffect(() => {
         const timer = window.setTimeout(() => {
             if (!currentChapter) return;

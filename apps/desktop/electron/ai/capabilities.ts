@@ -287,6 +287,7 @@ export function createCapabilityDefinitions(deps: CapabilityDeps): CapabilityDef
                     locale: { type: 'string' },
                     batchSize: { type: 'number', minimum: 1, maximum: 10 },
                     maxDetailedChapters: { type: 'number', minimum: 1, maximum: 20 },
+                    representation: { type: 'string', enum: ['default', 'catalog', 'verbatim', 'expert_context'] },
                     maxEstimatedTokens: { type: 'number', minimum: 4000, maximum: 200000 },
                 },
                 required: ['novelId'],

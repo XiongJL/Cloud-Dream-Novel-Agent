@@ -35,6 +35,7 @@ class RecordingAutomation:
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
         self.calls.append((method, params, request_id))
         if self.fail:
@@ -82,6 +83,7 @@ class PendingThenSuccessAutomation(RecordingAutomation):
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
         if method != "chapter.draft.get_status":
             return await super().invoke(method, params, origin, request_id)
@@ -115,6 +117,7 @@ class DefinitivePrePublishFailureAutomation(RecordingAutomation):
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
         self.calls.append((method, params, request_id))
         raise AutomationInvokeError(
@@ -157,7 +160,11 @@ def test_batch_side_effect_snapshot_preserves_recovery_contract() -> None:
         "type": "chapter-draft",
         "status": "draft",
         "version": 1,
-        "payload": {"chapterId": "temporary", "generatedText": "正文", "content": "正文", "baseContent": "ignored"},
+        "payload": {"chapterId": "temporary", "generatedText": "正文", "content": "正文", "baseContent": "ignored",
+                    "warnings": ["仅有摘录"], "usedContext": ["chapter:c1"],
+                    "contextSnapshot": {"chapterSources": [{"chapterId": "c1", "contentMode": "excerpt"}]},
+                    "consistency": {"ok": False, "status": "not_reviewed"},
+                    "narrativeStateDelta": {"characterLocations": []}},
     }
 
     batch_snapshot = NovelAgentRuntime._side_effect_result_snapshot(batch)  # noqa: SLF001
@@ -165,7 +172,7 @@ def test_batch_side_effect_snapshot_preserves_recovery_contract() -> None:
 
     assert batch_snapshot == batch
     assert child_snapshot["draftBatchId"] == "batch-1"
-    assert child_snapshot["payload"] == {"chapterId": "temporary", "generatedText": "正文", "content": "正文"}
+    assert child_snapshot["payload"] == {key: value for key, value in child["payload"].items() if key != "baseContent"}
 
 
 def test_side_effect_invocation_reuses_success_without_replaying(tmp_path: Path) -> None:
@@ -404,6 +411,7 @@ def test_lost_start_receipt_replays_idempotent_start_instead_of_becoming_unknown
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "chapter.draft.start" and not any(call[0] == method for call in self.calls):
                 self.calls.append((method, params, request_id))
@@ -774,7 +782,10 @@ class ReconciliationAutomation:
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
+        if method == 'agent_skill.pack.default.get':
+            return {'packId': None, 'version': 0}
         self.calls.append(method)
         child = self.batch["children"][params.get("childIndex", 0)]
         if method == "draft.batch.inspect_reconciliation":

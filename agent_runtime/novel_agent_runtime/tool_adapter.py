@@ -66,17 +66,12 @@ class HttpAgentToolAdapter:
         if method not in self._allowed_tools:
             raise AutomationInvokeError("TOOL_NOT_ALLOWED", f"Tool is not registered for Agent use: {method}")
         normalized_params = normalize_tool_arguments(params or {})
-        try:
-            return await self.upstream.invoke(
-                method, normalized_params, origin,
-                request_id=request_id,
-                parent_request_id=parent_request_id,
-                deadline_at=deadline_at,
-            )
-        except TypeError as error:
-            if "unexpected keyword argument" not in str(error):
-                raise
-            return await self.upstream.invoke(method, normalized_params, origin, request_id=request_id)
+        return await self.upstream.invoke(
+            method, normalized_params, origin,
+            request_id=request_id,
+            parent_request_id=parent_request_id,
+            deadline_at=deadline_at,
+        )
 
     async def cancel(self, request_id: str) -> bool:
         return await self.upstream.cancel(request_id)
@@ -138,21 +133,14 @@ class _AutomationProxyTool(Tool):
                 "message": "FastMCP invocation context is missing",
             })
         try:
-            try:
-                data = await self._upstream.invoke(
-                    self.name,
-                    arguments,
-                    context.origin,
-                    request_id=context.request_id,
-                    parent_request_id=context.parent_request_id,
-                    deadline_at=context.deadline_at,
-                )
-            except TypeError as error:
-                if "unexpected keyword argument" not in str(error):
-                    raise
-                data = await self._upstream.invoke(
-                    self.name, arguments, context.origin, request_id=context.request_id,
-                )
+            data = await self._upstream.invoke(
+                self.name,
+                arguments,
+                context.origin,
+                request_id=context.request_id,
+                parent_request_id=context.parent_request_id,
+                deadline_at=context.deadline_at,
+            )
             return self.convert_result({"ok": True, "data": data})
         except AutomationInvokeError as error:
             return self.convert_result({

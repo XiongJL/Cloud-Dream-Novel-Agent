@@ -98,7 +98,7 @@ def test_default_toolchain_registry_exposes_stable_contracts() -> None:
     assert contracts["chapter.sequence_continuation"]["outputSchema"]["title"] == "ChapterDraftBatchResult"
     assert "draft.batch.create" in contracts["chapter.sequence_continuation"]["requiredTools"]
     assert "draft.batch.update_outline" in contracts["chapter.sequence_continuation"]["requiredTools"]
-    assert contracts["chapter.sequence_continuation"]["budget"]["maxToolCalls"] == 32
+    assert contracts["chapter.sequence_continuation"]["budget"]["maxToolCalls"] == 64
     assert contracts["chapter.batch_rewrite"]["outputSchema"]["title"] == "ChapterDraftBatchResult"
     assert "chapter.scope_context.build" in contracts["chapter.batch_rewrite"]["requiredTools"]
     assert "draft.batch.create" in contracts["chapter.batch_rewrite"]["requiredTools"]

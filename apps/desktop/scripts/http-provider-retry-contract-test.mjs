@@ -52,7 +52,7 @@ import { AiActionError } from '${moduleUrl(errorOutput)}';
 import { consumeResponsesStream, extractResponsesOutput, ResponsesStreamError } from '${moduleUrl(streamOutput)}';
 let response;
 export function setResponse(value) { response = value; }
-const net = { fetch: async () => response };
+const net = { fetch: async () => { if (response instanceof Error) throw response; return response; } };
 const devLog = () => {};
 const devLogError = () => {};
 const redactForLog = (value) => value;
@@ -70,6 +70,7 @@ const delta = { type: 'response.output_text.delta', delta: 'unfinished' };
 harness.setResponse(events([delta]));
 await assert.rejects(provider.generate({ prompt: 'test' }), (error) => {
     assert.equal(error.code, 'NETWORK_ERROR');
+    assert.equal(error.details.transportLayer, 'model');
     assert.equal(error.details.terminationReason, 'missing_completion_event');
     assert.equal(error.details.partialText, 'unfinished');
     assert.equal(error.details.safeToRetryBeforePublish, undefined);
@@ -87,6 +88,13 @@ harness.setResponse(events([delta, {
     type: 'response.completed', response: { status: 'completed' },
 }]));
 assert.equal((await provider.generate({ prompt: 'test' })).text, 'unfinished');
+harness.setResponse(new Error('net::ERR_CONNECTION_RESET'));
+await assert.rejects(provider.generate({ prompt: 'test' }), (error) => {
+    assert.equal(error.code, 'NETWORK_ERROR');
+    assert.equal(error.details.transportLayer, 'model');
+    assert.equal(error.message, '无法连接模型服务。');
+    return true;
+});
 assert.equal(
     errors.formatAiErrorForDisplay('MODEL_OUTPUT_TRUNCATED'),
     '生成达到本次输出额度，尚未形成完整草稿。',

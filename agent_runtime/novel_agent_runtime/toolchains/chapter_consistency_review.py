@@ -86,3 +86,13 @@ def review_markdown(review: ReviewArtifact) -> str:
 
 def _severity_rank(value: str) -> int:
     return {"critical": 5, "high": 4, "medium": 3, "low": 2, "info": 1}.get(value, 0)
+
+
+async def run_postwrite_loop(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Opt-in evidence-gated audit/revision using the normal review context.
+
+    This is an explicit programmatic draft entry point, not a default hook for
+    ordinary writing. The caller provides the existing model and draft adapters.
+    """
+    from ..postwrite_audit import run_postwrite_loop as run
+    return await run(*args, **kwargs)

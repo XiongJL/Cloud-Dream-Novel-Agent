@@ -49,7 +49,7 @@ export const AGENT_TEXT_MODEL_CAPABILITY_CATALOG: readonly AgentTextModelCapabil
     { providerId: 'volcengine', providerName: 'Volcengine', modelId: 'doubao-seed-2-1-pro-260628', displayName: 'Doubao Seed 2.1 Pro', contextWindowTokens: 262_144 },
     { providerId: 'volcengine', providerName: 'Volcengine', modelId: 'doubao-seed-2-0-pro-260215', displayName: 'Doubao Seed 2.0 Pro', contextWindowTokens: 131_072 },
     { providerId: 'volcengine', providerName: 'Volcengine', modelId: 'doubao-1-5-pro-32k-250115', displayName: 'Doubao 1.5 Pro', contextWindowTokens: 32_768 },
-    { providerId: 'deepseek', providerName: 'DeepSeek', modelId: 'deepseek-v4-flash', displayName: 'DeepSeek V4 Flash', contextWindowTokens: 1_000_000 },
+    { providerId: 'deepseek', providerName: 'DeepSeek', modelId: 'deepseek-flash', displayName: 'DeepSeek Flash', contextWindowTokens: 1_000_000 },
     { providerId: 'deepseek', providerName: 'DeepSeek', modelId: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro', contextWindowTokens: 1_000_000 },
     { providerId: 'zhipu', providerName: 'Zhipu', modelId: 'glm-5.2', displayName: 'GLM-5.2', contextWindowTokens: 200_000 },
     { providerId: 'zhipu', providerName: 'Zhipu', modelId: 'glm-5.1', displayName: 'GLM-5.1', contextWindowTokens: 200_000 },
@@ -80,7 +80,9 @@ function normalizeModelId(model: string): string {
 function catalogEntryForModel(model: string): AgentTextModelCapabilityCatalogEntry | undefined {
     const normalized = normalizeModelId(model);
     if (!normalized) return undefined;
-    const tail = normalized.split('/').pop() || normalized;
+    const rawTail = normalized.split('/').pop() || normalized;
+    // Retain capability lookup for saved requests using the former model name.
+    const tail = rawTail === 'deepseek-v4-flash' ? 'deepseek-flash' : rawTail;
     return AGENT_TEXT_MODEL_CAPABILITY_CATALOG.find((entry) => {
         const entryId = normalizeModelId(entry.modelId);
         const entryTail = entryId.split('/').pop() || entryId;

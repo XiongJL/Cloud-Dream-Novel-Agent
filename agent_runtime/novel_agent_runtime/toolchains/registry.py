@@ -223,7 +223,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             sideEffect="read_only",
             supportedOperations=("agent_skill.style_extract",),
             intentHints=("提炼文风", "抽取语言风格", "悬念与信息释放", "文风技能包"),
-            budget=ToolchainBudget(maxToolCalls=1, maxModelCalls=1, maxEstimatedTokens=80000, timeoutSeconds=420),
+            budget=ToolchainBudget(maxToolCalls=2048, maxModelCalls=2048, maxEstimatedTokens=64000000, timeoutSeconds=10800),
         ),
         ToolchainDefinition(
             id="chapter.scope_context",
@@ -376,7 +376,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             id="chapter.sequence_continuation",
             version="1.0.0",
             title="连续多章续写草稿",
-            description="装配一次基础上下文，审批整批章节节拍，按顺序生成 1 至 5 个父子草稿并提取正文状态增量。",
+            description="装配一次基础上下文，审批整批章节节拍，按顺序生成 1 至 10 个父子草稿并提取正文状态增量。",
             inputModel=ChapterSequenceContinuationInput,
             outputModel=ChapterDraftBatchResult,
             allowedRoles=("team", "writer", "editor"),
@@ -394,7 +394,7 @@ TOOLCHAIN_REGISTRY = ToolchainRegistry(
             sideEffect="draft_write",
             supportedOperations=("chapter.sequence_continuation", "chapter.create"),
             intentHints=("续写多章", "连续写几章", "后续章节", "multiple chapter continuation"),
-            budget=ToolchainBudget(maxToolCalls=32, maxModelCalls=11, maxEstimatedTokens=160000, timeoutSeconds=1200),
+            budget=ToolchainBudget(maxToolCalls=64, maxModelCalls=41, maxEstimatedTokens=640000, timeoutSeconds=3600),
         ),
         ToolchainDefinition(
             id="chapter.batch_rewrite",

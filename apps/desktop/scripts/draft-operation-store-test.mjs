@@ -60,8 +60,42 @@ try {
     }
 
     let operationSchemaCreates = 0;
+    let activityWrites = 0;
+    let activityGate;
+    const transactionCalls = [];
     const instrumentedClient = new Proxy(client, {
         get(target, property, receiver) {
+            if (property === '$transaction') return (callback, options) => {
+                const calls = [];
+                transactionCalls.push({ calls, options });
+                return target.$transaction(tx => callback(new Proxy(tx, {
+                    get(inner, key) {
+                        if (key === 'draftGenerationOperation') return new Proxy(inner[key], {
+                            get(model, method) {
+                                const value = model[method];
+                                return typeof value === 'function' ? (...args) => {
+                                    calls.push(String(method));
+                                    return value.apply(model, args);
+                                } : value;
+                            },
+                        });
+                        const value = inner[key];
+                        return typeof value === 'function' ? value.bind(inner) : value;
+                    },
+                })), options);
+            };
+            if (property === 'draftGenerationAttempt') return new Proxy(target[property], {
+                get(model, method) {
+                    const value = model[method];
+                    return typeof value === 'function' ? (...args) => {
+                        if (method === 'updateMany') {
+                            activityWrites += 1;
+                            if (activityGate) return activityGate.then(() => value.apply(model, args));
+                        }
+                        return value.apply(model, args);
+                    } : value;
+                },
+            });
             if (property === '$executeRawUnsafe') {
                 return async (...args) => {
                     if (String(args[0]).includes('CREATE TABLE IF NOT EXISTS "DraftGenerationOperation"')) {
@@ -153,13 +187,39 @@ try {
         providerType: 'http',
         model: 'gpt-test',
     });
-    await store.markAttemptActivity(operation.operationId, operation.attemptCount, 'first_byte');
-    await store.completeAttempt({
+    const activityAt = new Date();
+    await store.markAttemptActivity(operation.operationId, operation.attemptCount, 'first_byte', activityAt);
+    await Promise.all(Array.from({ length: 1000 }, () => store.markAttemptActivity(
+        operation.operationId, operation.attemptCount, 'chunk', new Date(activityAt.getTime() + 500),
+    )));
+    assert.equal(activityWrites, 1, 'A burst of stream chunks must not enqueue writes');
+    await Promise.all(Array.from({ length: 1000 }, () => store.markAttemptActivity(
+        operation.operationId, operation.attemptCount, 'chunk', new Date(activityAt.getTime() + 2500),
+    )));
+    assert.equal(activityWrites, 2, 'Only one activity write can be in flight');
+    let releaseActivity;
+    activityGate = new Promise(resolve => { releaseActivity = resolve; });
+    const lastActivity = store.markAttemptActivity(operation.operationId, operation.attemptCount, 'chunk', new Date(activityAt.getTime() + 5000));
+    let attemptCompleted = false;
+    const completing = store.completeAttempt({
         operationId: operation.operationId,
         attemptNumber: operation.attemptCount,
         status: 'succeeded',
         outputTokens: 321,
+    }).then(() => { attemptCompleted = true; });
+    await store.markAttemptActivity(operation.operationId, operation.attemptCount, 'chunk', new Date(activityAt.getTime() + 8000));
+    assert.equal(attemptCompleted, false, 'Completion waits for the single pending activity write');
+    assert.equal(activityWrites, 3, 'Completing attempts stop accepting stream writes');
+    releaseActivity();
+    await Promise.all([lastActivity, completing]);
+    activityGate = undefined;
+    await store.markAttemptActivity(operation.operationId, operation.attemptCount, 'chunk', new Date(activityAt.getTime() + 9000));
+    assert.equal(activityWrites, 3, 'Late callbacks must not update a completed attempt');
+    const recordedAttempt = await client.draftGenerationAttempt.findUnique({
+        where: { operationId_attemptNumber: { operationId: operation.operationId, attemptNumber: operation.attemptCount } },
     });
+    assert.equal(recordedAttempt.firstByteAt.getTime(), activityAt.getTime());
+    assert.equal(recordedAttempt.lastChunkAt.getTime(), activityAt.getTime() + 5000);
 
     operation = await store.transition(operation.operationId, operation.version, {
         type: 'GENERATION_SUCCEEDED',
@@ -227,6 +287,20 @@ try {
     const restored = await store.get(operation.operationId);
     assert.equal(restored.status, 'succeeded');
     assert.equal(restored.resultDraftSessionId, 'draft_1');
+
+    const race = await store.createOrGet({ ...createInput, operationKey: `${operationKey}:cas-race` });
+    const claims = await Promise.allSettled(Array.from({ length: 2 }, (_, i) => store.transition(
+        race.operation.operationId, race.operation.version, {
+            type: 'CLAIM', now: new Date().toISOString(), workerId: `racer-${i}`,
+            leaseExpiresAt: '2099-07-29T00:00:00.000Z',
+        },
+    )));
+    assert.equal(claims.filter(r => r.status === 'fulfilled').length, 1);
+    assert.equal(claims.find(r => r.status === 'rejected').reason.code, 'VERSION_CONFLICT');
+    for (const transaction of transactionCalls) {
+        assert.equal(transaction.calls[0], 'updateMany', 'State transactions must acquire the writer lock before reading');
+        assert.equal(transaction.options.timeout, 15000);
+    }
 
     const retryCreated = await store.createOrGet({
         ...createInput,

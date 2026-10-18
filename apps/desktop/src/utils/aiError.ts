@@ -11,6 +11,8 @@
     | 'PERSISTENCE_ERROR'
     | 'UNKNOWN';
 
+import { storageErrorMessage } from '../../shared/systemErrors';
+
 const AI_ERROR_CODES: UiAiErrorCode[] = [
     'INVALID_INPUT',
     'NOT_FOUND',
@@ -50,6 +52,7 @@ function hasLikelyMojibake(message: string): boolean {
 }
 
 export function inferAiErrorCode(error: unknown): UiAiErrorCode | undefined {
+    if (storageErrorMessage(error)) return 'PERSISTENCE_ERROR';
     const maybeCode = normalizeCode((error as any)?.code);
     if (maybeCode) return maybeCode;
 
@@ -95,6 +98,8 @@ export function formatAiError(code?: string, t?: (key: string) => string, fallba
 }
 
 export function formatAiErrorFromUnknown(error: unknown, t?: (key: string) => string, fallback?: string): string {
+    const storageMessage = storageErrorMessage(error);
+    if (storageMessage) return storageMessage;
     const code = inferAiErrorCode(error);
     if (code) {
         return formatAiError(code, t, fallback);

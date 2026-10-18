@@ -146,7 +146,7 @@ def test_editor_range_review_toolchain_publishes_approvable_expert_report(tmp_pa
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "编辑多章节范围审核",

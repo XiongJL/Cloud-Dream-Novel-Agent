@@ -8,6 +8,7 @@ import { devLog, devLogError, redactForLog } from '../debug/devLogger';
 import { subscribeAgentRunEventsHttp, type AgentRunEvent } from './agentSseClient';
 import {
     AGENT_RUNTIME_RECOVERY_BACKOFF_MS,
+    AGENT_RUNTIME_HEALTH_FAILURE_THRESHOLD,
     recordRuntimeHealthFailure,
     type AgentRuntimeAvailability,
 } from './runtimeHealthPolicy';
@@ -68,6 +69,12 @@ const AGENT_RUNTIME_STARTUP_TIMEOUT_MS = 60_000;
 const AGENT_RUNTIME_HEALTH_POLL_MS = 500;
 const AGENT_RUNTIME_STARTUP_PROGRESS_LOG_MS = 15_000;
 const AGENT_RUNTIME_PROGRESS_PREFIX = '@@NOVEL_AGENT_PROGRESS@@';
+const CONNECTION_REPLAY_SAFE_METHODS = new Set([
+    'agent.roles', 'agent.skills', 'agent.skill.drafts', 'agent.skill.draft',
+    'agent.skill.packs', 'agent.skill.pack', 'agent.skill.pack.preview',
+    'agent.skill.visibility.preview',
+    'agent.run_status', 'agent.events',
+]);
 const AGENT_RUNTIME_PHASES = new Set<AgentRuntimePhase>([
     'idle',
     'starting_python',
@@ -191,6 +198,8 @@ export class PythonRuntimeClient {
     private startupStartedAt = 0;
     private phaseChangedAt = Date.now();
     private lastStartupError = '';
+    // Capabilities belong to this worker and must survive local status snapshots.
+    private runtimeHealthData: Record<string, unknown> = {};
 
     constructor(options: PythonRuntimeClientOptions) {
         this.getUserDataPath = options.getUserDataPath;
@@ -214,13 +223,16 @@ export class PythonRuntimeClient {
             this.startInBackground();
             return this.statusSnapshot();
         }
+        const port = this.port;
         try {
-            const response = await requestJson(this.port, '/health', this.token, undefined, 2000);
+            const response = await requestJson(port, '/health', this.token, undefined, 2000);
+            if (this.port !== port) return this.statusSnapshot();
             if (!response.ok) {
                 throw Object.assign(new Error(response.message || 'Agent runtime health check failed'), {
                     code: response.code || 'AGENT_RUNTIME_HEALTH_FAILED',
                 });
             }
+            this.rememberHealthData(response);
             this.markHealthy();
             return {
                 ...response,
@@ -271,6 +283,7 @@ export class PythonRuntimeClient {
     private statusData(): Record<string, unknown> {
         const now = Date.now();
         return {
+            ...this.runtimeHealthData,
             phase: this.phase,
             elapsedMs: this.startupStartedAt > 0 ? Math.max(0, now - this.startupStartedAt) : 0,
             phaseElapsedMs: Math.max(0, now - this.phaseChangedAt),
@@ -280,8 +293,15 @@ export class PythonRuntimeClient {
             activeInvocations: this.activeInvocations,
             autoRestartAttempted: this.autoRestartAttempted,
             recovering: this.availability === 'recovering',
-            canManualRetry: this.availability === 'failed',
+            canManualRetry: this.availability === 'failed'
+                || (this.availability === 'slow' && this.consecutiveHealthFailures >= AGENT_RUNTIME_HEALTH_FAILURE_THRESHOLD),
         };
+    }
+
+    private rememberHealthData(response: AgentRuntimeHealth): void {
+        this.runtimeHealthData = response.data && typeof response.data === 'object' && !Array.isArray(response.data)
+            ? { ...response.data as Record<string, unknown> }
+            : {};
     }
 
     private statusSnapshot(): AgentRuntimeHealth {
@@ -378,6 +398,7 @@ export class PythonRuntimeClient {
     }
 
     async invoke(envelope: AgentInvokeEnvelope, onProgress?: (progress: AgentChatProgress) => void): Promise<unknown> {
+        const request = { ...envelope, requestId: envelope.requestId || randomUUID() };
         this.activeInvocations += 1;
         try {
             const health = await this.ensureReady();
@@ -387,15 +408,17 @@ export class PythonRuntimeClient {
                     details: health.data,
                 });
             }
+            const attemptedPort = this.port;
             try {
-                return await this.invokeOnce(envelope, onProgress);
+                return await this.invokeOnce(request, onProgress);
             } catch (error) {
                 if (!isRecoverableRuntimeConnectionError(error)) {
                     throw error;
                 }
-                const failedPort = getConnectionErrorPort(error);
-                devLog('WARN', 'PythonRuntimeClient.invoke.retry', 'Agent runtime connection failed; recovering once', {
+                const failedPort = getConnectionErrorPort(error) || attemptedPort;
+                devLog('WARN', 'PythonRuntimeClient.invoke.retry', 'Agent runtime connection failed; checking the existing process', {
                     error: error instanceof Error ? error.message : String(error),
+                    method: request.method,
                     port: this.port,
                     failedPort,
                 });
@@ -411,7 +434,13 @@ export class PythonRuntimeClient {
                         details: recovered.data,
                     });
                 }
-                return this.invokeOnce(envelope, onProgress);
+                if (!CONNECTION_REPLAY_SAFE_METHODS.has(request.method)) {
+                    throw Object.assign(new Error('与执行服务的连接中断，请先查看原会话的任务状态；该请求不会自动重复执行。'), {
+                        code: 'AGENT_RUNTIME_CONNECTION_LOST',
+                        details: { requestId: request.requestId, method: request.method, resultUnknown: true },
+                    });
+                }
+                return this.invokeOnce(request, onProgress);
             }
         } finally {
             this.activeInvocations = Math.max(0, this.activeInvocations - 1);
@@ -429,7 +458,7 @@ export class PythonRuntimeClient {
             ? Math.max(1_000, requestedDeadline - Date.now() + 15_000)
             : envelope.method === 'agent.chat'
                 ? 315_000
-                : envelope.method === 'agent.skill.author'
+                : ['agent.skill.author', 'agent.skill.revise'].includes(envelope.method)
                     ? 495_000
                     : 180_000;
         let lastSequence = 0;
@@ -558,12 +587,25 @@ export class PythonRuntimeClient {
     }
 
     async stop(): Promise<void> {
+        this.runtimeHealthData = {};
         this.port = 0;
         this.token = '';
         if (!this.process) return;
         const child = this.process;
-        this.process = null;
-        child.kill();
+        if (child.exitCode != null || child.signalCode != null) { this.process = null; return; }
+        if (typeof child.once !== 'function') { child.kill(); this.process = null; return; }
+        await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(() => { child.removeListener('exit', exited); reject(Object.assign(new Error('Agent runtime did not stop'), { code: 'BUSY' })); }, 10000);
+            const exited = () => { clearTimeout(timer); resolve(); };
+            child.once('exit', exited);
+            child.kill();
+        });
+        if (this.process === child) this.process = null;
+    }
+
+    async shutdownForBackup(): Promise<void> {
+        await Promise.allSettled([this.recoveryPromise, this.startPromise].filter(Boolean));
+        await this.stop();
     }
 
     async ensureReady(): Promise<AgentRuntimeHealth> {
@@ -589,6 +631,13 @@ export class PythonRuntimeClient {
             forceRestart: true,
             allowAutomaticRetry: false,
         });
+    }
+
+    private async probeRuntimeConnection(): Promise<AgentRuntimeHealth> {
+        const port = this.port;
+        const response = await requestJson(port, '/health', this.token, undefined, 2000);
+        if (response.ok && this.port === port) this.rememberHealthData(response);
+        return response;
     }
 
     private beginRecovery(options: RuntimeRecoveryOptions): Promise<AgentRuntimeHealth> {
@@ -623,6 +672,26 @@ export class PythonRuntimeClient {
                     && this.process
                 ) {
                     this.markHealthy();
+                    return this.statusSnapshot();
+                }
+                if ((options.kind === 'connection' || options.kind === 'automatic')
+                    && this.process && this.port > 0
+                    && this.process.exitCode == null && this.process.signalCode == null) {
+                    // A reset socket or slow health probe cannot establish that
+                    // the worker died. Background runs outlive their invoke RPC.
+                    try {
+                        const probe = await this.probeRuntimeConnection();
+                        if (probe.ok) {
+                            this.markHealthy();
+                            return this.statusSnapshot();
+                        }
+                    } catch (error) {
+                        this.lastStartupError = error instanceof Error ? error.message : String(error);
+                    }
+                    this.availability = 'slow';
+                    devLog('WARN', 'PythonRuntimeClient.recovery.deferred', 'Kept the live Runtime after an inconclusive connection probe', {
+                        kind: options.kind, port: this.port, activeInvocations: this.activeInvocations,
+                    });
                     return this.statusSnapshot();
                 }
                 if (options.forceRestart) {
@@ -701,6 +770,7 @@ export class PythonRuntimeClient {
     }
 
     private async start(): Promise<void> {
+        this.runtimeHealthData = {};
         this.setPhase('starting_python');
         const port = await getFreePort();
         const token = randomUUID();
@@ -769,6 +839,7 @@ export class PythonRuntimeClient {
                 return;
             }
             this.process = null;
+            this.runtimeHealthData = {};
             this.port = 0;
             this.token = '';
             this.availability = 'starting';
@@ -782,6 +853,7 @@ export class PythonRuntimeClient {
                 return;
             }
             this.process = null;
+            this.runtimeHealthData = {};
             this.port = 0;
             this.token = '';
             this.setPhase('failed', error.message);
@@ -823,7 +895,10 @@ export class PythonRuntimeClient {
             }
             try {
                 const health = await requestJson(port, '/health', token, undefined, 2000);
-                if (health.ok) return;
+                if (health.ok) {
+                    if (this.port === port) this.rememberHealthData(health);
+                    return;
+                }
                 lastError = new Error(health.message || 'Agent runtime health failed');
             } catch (error) {
                 lastError = error;

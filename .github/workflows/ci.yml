@@ -75,6 +75,20 @@ jobs:
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
+      - name: Test adaptive Skill execution contracts
+        run: pnpm --filter novel-editor-desktop run test:skill-adaptive
+      - name: Test Skill visibility and publishing
+        run: pnpm --filter novel-editor-desktop run test:agent-skill-visibility && pnpm --filter novel-editor-desktop run test:agent-skill-store && pnpm --filter novel-editor-desktop run test:agent-skill-catalog
+
+      - name: Test chapter prompt assembly and state checkpoints
+        run: pnpm --filter novel-editor-desktop run test:agent-skill-consumption && pnpm --filter novel-editor-desktop run test:chapter-state-checkpoint
+
+      - name: Test automation runtime descriptor lifecycle
+        run: pnpm --filter novel-editor-desktop run test:automation-runtime
+
+      - name: Test complete backup and recovery
+        run: pnpm --filter novel-editor-desktop run test:backup
+
       - name: Type-check Desktop
         run: pnpm --filter novel-editor-desktop run typecheck
 

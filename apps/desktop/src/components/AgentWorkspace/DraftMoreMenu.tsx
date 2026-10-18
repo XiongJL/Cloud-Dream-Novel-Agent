@@ -20,7 +20,11 @@ export function DraftMoreMenu({ isDark, disabled, discardLabel, onDiscard }: Pro
       >
         <Ellipsis className="h-4 w-4" />
       </MenuButton>
-      <MenuItems className={clsx('absolute bottom-11 right-0 z-30 w-40 rounded-md border p-1 shadow-lg outline-none', isDark ? 'border-white/10 bg-[#1a1a20]' : 'border-[var(--ui-border)] bg-white')}>
+      <MenuItems
+        portal
+        anchor={{ to: 'top start', gap: 8, padding: 8 }}
+        className={clsx('z-[120] w-44 max-w-[calc(100vw-16px)] rounded-md border p-1 shadow-lg outline-none', isDark ? 'border-white/10 bg-[#1a1a20]' : 'border-[var(--ui-border)] bg-white')}
+      >
         <MenuItem>
           <button
             type="button"

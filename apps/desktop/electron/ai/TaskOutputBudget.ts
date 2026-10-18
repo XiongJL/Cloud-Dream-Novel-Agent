@@ -1,10 +1,10 @@
 import { AgentContextTokenCounter } from './context/AgentContextTokenCounter';
 import { resolveAgentModelContextCapability } from '../../shared/agentModelContextCapabilities';
-import { resolveModelOutputCapability, PRODUCT_OUTPUT_SAFETY_LIMIT } from '../../shared/modelOutputCapabilities';
+import { resolveModelOutputCapability, PRODUCT_OUTPUT_SAFETY_LIMIT, DEFAULT_MAX_OUTPUT_TOKENS } from '../../shared/modelOutputCapabilities';
 import type { AiHttpApiMode, AiProviderType } from './types';
 
 export type OutputBudgetMode = 'auto' | 'manual';
-export type OutputBudgetTask = 'title' | 'intent' | 'plan' | 'chapter_draft' | 'editor_review' | 'creative_assets' | 'rag_qa' | 'research_report';
+export type OutputBudgetTask = 'title' | 'intent' | 'plan' | 'chapter_draft' | 'narrative_state' | 'editor_review' | 'creative_assets' | 'rag_qa' | 'research_report' | 'skill_plan' | 'skill_document' | 'skill_route' | 'skill_analysis' | 'skill_merge' | 'skill_expert';
 
 export interface TaskOutputBudget {
     mode: OutputBudgetMode;
@@ -42,8 +42,15 @@ function taskRequestedTokens(task: OutputBudgetTask, targetLength?: number, item
         case 'intent': return 4_096;
         case 'plan': return 4_096;
         case 'editor_review': return 8_192;
+        case 'narrative_state': return 8_192;
         case 'rag_qa': return 4_096;
         case 'research_report': return 16_384;
+        case 'skill_plan':
+        case 'skill_document': return 16_384;
+        case 'skill_route': return 2_048;
+        case 'skill_analysis':
+        case 'skill_merge': return 4_096;
+        case 'skill_expert': return 8_192;
         case 'creative_assets': return Math.min(16_384, Math.max(8_192, (itemCount || 1) * 2_048));
         case 'chapter_draft':
             void targetLength;
@@ -83,7 +90,7 @@ export function resolveTaskOutputBudget(input: {
     const safety = Math.max(512, Math.min(4_096, Math.floor(contextWindow * 0.03)));
     const contextMaximumTokens = Math.max(128, contextWindow - (count?.providerInputTokens || 0) - safety);
     const userMaximumTokens = input.mode === 'manual'
-        ? Math.max(128, Math.floor(input.manualMaxTokens || 4_096))
+        ? Math.max(128, Math.floor(input.manualMaxTokens || DEFAULT_MAX_OUTPUT_TOKENS))
         : undefined;
     const hardMaximum = Math.max(128, Math.min(
         modelMaximumTokens ?? Number.MAX_SAFE_INTEGER,

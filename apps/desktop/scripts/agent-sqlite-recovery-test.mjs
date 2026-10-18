@@ -502,12 +502,57 @@ try {
     });
     assert.equal((await restoredStore.list('novel-1'))[0].run.draftSessionId, 'final-revision');
 
+    let eventWrites = 0;
+    const measuredClient = new Proxy(client, { get(target, key) {
+        if (key === '$executeRawUnsafe') return async (sql, ...params) => {
+            if (sql.includes('INSERT INTO AgentRunEvent')) eventWrites += 1;
+            return target.$executeRawUnsafe(sql, ...params);
+        };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const incrementalStore = new AgentConversationStore(measuredClient);
+    const longEvents = Array.from({ length: 500 }, (_, i) => ({ ...event(i + 1, 'toolchain_node_completed'),
+        eventId: `delta-${i}`, runId: 'run-delta', createdAt: new Date(Date.UTC(2026, 6, 11) + i * 1000).toISOString() }));
+    const incremental = { ...baseConversation, id: 'conversation-delta', messages: [], runs: [],
+        run: { ...runningRun, runId: 'run-delta', events: longEvents, artifacts: [] } };
+    await incrementalStore.upsert(incremental);
+    assert.equal(eventWrites, 500);
+    eventWrites = 0;
+    await incrementalStore.upsert({ ...incremental, run: { ...incremental.run, progress: 0.7 } });
+    assert.equal(eventWrites, 0, 'an unchanged 500-event history must not be rewritten for a progress update');
+    const appended = { ...event(501, 'run_failed'), eventId: 'delta-new', runId: 'run-delta', createdAt: '2026-07-11T00:10:00.000Z' };
+    const corrected = { ...longEvents[0], payload: { corrected: true } };
+    await incrementalStore.upsert({ ...incremental, run: { ...incremental.run, events: [corrected, ...longEvents.slice(1), appended] } });
+    assert.equal(eventWrites, 2, 'append and correction must remain durable while unchanged events are skipped');
+    const retainedEvents = await client.$queryRawUnsafe('SELECT eventId, payloadJson FROM AgentRunEvent WHERE runId = ?', 'run-delta');
+    assert.equal(retainedEvents.length, 501);
+    assert.deepEqual(JSON.parse(retainedEvents.find(row => row.eventId === 'delta-0').payloadJson), { corrected: true });
+    await incrementalStore.delete('conversation-delta');
+
     await restoredStore.delete('conversation-1');
     assert.deepEqual(await restoredStore.list('novel-1'), []);
     const orphanEvents = await client.$queryRawUnsafe('SELECT eventId FROM AgentRunEvent');
     assert.deepEqual(orphanEvents, []);
     const orphanArtifacts = await client.$queryRawUnsafe('SELECT artifactId FROM AgentArtifact');
     assert.deepEqual(orphanArtifacts, []);
+
+    // A newly authored Skill remains reachable after an application/database reload,
+    // even when the user-facing notice no longer contains a textual draft ID.
+    const skillDraftId = 'aae770f4-ec2f-41da-a80b-56bece009649';
+    await restoredStore.upsert({
+        ...baseConversation, plan: null, run: null, runs: [],
+        messages: [{ id: 'skill-draft-notice', role: 'assistant', kind: 'workflow_notice',
+            content: '文风草稿待修订。', skillDraftId, createdAt: '2026-07-11T00:01:00.000Z' }],
+    });
+    await client.$disconnect();
+    client = createClient();
+    const skillReloadStore = new AgentConversationStore(client);
+    const skillConversation = (await skillReloadStore.list('novel-1'))[0];
+    assert.equal(skillConversation.messages[0].kind, 'workflow_notice');
+    assert.equal(skillConversation.messages[0].skillDraftId, skillDraftId);
+    await skillReloadStore.upsert(skillConversation);
+    assert.equal((await skillReloadStore.list('novel-1'))[0].messages[0].skillDraftId, skillDraftId);
     console.log('Agent SQLite persistence, terminal replay, and reload tests passed.');
 } finally {
     await client.$disconnect().catch(() => undefined);

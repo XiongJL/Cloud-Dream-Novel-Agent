@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+from ..skill_execution import SkillExecutionHints
 
 
 AgentSkillScope = Literal["builtin", "user", "novel"]
@@ -73,6 +74,12 @@ class AgentSkillRevision(BaseModel):
     contentHash: str = Field(pattern=r"^[a-f0-9]{64}$")
     createdAt: str
 
+    @model_validator(mode="after")
+    def validate_execution_hints(self) -> "AgentSkillRevision":
+        if "executionHints" in self.manifest:
+            SkillExecutionHints.model_validate(self.manifest["executionHints"])
+        return self
+
 
 class AgentSkillIndexEntry(BaseModel):
     id: str
@@ -103,7 +110,7 @@ class AgentSkillResolveRequest(BaseModel):
     operationId: str
     roleId: str
     novelId: str | None = None
-    explicitSkills: list[AgentSkillSelection] = Field(default_factory=list, max_length=2)
+    explicitSkills: list[AgentSkillSelection] = Field(default_factory=list)
     operationDefaultSkillIds: list[str] = Field(default_factory=list)
     defaultSkillIds: list[str] = Field(default_factory=list)
     disabledForTurn: bool = False
@@ -123,11 +130,16 @@ class AgentSkillRef(BaseModel):
 class ResolvedSkillSet(BaseModel):
     primary: AgentSkillRef | None = None
     auxiliary: AgentSkillRef | None = None
+    additional: list[AgentSkillRef] = Field(default_factory=list)
     reasonCodes: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
     def refs(self) -> list[AgentSkillRef]:
-        return [item for item in (self.primary, self.auxiliary) if item is not None]
+        return [item for item in (self.primary, self.auxiliary) if item is not None] + self.additional
+
+    @classmethod
+    def from_refs(cls, refs: list[AgentSkillRef]) -> "ResolvedSkillSet":
+        return cls(primary=refs[0] if refs else None, auxiliary=refs[1] if len(refs) > 1 else None, additional=refs[2:])
 
 
 class AgentSkillPromptSection(BaseModel):

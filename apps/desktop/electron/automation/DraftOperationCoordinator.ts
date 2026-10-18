@@ -64,6 +64,9 @@ function asOperationError(operation: DraftOperationRecord, error: unknown): Draf
             details: Object.fromEntries(
                 [
                     'modelResultRef',
+                    'generationCheckpointRef',
+                    'textPersisted',
+                    'causeCode',
                     'modelResultRevision',
                     'resultHash',
                     'terminationReason',
@@ -90,6 +93,7 @@ function retryDelayMs(attemptCount: number): number {
 export class DraftOperationCoordinator {
     private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
     private readonly retryTimers = new Map<string, NodeJS.Timeout>();
+    private outboxPromise?: Promise<void>;
     private readonly workerFailureCounts = new Map<string, number>();
     private readonly workerId = `draft-worker-${randomUUID()}`;
     private outboxTimer: NodeJS.Timeout | undefined;
@@ -172,6 +176,7 @@ export class DraftOperationCoordinator {
             active.controller.abort(Object.assign(new Error('Draft operation worker shutting down'), { code: 'CANCELLED' }));
         }
         await Promise.allSettled([...this.active.values()].map((entry) => entry.promise));
+        await this.outboxPromise;
     }
 
     private emit(operation: DraftOperationRecord): void {
@@ -184,7 +189,9 @@ export class DraftOperationCoordinator {
         if (this.outboxTimer) clearTimeout(this.outboxTimer);
         this.outboxTimer = setTimeout(() => {
             this.outboxTimer = undefined;
-            void this.drainCompletionOutbox();
+            const pending = this.drainCompletionOutbox();
+            this.outboxPromise = pending;
+            void pending.finally(() => { if (this.outboxPromise === pending) this.outboxPromise = undefined; });
         }, Math.max(0, delayMs));
         this.outboxTimer.unref?.();
     }

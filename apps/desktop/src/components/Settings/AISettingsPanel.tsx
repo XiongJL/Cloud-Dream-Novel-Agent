@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { formatAiError, formatAiErrorFromUnknown } from '../../utils/aiError';
 import { Combobox } from '../ui/Combobox';
 import { ModelIdCombobox, type ModelIdOption } from './ModelIdCombobox';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../../shared/modelOutputCapabilities';
 import {
     AGENT_CONTEXT_WINDOW_PRESETS,
     AGENT_TEXT_MODEL_CAPABILITY_CATALOG,
@@ -278,7 +279,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     imageOutputFormat: 'png',
                     imageWatermark: false,
                     timeoutMs: 60000,
-                    maxTokens: 4096,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                     temperature: 0.7,
                 },
             });
@@ -303,7 +304,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     imageOutputFormat: 'png',
                     imageWatermark: true,
                     timeoutMs: 60000,
-                    maxTokens: 4096,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                     temperature: 0.7,
                 },
             });
@@ -328,7 +329,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     imageOutputFormat: 'png',
                     imageWatermark: true,
                     timeoutMs: 60000,
-                    maxTokens: 4096,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                     temperature: 0.7,
                 },
             });
@@ -352,7 +353,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 imageOutputFormat: 'png',
                 imageWatermark: true,
                 timeoutMs: 60000,
-                maxTokens: 4096,
+                maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 temperature: 0.7,
             },
         });
@@ -566,7 +567,7 @@ export function AISettingsPanel({ isDark }: Props) {
                                     <summary className="cursor-pointer text-sm">{t('settings.ai.generationAdvanced')}</summary>
                                 {settings.http.outputBudgetMode === 'manual' ? (
                                     <SettingField label={t('settings.ai.maxTokens')} hint={t('settings.ai.maxTokensHint')}>
-                                        <input type="number" min={128} step={1024} value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || 4096 } })} placeholder="18432" className={inputClass} />
+                                        <input type="number" min={128} step={1024} value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || DEFAULT_MAX_OUTPUT_TOKENS } })} placeholder="32768" className={inputClass} />
                                     </SettingField>
                                 ) : null}
                                 <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensHint')} className="md:col-span-2">

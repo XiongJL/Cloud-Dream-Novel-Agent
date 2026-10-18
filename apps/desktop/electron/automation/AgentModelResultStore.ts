@@ -3,6 +3,36 @@ import type { PrismaClientType } from '@novel-editor/core';
 import type { AgentStructuredOutputContract } from './AgentStructuredOutputContracts';
 
 const MAX_RAW_RESULT_BYTES = 4 * 1024 * 1024;
+const SQLITE_WRITE_RETRY_DELAYS_MS = [100, 250, 500, 1000];
+
+function isSqliteBusy(error: unknown): boolean {
+    const value = error as { code?: unknown; meta?: { code?: unknown; message?: unknown }; message?: unknown } | null;
+    const code = String(value?.code ?? '');
+    const primary = Number(value?.meta?.code);
+    const message = `${String(value?.message ?? '')} ${String(value?.meta?.message ?? '')}`;
+    return ['SQLITE_BUSY', 'SQLITE_LOCKED', 'STORAGE_BUSY'].includes(code)
+        || (code === 'P2010' && [5, 6].includes(primary))
+        || /database (?:table )?is locked/iu.test(message);
+}
+
+async function retryCheckpointWrite<T>(write: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            return await write();
+        } catch (error) {
+            if (!isSqliteBusy(error)) throw error;
+            const delay = SQLITE_WRITE_RETRY_DELAYS_MS[attempt];
+            if (delay === undefined) {
+                throw Object.assign(new Error('数据库写入繁忙，暂时无法保存模型返回结果。已完成分片已保留，请稍后从原任务检查点继续。'), {
+                    code: 'STORAGE_BUSY', cause: error, retryable: false,
+                    checkpointPersisted: false,
+                });
+            }
+            // Retry the captured response's database write, never the provider.
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
 
 export type AgentModelResultRecord = {
     modelResultRef: string;
@@ -50,13 +80,30 @@ function toRecord(row: AgentModelResultRow): AgentModelResultRecord {
 }
 
 export class AgentModelResultStore {
+    private static readonly writeQueues = new WeakMap<object, Promise<void>>();
     private schemaReady: Promise<void> | null = null;
 
     constructor(private readonly database: PrismaClientType) {}
 
+    private async enqueueCheckpointWrite<T>(write: () => Promise<T>): Promise<T> {
+        const previous = AgentModelResultStore.writeQueues.get(this.database) || Promise.resolve();
+        let release!: () => void;
+        const pending = new Promise<void>(resolve => { release = resolve; });
+        AgentModelResultStore.writeQueues.set(this.database, pending);
+        await previous;
+        try {
+            return await retryCheckpointWrite(write);
+        } finally {
+            release();
+            if (AgentModelResultStore.writeQueues.get(this.database) === pending) {
+                AgentModelResultStore.writeQueues.delete(this.database);
+            }
+        }
+    }
+
     async ensureSchema(): Promise<void> {
         if (!this.schemaReady) {
-            this.schemaReady = this.initializeSchema().catch((error) => {
+            this.schemaReady = retryCheckpointWrite(() => this.initializeSchema()).catch((error) => {
                 this.schemaReady = null;
                 throw error;
             });
@@ -113,35 +160,37 @@ export class AgentModelResultStore {
                 code: 'MODEL_RESULT_TOO_LARGE',
             });
         }
-        if (options.repairAttemptId) {
-            const existing = await this.findByRepairAttempt(options.repairAttemptId);
-            if (existing) return existing;
-        }
-        const rows = await this.database.$queryRawUnsafe<Array<{ revision: number | bigint | null }>>(
-            'SELECT MAX("revision") AS revision FROM "AgentModelResultCheckpoint" WHERE "requestId" = ?',
-            requestId,
-        );
-        const revision = Number(rows[0]?.revision ?? 0) + 1;
-        const resultHash = createHash('sha256').update(rawText, 'utf8').digest('hex');
-        await this.database.$executeRawUnsafe(
-            `INSERT INTO "AgentModelResultCheckpoint" (
-                "requestId", "revision", "sourceMethod", "contractId", "contractVersion",
-                "rawText", "resultHash", "repairAttemptId", "repairedFromRevision"
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            requestId, revision, sourceMethod, contract.contractId, contract.version,
-            rawText, resultHash, options.repairAttemptId ?? null, options.repairedFromRevision ?? null,
-        );
-        return {
-            modelResultRef: requestId,
-            requestId,
-            revision,
-            sourceMethod,
-            contractId: contract.contractId,
-            contractVersion: contract.version,
-            rawText,
-            resultHash,
-            ...options,
-        };
+        return this.enqueueCheckpointWrite(async () => {
+            if (options.repairAttemptId) {
+                const existing = await this.findByRepairAttempt(options.repairAttemptId);
+                if (existing) return existing;
+            }
+            const rows = await this.database.$queryRawUnsafe<Array<{ revision: number | bigint | null }>>(
+                'SELECT MAX("revision") AS revision FROM "AgentModelResultCheckpoint" WHERE "requestId" = ?',
+                requestId,
+            );
+            const revision = Number(rows[0]?.revision ?? 0) + 1;
+            const resultHash = createHash('sha256').update(rawText, 'utf8').digest('hex');
+            await this.database.$executeRawUnsafe(
+                `INSERT INTO "AgentModelResultCheckpoint" (
+                    "requestId", "revision", "sourceMethod", "contractId", "contractVersion",
+                    "rawText", "resultHash", "repairAttemptId", "repairedFromRevision"
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                requestId, revision, sourceMethod, contract.contractId, contract.version,
+                rawText, resultHash, options.repairAttemptId ?? null, options.repairedFromRevision ?? null,
+            );
+            return {
+                modelResultRef: requestId,
+                requestId,
+                revision,
+                sourceMethod,
+                contractId: contract.contractId,
+                contractVersion: contract.version,
+                rawText,
+                resultHash,
+                ...options,
+            };
+        });
     }
 
     async getLatest(modelResultRef: string): Promise<AgentModelResultRecord | null> {

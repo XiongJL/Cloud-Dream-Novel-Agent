@@ -204,6 +204,7 @@ git push origin v0.2.0
 - [用户指南](USER_GUIDE.md)
 - [User Guide](USER_GUIDE_EN.md)
 - [开发指南](DEVELOPMENT.md)
+- [完整备份与恢复需求与设计](BackupDesign.md)
 - [Agent 设计文档](docs/agent/README.md)
 - [Agent 路线图](docs/agent/roadmap.md)
 - [手动验收清单](docs/agent/manual-acceptance-checklist.md)

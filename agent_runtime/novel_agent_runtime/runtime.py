@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
@@ -12,13 +13,23 @@ from typing import Any
 from pydantic import ValidationError
 
 from .execution_graph import ExecutionState, PlanExecutionGraph
+from .skill_execution import SkillExecutionHints, STYLE_EXECUTION_HINTS, builtin_executor_profile
+from .skill_analysis_graph import SkillAnalysisGraph, fingerprint, preflight_analysis
+from .skill_execution_engine import SkillExecutionEngine
+from .agent_skills.authoring import STYLE_SKILL_MEMBER_PATHS
+from .skill_analysis_context import attach_analysis, expert_pages, verify_expert_evidence, combine_expert_pages
 from .exploration_graph import AgentExplorationGraph, ExplorationState
 from .events import AgentEventBus
+from .system_errors import storage_failure
 from .agent_skills.service import AGENT_SKILL_SERVICE, AgentSkillService
 from .agent_skills.registry import BUILTIN_AGENT_SKILL_REGISTRY, AgentSkillRegistry, AgentSkillRegistration
 from .agent_skills.errors import AgentSkillError
+from .agent_skills.compiler import AgentSkillCompiler
 from .agent_skills.authoring import (
     AgentSkillAuthorRequest,
+    AgentSkillReviseRequest,
+    definition_from_persisted,
+    index_from_persisted,
     registration_from_persisted,
 )
 from .agent_skills.schemas import AgentSkillResolveRequest, AgentSkillSelection, ResolvedSkillSet
@@ -56,7 +67,7 @@ from .intent.schemas import (
     PriorIntentRef,
 )
 from .intent.service import IntentService
-from .intent.targets import resolve_intent_chapter_target
+from .intent.targets import extract_style_work_title, resolve_intent_chapter_target
 from .roles import list_agent_roles
 from .schemas import (
     AgentArtifact,
@@ -241,17 +252,13 @@ from .toolchains.schemas import (
 )
 
 
-STYLE_SKILL_MEMBER_PATHS = {
-    "language_style": "language-style/SKILL.md",
-    "suspense_release": "suspense-release/SKILL.md",
-    "ensemble_progression": "ensemble-progression/SKILL.md",
-}
 STYLE_SKILL_MEMBER_KEYS = {
     key: path.split("/", 1)[0] for key, path in STYLE_SKILL_MEMBER_PATHS.items()
 }
 
 
 class NovelAgentRuntime:
+    _CANCELLATION_GRACE_SECONDS = 5.0
     _STRUCTURED_OUTPUT_PROCESSOR_VERSION = "agent-runtime-structured-output-v1"
     _CHAPTER_SCOPE_TOOLCHAINS = {
         "chapter.scope_context",
@@ -279,10 +286,13 @@ class NovelAgentRuntime:
         self.event_bus = event_bus
         self.intent_service = IntentService()
         self._persisted_skill_registrations: dict[str, AgentSkillRegistration] = {}
+        self._persisted_skill_refresh_lock = asyncio.Lock()
         self._persisted_skill_bindings: list[dict[str, Any]] = []
         self.agent_skill_service = AgentSkillService(BUILTIN_AGENT_SKILL_REGISTRY)
         self.state: AgentState = store.load()
         self._run_tasks: dict[str, asyncio.Task[None]] = {}
+        self._terminal_notified_runs: set[str] = set()
+        self._intentional_worker_exits: set[asyncio.Task[None]] = set()
         self._operation_watch_tasks: dict[str, asyncio.Task[None]] = {}
         self._operation_watch_timers: dict[str, asyncio.TimerHandle] = {}
         self._active_request_ids: dict[str, set[str]] = {}
@@ -292,12 +302,104 @@ class NovelAgentRuntime:
         self._user_input_locks: dict[str, asyncio.Lock] = {}
         self.exploration_graph = AgentExplorationGraph(store.state_dir / "agent_graph.db", READ_ONLY_AGENT_TOOLS)
         self.execution_graph = PlanExecutionGraph(store.state_dir / "agent_graph.db")
+        self.skill_execution_engine = SkillExecutionEngine(store.state_dir)
         self.request_graph = RetryableRequestGraph()
         self.store.recover_in_flight_invocations()
         self._mark_interrupted_runs()
 
     def _save(self) -> None:
-        self.store.save(self.state)
+        try:
+            self.store.save(self.state)
+        except Exception as error:
+            if failure := storage_failure(error):
+                self._fail_live_runs_for_storage(failure)
+            raise
+
+    def _fail_live_runs_for_storage(self, failure: dict[str, Any]) -> None:
+        # All runs share this state store. Stop workers before further paid or
+        # side-effecting calls can proceed without durable execution records.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        for run in self.state.runs.values():
+            if run.status not in {"running", "cancelling", "waiting_approval", "waiting_user_input"}:
+                continue
+            run.status = "failed"
+            run.failure = dict(failure)
+            if loop is None:
+                continue
+            try:
+                requests = list(self._active_request_ids.get(run.runId) or set())
+                tool_requests = set(self._active_tool_request_ids.get(run.runId) or set())
+                if requests:
+                    async def cancel_upstream(request_ids=requests, tool_ids=tool_requests):
+                        for request_id in request_ids:
+                            try:
+                                target = self.tool_adapter if request_id in tool_ids else self.automation
+                                await target.cancel(request_id)
+                            except Exception:
+                                pass
+                    cancellation = loop.create_task(cancel_upstream())
+                    cancellation.add_done_callback(lambda item: None if item.cancelled() else item.exception())
+                current = asyncio.current_task()
+                worker = self._run_tasks.get(run.runId)
+                if worker and worker is not current and not worker.done():
+                    worker.cancel()
+                timer = self._operation_watch_timers.pop(run.runId, None)
+                if timer:
+                    timer.cancel()
+                terminal = asyncio.create_task(self._finish_run(run, "failed", "run_failed", run.failure))
+                terminal.add_done_callback(lambda item: None if item.cancelled() else item.exception())
+            except RuntimeError:
+                # Read-only status callers outside an event loop still receive
+                # the authoritative failed state; an async subscriber can poll it.
+                pass
+
+    def _track_run_task(self, run_id: str, task: asyncio.Task[None]) -> None:
+        self._run_tasks[run_id] = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            error = None if done.cancelled() else done.exception()
+            intentional = done in self._intentional_worker_exits
+            self._intentional_worker_exits.discard(done)
+            if intentional and error is None:
+                return
+            run = self.state.runs.get(run_id)
+            active = self._run_tasks.get(run_id)
+            if not run or run.status not in {"running", "cancelling"}:
+                return
+            if (active and active is not done and not active.done()) or run_id in self._operation_watch_timers:
+                return
+            if done.cancelled() and run.cancelRequested:
+                if run.draftOperationId:
+                    return  # cancel() owns the durable-operation acknowledgement.
+                terminal_task = asyncio.create_task(self._finish_run(run, "cancelled", "run_cancelled", {"reason": "User cancelled before worker startup"}))
+                terminal_task.add_done_callback(lambda item: None if item.cancelled() else item.exception())
+                return
+            payload = storage_failure(error) if error else None
+            payload = payload or {"code": "EXECUTION_TASK_LOST", "message": "执行任务已退出，当前任务已停止。请检查失败记录，不要重复启动任务。", "retryable": False,
+                "cause": str(error) if error else "Worker ended without a terminal state"}
+            # Set the authoritative live status before scheduling any I/O.
+            run.status = "failed"
+            run.failure = payload
+            terminal_task = asyncio.create_task(self._finish_run(run, "failed", "run_failed", payload))
+            terminal_task.add_done_callback(lambda item: None if item.cancelled() else item.exception())
+
+        task.add_done_callback(finished)
+
+    async def report_system_failure(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Electron/renderer persistence failures share the execution boundary."""
+        failure = storage_failure(AutomationInvokeError(
+            str(params.get("code") or "PERSISTENCE_ERROR"), str(params.get("message") or "")))
+        if not failure:
+            raise ValueError("Only recognized local storage failures may stop active runs")
+        active = [run for run in self.state.runs.values()
+            if run.status in {"running", "cancelling", "waiting_approval", "waiting_user_input"}]
+        self._fail_live_runs_for_storage(failure)
+        for run in active:
+            await self._finish_run(run, "failed", "run_failed", failure)
+        return {"affectedRunIds": [run.runId for run in active], "failure": failure}
 
     def _register_chat_call(self, parent_request_id: str | None, call_id: str) -> None:
         if parent_request_id:
@@ -322,19 +424,14 @@ class NovelAgentRuntime:
         parent_request_id: str | None,
         deadline_at: str,
     ) -> Any:
-        try:
-            return await self.automation.invoke(
-                method,
-                params,
-                "desktop-ui",
-                request_id=call_id,
-                parent_request_id=parent_request_id,
-                deadline_at=deadline_at,
-            )
-        except TypeError as error:
-            if "unexpected keyword argument" not in str(error):
-                raise
-            return await self.automation.invoke(method, params, "desktop-ui", request_id=call_id)
+        return await self.automation.invoke(
+            method,
+            params,
+            "desktop-ui",
+            request_id=call_id,
+            parent_request_id=parent_request_id,
+            deadline_at=deadline_at,
+        )
 
     async def _invoke_automation_request(
         self,
@@ -344,27 +441,26 @@ class NovelAgentRuntime:
         request_id: str,
         deadline_at: str | None,
     ) -> Any:
-        try:
-            return await self.automation.invoke(
-                method,
-                params,
-                "desktop-ui",
-                request_id=request_id,
-                deadline_at=deadline_at,
-            )
-        except TypeError as error:
-            if "unexpected keyword argument" not in str(error):
-                raise
-            return await self.automation.invoke(
-                method,
-                params,
-                "desktop-ui",
-                request_id=request_id,
-            )
+        return await self.automation.invoke(
+            method,
+            params,
+            "desktop-ui",
+            request_id=request_id,
+            deadline_at=deadline_at,
+        )
 
     def _mark_interrupted_runs(self) -> None:
-        changed = False
         for run in self.state.runs.values():
+            if run.status == "failed":
+                self._refresh_readonly_analysis_recovery(run)
+                self._refresh_style_workspace_recovery(run)
+            if run.status == "failed" and run.failureRevision == 0:
+                terminal = next((event for event in reversed(run.events) if event.type == "run_failed"), None)
+                if terminal and terminal.payload.get("code") == "RUNTIME_INTERRUPTED":
+                    # Older versions persisted only the event, leaving neither
+                    # a failure revision nor an actionable recovery descriptor.
+                    self._record_interrupted_failure(run, self.store.list_invocations(run.runId, statuses={"unknown"}))
+                continue
             if run.status not in {"running", "cancelling", "waiting_approval", "waiting_user_input"}:
                 continue
             unknown_invocations = self.store.list_invocations(run.runId, statuses={"unknown"})
@@ -397,44 +493,228 @@ class NovelAgentRuntime:
                 and self.execution_graph.has_checkpoint(f"run:{run.runId}")
             ):
                 continue
-            run.status = "failed"
-            run.pendingApproval = None
-            run.pendingUserInput = None
-            changed = True
-            event = AgentRunEvent(
-                eventId=new_id("evt"),
-                runId=run.runId,
-                planId=run.planId,
-                threadId=run.threadId,
-                stepId=run.currentStepId,
-                type="run_failed",
-                status="failed",
-                payload={
-                    "message": (
-                        "Agent runtime restarted while a draft write result was unknown. The write was not replayed; "
-                        "review the draft center and reconfirm before starting a new run."
-                        if unknown_invocations
-                        else "Agent runtime restarted before this run completed. Please create a new run."
-                    ),
-                    "reason": "side_effect_result_unknown" if unknown_invocations else "runtime_interrupted",
-                    "code": "SIDE_EFFECT_UNKNOWN" if unknown_invocations else "RUNTIME_INTERRUPTED",
-                    "unknownInvocations": [
-                        {
-                            "invocationKey": item.invocationKey,
-                            "requestId": item.requestId,
-                            "method": item.method,
-                            "stepId": item.stepId,
-                        }
-                        for item in unknown_invocations
-                    ],
-                },
-            )
-            persisted = self.store.append_event(event)
-            run.events.append(persisted)
-            if len(run.events) > 50:
-                run.events = run.events[-50:]
-        if changed:
-            self._save()
+            self._record_interrupted_failure(run, unknown_invocations)
+
+    def _analysis_checkpoint_can_recover(self, run: AgentRun) -> bool:
+        if run.cancelRequested or self.store.list_invocations(run.runId, statuses={"unknown"}):
+            return False
+        plan = self.state.plans.get(run.planId)
+        if not plan:
+            return False
+        loader = getattr(self.execution_graph, 'load_checkpoint_state', None)
+        if not callable(loader):
+            return False
+        checkpoint = loader(f"run:{run.runId}")
+        if not checkpoint or checkpoint.get("phase") != "toolchain":
+            return False
+        step = next((item for item in plan.steps if item.stepId == run.currentStepId), None)
+        chain = checkpoint.get("toolchain_state") or {}
+        if not step or not step.toolchain or chain.get("toolchainId") != step.toolchain.id:
+            return False
+        if step.toolchain.id == "agent_skill.style_extract":
+            return chain.get("stage") in {"analyze", "evidence_review", "quality_review", "trial"} and isinstance(chain.get("source"), dict)
+        return (step.toolchain.id in {"writer.range_revision_plan", "editor.range_review", "worldbuilding.range_consistency"}
+                and isinstance(chain.get("adaptiveSource"), dict) and isinstance(chain.get("adaptiveSupport"), dict)
+                and not chain.get("adaptiveResult") and not chain.get("adaptiveFallback"))
+
+    def _style_workspace_checkpoint_can_recover(self, run: AgentRun) -> bool:
+        if run.cancelRequested or self.store.list_invocations(run.runId, statuses={"unknown"}):
+            return False
+        cp = self.execution_graph.load_checkpoint_state(f"run:{run.runId}") or {}
+        chain = cp.get("toolchain_state") or {}
+        plan = self.state.plans.get(run.planId)
+        step = next((s for s in plan.steps if s.stepId == run.currentStepId), None) if plan else None
+        return bool(cp.get("phase") == "toolchain" and step and step.toolchain
+            and step.toolchain.id == chain.get("toolchainId") == "agent_skill.style_extract"
+            and chain.get("stage") == "validate" and (chain.get("skillWorkspace") or {}).get("draftId")
+            and isinstance(chain.get("stylePlan"), dict))
+
+    def _legacy_style_review_input_can_recover(self, run: AgentRun, payload: dict[str, Any] | None = None) -> bool:
+        payload = payload if payload is not None else (run.failure or {})
+        # Migrate only the old local document-input guard fixed by scoped
+        # evidence projection. Spending/work-unit quota failures stay terminal.
+        if (payload.get("code") != "BUDGET_EXCEEDED"
+                or payload.get("message") != "文风验收输入超过模型窗口，已保存结果保留；没有截断待审核内容。"
+                or not self._analysis_checkpoint_can_recover(run)):
+            return False
+        cp = self.execution_graph.load_checkpoint_state(f"run:{run.runId}") or {}
+        chain = cp.get("toolchain_state") or {}
+        return bool(chain.get("toolchainId") == "agent_skill.style_extract" and chain.get("stage") == "quality_review"
+            and (chain.get("skillWorkspace") or {}).get("draftId") and isinstance(chain.get("stylePlan"), dict)
+            and (chain.get("styleAnalysisResult") or {}).get("unitRefs")
+            and (chain.get("source") or {}).get("reviewedEvidence") and chain.get("styleEvidenceAudit"))
+
+    def _refresh_style_workspace_recovery(self, run: AgentRun) -> None:
+        if (run.status != "failed" or (run.recovery and run.recovery.canRecover)
+                or (run.failure or {}).get("code") != "STYLE_SKILL_WORKSPACE_NEEDS_ATTENTION"
+                or not self._style_workspace_checkpoint_can_recover(run)):
+            return
+        run.failureRevision += 1
+        run.recovery = AgentRecoveryDescriptor(failureKind="local_transform_failed", failedAtPhase="model_received",
+            retryStrategy="retry_request", canRecover=True, recoveryRevision=run.failureRevision,
+            actionLabel="修复草稿并继续", diagnosticRef=f"style_workspace_{run.runId}_{run.failureRevision}")
+        run.failure = {**(run.failure or {}), "failureRevision": run.failureRevision, "recovery": run.recovery.model_dump()}
+        self.store.commit_terminal(self.state, AgentRunEvent(eventId=new_id("evt"), runId=run.runId, planId=run.planId,
+            threadId=run.threadId, type="run_failed", status="failed", payload=run.failure))
+
+    def _freeze_completed_for_run(self, run: AgentRun) -> dict[str, Any]:
+        if run.status != "failed" or not self._analysis_checkpoint_can_recover(run):
+            raise ToolchainError("INPUT_INVALID", "仅支持对已失败的只读分析任务使用已完成结果收尾。")
+        checkpoint = self.execution_graph.load_checkpoint_state(f"run:{run.runId}")
+        chain = checkpoint["toolchain_state"]
+        inherited = chain.get("completedResultsClosure")
+        if inherited:
+            if inherited.get("owner") != f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{run.currentStepId}":
+                raise ToolchainError("INPUT_INVALID", "冻结结果不属于当前任务。")
+            return inherited
+        source = chain.get("source") if chain["toolchainId"] == "agent_skill.style_extract" else chain.get("adaptiveSource")
+        chapters = [{key: chapter.get(key) for key in ("chapterId", "volumeId", "title", "version", "updatedAt", "contentHash")}
+                    for chapter in (source or {}).get("chapters", []) if chapter.get("target")]
+        if not chapters:
+            raise ToolchainError("CONTEXT_INSUFFICIENT", "原任务没有可核对的来源范围，无法收尾。")
+        active_unit_id = str((run.failure or {}).get("nodeId") or "").removeprefix("skill_unit.")
+        if len(active_unit_id) != 64 or any(char not in "0123456789abcdef" for char in active_unit_id):
+            active_unit_id = next((event.payload.get("unitId") for event in reversed(run.events)
+                if event.payload.get("stage") in {"chapter", "merge"} and event.payload.get("unitId")), None)
+        return SkillAnalysisGraph.freeze_completed(self.store.state_dir / "agent_skill_units.db",
+            self.store.state_dir / "agent_skill_graph.db",
+            owner=f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{run.currentStepId}", chapters=chapters,
+            active_unit_id=active_unit_id)
+
+    def _can_finalize_completed(self, run: AgentRun) -> bool:
+        if not (self.store.state_dir / "agent_skill_units.db").exists() or not (self.store.state_dir / "agent_skill_graph.db").exists():
+            return False
+        try:
+            self._freeze_completed_for_run(run)
+            return True
+        except (ToolchainError, sqlite3.Error, OSError, ValueError, KeyError):
+            return False
+
+    def _refresh_completed_recovery(self, run: AgentRun) -> None:
+        if run.status != "failed" or run.failureRevision < 1 or not self._can_finalize_completed(run):
+            return
+        if run.recovery and run.recovery.canFinalizeCompleted:
+            return
+        if run.recovery:
+            run.recovery = run.recovery.model_copy(update={"canFinalizeCompleted": True})
+        else:
+            run.recovery = AgentRecoveryDescriptor(failureKind="execution_incomplete", failedAtPhase="model_received",
+                retryStrategy="none", canRecover=False, canFinalizeCompleted=True, recoveryRevision=run.failureRevision,
+                diagnosticRef=f"completed_results_{run.runId}_{run.failureRevision}")
+        payload = {**(run.failure or {}), "recovery": run.recovery.model_dump(), "failureRevision": run.failureRevision}
+        run.failure = payload
+        self.store.commit_terminal(self.state, AgentRunEvent(eventId=new_id("evt"), runId=run.runId,
+            planId=run.planId, threadId=run.threadId, type="run_failed", status="failed", payload=payload))
+
+    def _refresh_readonly_analysis_recovery(self, run: AgentRun) -> bool:
+        if run.status != "failed" or (run.recovery is not None and run.recovery.canRecover):
+            return False
+        payload = run.failure or next((event.payload for event in reversed(run.events) if event.type == "run_failed"), {})
+        failure = storage_failure(ToolchainError(str(payload.get("code") or ""), str(payload.get("message") or "")))
+        truncated = payload.get("code") == "MODEL_OUTPUT_TRUNCATED"
+        transport = payload.get("code") in self._READONLY_TRANSPORT_FAILURE_CODES
+        review_input = self._legacy_style_review_input_can_recover(run, payload)
+        if not (review_input or transport or truncated or (failure and failure["code"] == "STORAGE_BUSY")) or not self._analysis_checkpoint_can_recover(run):
+            return False
+        run.failureRevision += 1
+        run.recovery = AgentRecoveryDescriptor(
+            failureKind="local_transform_failed" if review_input else "transport" if transport else "model_output_truncated" if truncated else "persistence_failed",
+            failedAtPhase="model_received", retryStrategy="retry_request",
+            canRecover=True, recoveryRevision=run.failureRevision, actionLabel="继续剩余文风审核" if review_input else "从检查点继续",
+            canFinalizeCompleted=bool(run.recovery and run.recovery.canFinalizeCompleted),
+            diagnosticRef=f"analysis_checkpoint_{run.runId}_{run.failureRevision}",
+        )
+        if transport and self._has_unconfirmed_readonly_request(run):
+            run.recovery = self._unconfirmed_analysis_recovery(run)
+            payload = {**payload, "message": self._UNCONFIRMED_TRANSPORT_MESSAGE}
+        run.failure = {**payload, **(failure or {}), "failureRevision": run.failureRevision,
+                       "completionKind": run.completionKind, "recovery": run.recovery.model_dump()}
+        self.store.commit_terminal(self.state, AgentRunEvent(
+            eventId=new_id("evt"), runId=run.runId, planId=run.planId, threadId=run.threadId,
+            stepId=run.currentStepId, type="run_failed", status="failed", payload=run.failure,
+        ))
+        return True
+
+    def _refresh_unconfirmed_analysis_recovery(self, run: AgentRun) -> None:
+        payload = run.failure or {}
+        transport_unknown = payload.get("code") in self._READONLY_TRANSPORT_FAILURE_CODES and self._has_unconfirmed_readonly_request(run)
+        if (run.status != "failed" or (not transport_unknown and payload.get("code") not in {"SIDE_EFFECT_UNKNOWN", "MODEL_RESULT_UNAVAILABLE"})
+                or not self._analysis_checkpoint_can_recover(run)
+                or (payload.get("code") == "SIDE_EFFECT_UNKNOWN" and "工作单元请求结果尚未核对" not in str(payload.get("message", "")))):
+            return
+        if run.recovery and run.recovery.blockedReason == "unconfirmed_model_request":
+            return
+        run.recovery = self._unconfirmed_analysis_recovery(run)
+        run.failure = {**payload, "message": self._UNCONFIRMED_TRANSPORT_MESSAGE if transport_unknown else self._UNCONFIRMED_RESULT_MESSAGE,
+            "retryable": False, "recovery": run.recovery.model_dump()}
+        self.store.commit_terminal(self.state, AgentRunEvent(eventId=new_id("evt"), runId=run.runId,
+            planId=run.planId, threadId=run.threadId, type="run_failed", status="failed", payload=run.failure))
+
+    _UNCONFIRMED_RESULT_MESSAGE = "未能找回未确认请求的结果，无法直接从检查点继续。已完成结果保留；可选择重新请求未确认分片（可能重复计费）；如有已完成分析，也可仅用这些结果收尾。"
+    _UNCONFIRMED_TRANSPORT_MESSAGE = "模型请求途中连接中断，返回结果尚未核对。已完成结果保留；手动重新请求将先查找已保存返回，找不到时仅重新请求对应分片（可能重复计费）。"
+    _READONLY_TRANSPORT_FAILURE_CODES = frozenset({"NETWORK_ERROR", "PROVIDER_TIMEOUT", "UPSTREAM_TIMEOUT", "PROVIDER_UNAVAILABLE"})
+    _READONLY_CHECKPOINT_RETRY_CODES = _READONLY_TRANSPORT_FAILURE_CODES | frozenset({
+        "RUNTIME_INTERRUPTED", "SIDE_EFFECT_UNKNOWN", "MODEL_OUTPUT_INVALID", "MODEL_OUTPUT_TRUNCATED", "STORAGE_BUSY"})
+
+    def _has_unconfirmed_readonly_request(self, run: AgentRun) -> bool:
+        owner = f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{run.currentStepId}"
+        if (run.resumedFrom or {}).get("closureRef"):
+            owner += f":closure:{run.resumedFrom['closureRef']}"
+        return any(ref.get("owner") == owner and ref.get("status") in {"prepared", "unknown", "result_unavailable"}
+            and ref.get("sourceMethod") in {"agent.plan_skill_execution", "agent.analyze_skill_work_unit",
+                "agent.merge_skill_analysis", "agent.style_quality"} for ref in self.state.skillRequestRefs.values())
+
+    def _unconfirmed_analysis_recovery(self, run: AgentRun) -> AgentRecoveryDescriptor:
+        return AgentRecoveryDescriptor(failureKind="transport", failedAtPhase="model_pending",
+            retryStrategy="retry_request", canRecover=True,
+            canFinalizeCompleted=bool(run.recovery and run.recovery.canFinalizeCompleted),
+            recoveryRevision=max(1, run.failureRevision), blockedReason="unconfirmed_model_request",
+            actionLabel="重新请求未确认分片", diagnosticRef=f"unconfirmed_analysis_{run.runId}_{run.failureRevision}")
+
+    def _record_interrupted_failure(self, run: AgentRun, unknown_invocations: list[ToolInvocationRecord]) -> None:
+        can_recover = not unknown_invocations and self._analysis_checkpoint_can_recover(run)
+        run.status = "failed"
+        run.pendingApproval = None
+        run.pendingUserInput = None
+        run.failureRevision += 1
+        if any(artifact.status in {"ready", "committed"} for artifact in run.artifacts):
+            run.completionKind = "partial"
+        plan = self.state.plans.get(run.planId)
+        if plan:
+            for step in plan.steps:
+                if step.stepId == run.currentStepId and step.status not in {"completed", "skipped"}:
+                    step.status = "failed"
+        diagnostic_ref = f"runtime_interrupted_{run.runId}_{run.failureRevision}"
+        run.recovery = AgentRecoveryDescriptor(
+            failureKind="side_effect_unknown" if unknown_invocations else "transport",
+            failedAtPhase="model_pending", retryStrategy="retry_request" if can_recover else "none",
+            canRecover=can_recover, recoveryRevision=run.failureRevision,
+            actionLabel="从检查点继续" if can_recover else None,
+            blockedReason="unsafe_side_effect" if unknown_invocations else None,
+            completedArtifactIds=[artifact.artifactId for artifact in run.artifacts if artifact.status in {"ready", "committed"}],
+            diagnosticRef=diagnostic_ref,
+        )
+        payload = {
+            "message": (
+                "执行服务重启，任务已暂停。可从检查点继续，复用已完成分片，并核对未完成请求的已保存结果。"
+                if can_recover else
+                "执行服务重启，草稿写入结果尚未核对。请先在草稿中心核对；不会自动重复写入。"
+                if unknown_invocations else
+                "执行服务重启，任务已停止。当前步骤没有可安全恢复的分析检查点，请检查原任务记录后重新发起。"
+            ),
+            "reason": "side_effect_result_unknown" if unknown_invocations else "runtime_interrupted",
+            "code": "SIDE_EFFECT_UNKNOWN" if unknown_invocations else "RUNTIME_INTERRUPTED",
+            "retryable": can_recover, "failureRevision": run.failureRevision,
+            "completionKind": run.completionKind, "recovery": run.recovery.model_dump(),
+            "diagnosticRef": diagnostic_ref,
+            "unknownInvocations": [{"invocationKey": item.invocationKey, "requestId": item.requestId,
+                                    "method": item.method, "stepId": item.stepId} for item in unknown_invocations],
+        }
+        run.failure = payload
+        self.store.commit_terminal(self.state, AgentRunEvent(
+            eventId=new_id("evt"), runId=run.runId, planId=run.planId, threadId=run.threadId,
+            stepId=run.currentStepId, type="run_failed", status="failed", payload=payload,
+        ))
 
     async def resume_interrupted_runs(self) -> None:
         """Resume graph checkpoints that were waiting on durable draft operations."""
@@ -453,13 +733,18 @@ class NovelAgentRuntime:
             task = asyncio.create_task(
                 self._run_graph_guarded(run.runId, initial_state=checkpoint_state)
             )
-            self._run_tasks[run.runId] = task
+            self._track_run_task(run.runId, task)
 
     def roles(self, params: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
         locale = str(params.get("locale") or context.get("locale") or "zh-CN")
         return [role.model_dump() for role in list_agent_roles(locale)]
 
     async def _refresh_persisted_skills(self, novel_id: str | None) -> None:
+        # Menu reads never populate this registry. Planning/preview owns full loading.
+        async with self._persisted_skill_refresh_lock:
+            await self._refresh_persisted_skills_locked(novel_id)
+
+    async def _refresh_persisted_skills_locked(self, novel_id: str | None) -> None:
         # Built-in skills are bundled with the runtime and must remain available
         # even when the desktop automation bridge is temporarily unavailable.
         try:
@@ -468,9 +753,25 @@ class NovelAgentRuntime:
             return
         if not isinstance(rows, list):
             return
+        # Current selection registry must not retain definitions moved out of this novel.
+        # Started runs reload their locked revisions through _step_skill_params instead.
+        registrations = {}
         for row in rows:
             if not isinstance(row, dict) or not row.get("id") or not row.get("revisionId"):
                 continue
+            cached = self._persisted_skill_registrations.get(row["id"])
+            if cached:
+                revision = next((r for r in cached.revisions if r.revisionId == row["revisionId"]), None)
+                try:
+                    definition = definition_from_persisted(row, row.get("manifest") or {})
+                    if (revision and revision.contentHash == row.get("contentHash")
+                            and revision.version == row.get("version")
+                            and revision.manifest == row.get("manifest")
+                            and cached.definition == definition):
+                        registrations[row["id"]] = cached
+                        continue
+                except (ValidationError, ValueError, TypeError):
+                    pass
             try:
                 full = await self.automation.invoke(
                     "agent_skill.get",
@@ -487,7 +788,7 @@ class NovelAgentRuntime:
                 AgentSkillRegistry([registration])
             except Exception:
                 continue
-            self._persisted_skill_registrations[registration.definition.id] = registration
+            registrations[registration.definition.id] = registration
         try:
             bindings = await self.automation.invoke(
                 "agent_skill.binding.list", {"novelId": novel_id}, "desktop-ui"
@@ -495,6 +796,7 @@ class NovelAgentRuntime:
         except AutomationInvokeError:
             bindings = []
         self._persisted_skill_bindings = [item for item in bindings if isinstance(item, dict)] if isinstance(bindings, list) else []
+        self._persisted_skill_registrations = registrations
         self.agent_skill_service = AgentSkillService(AgentSkillRegistry([
             *BUILTIN_AGENT_SKILL_REGISTRY.registrations(),
             *self._persisted_skill_registrations.values(),
@@ -502,8 +804,85 @@ class NovelAgentRuntime:
 
     async def skills(self, params: dict[str, Any], context: dict[str, Any]) -> list[dict[str, Any]]:
         novel_id = str(params.get("novelId") or context.get("novelId") or "").strip() or None
-        await self._refresh_persisted_skills(novel_id)
-        return self.agent_skill_service.list_public(params, context)
+        entries = AgentSkillService(BUILTIN_AGENT_SKILL_REGISTRY).list_public(params, context)
+        try:
+            rows = await self.automation.invoke("agent_skill.list", {"novelId": novel_id}, "desktop-ui")
+        except AutomationInvokeError:
+            return entries
+        seen = {item["id"] for item in entries}
+        for row in rows if isinstance(rows, list) else []:
+            try:
+                entry = index_from_persisted(row)
+                if (entry.id in seen or entry.scope == "builtin" or not entry.enabled
+                        or (entry.scope == "novel" and entry.ownerNovelId != novel_id)):
+                    continue
+                entries.append(entry.model_dump())
+                seen.add(entry.id)
+            except (AgentSkillError, ValidationError, ValueError, TypeError, AttributeError):
+                continue
+        return sorted(entries, key=lambda item: (item["scope"], item["title"].casefold(), item["stableId"]))
+
+    async def _chat_skill_selection_context(
+        self, entry_hint: IntentEntryHint | None, novel_id: str | None,
+    ) -> dict[str, Any]:
+        """Read the selected published revision afresh; old assistant notices are not status evidence."""
+        if entry_hint and entry_hint.kind == 'skill.pack.use':
+            try:
+                pack = await self.skill_pack({'packId': entry_hint.packId, 'revisionId': entry_hint.requestedPackRevisionId, 'novelId': novel_id}, {})
+                return {'mode': 'explicit_pack', 'explicitlySelected': True, 'status': 'published' if pack.get('available') else 'unavailable',
+                    'validated': bool(pack.get('available')), 'enabled': bool(pack.get('enabled')), 'scope': pack.get('scope'),
+                    'packId': pack['id'], 'revisionId': pack['revisionId'], 'title': pack['title'], 'version': pack['version'],
+                    'supportedOperations': sorted({b['operationId'] for b in pack['bindings']}),
+                    'allowedRoles': sorted({b['roleId'] for b in pack['bindings']})}
+            except (AutomationInvokeError, AgentSkillError) as error:
+                return {'mode': 'explicit_pack', 'explicitlySelected': True, 'status': 'unavailable', 'code': error.code}
+        if not entry_hint or entry_hint.kind not in {"skill.use", "skill.none"}:
+            return {"mode": "auto", "explicitlySelected": False}
+        if entry_hint.kind == "skill.none":
+            return {"mode": "disabled", "explicitlySelected": False}
+        if entry_hint.skills:
+            selections = [await self._chat_skill_selection_context(IntentEntryHint(
+                actionId='skill.use', kind='skill.use', skillId=item.skillId, requestedRevisionId=item.requestedRevisionId,
+            ), novel_id) for item in entry_hint.skills]
+            valid = all(item.get('validated') and item.get('enabled') for item in selections)
+            return {'mode': 'explicit_multiple', 'explicitlySelected': True, 'skills': selections,
+                    'status': 'published' if valid else 'unavailable', 'validated': valid,
+                    'supportedOperations': sorted({op for item in selections for op in item.get('supportedOperations', [])}),
+                    'allowedRoles': sorted({role for item in selections for role in item.get('allowedRoles', [])})}
+        selected: dict[str, Any] = {
+            "mode": "explicit", "explicitlySelected": True,
+            "skillId": entry_hint.skillId, "requestedRevisionId": entry_hint.requestedRevisionId,
+        }
+        try:
+            registration = BUILTIN_AGENT_SKILL_REGISTRY.get(str(entry_hint.skillId))
+            if not registration:
+                persisted = await self.automation.invoke("agent_skill.get", {
+                    "skillId": entry_hint.skillId,
+                    "revisionId": entry_hint.requestedRevisionId,
+                }, "desktop-ui")
+                if not isinstance(persisted, dict) or not persisted.get("revision"):
+                    return {**selected, "status": "not_found"}
+                registration = registration_from_persisted(persisted)
+            registry = AgentSkillRegistry([registration])
+            definition = registration.definition
+            revision = registry.revision(definition.id, entry_hint.requestedRevisionId)
+            if definition.scope == "novel" and definition.ownerNovelId != novel_id:
+                return {**selected, "status": "scope_mismatch"}
+            return {
+                **selected, "status": "published", "validated": True,
+                "enabled": definition.enabled, "title": definition.title,
+                "stableId": definition.stableId, "scope": definition.scope,
+                "revisionId": revision.revisionId, "version": revision.version,
+                "contentHash": revision.contentHash,
+                "supportedOperations": list(definition.supportedOperations),
+                "allowedRoles": list(definition.allowedRoles),
+            }
+        except AgentSkillError as error:
+            return {**selected, "status": "unavailable", "code": error.code}
+        except AutomationInvokeError as error:
+            return {**selected, "status": "unavailable", "code": error.code}
+        except (ValidationError, ValueError, KeyError, TypeError):
+            return {**selected, "status": "invalid_registration"}
 
     async def resolve_skill(self, params: dict[str, Any]) -> dict[str, Any]:
         await self._refresh_persisted_skills(str(params.get("novelId") or "").strip() or None)
@@ -512,6 +891,117 @@ class NovelAgentRuntime:
     async def preview_skill(self, params: dict[str, Any]) -> dict[str, Any]:
         await self._refresh_persisted_skills(str(params.get("novelId") or "").strip() or None)
         return self.agent_skill_service.preview(params)
+
+    async def skill_packs(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
+        return await self.automation.invoke('agent_skill.pack.list', {'novelId': params.get('novelId') or context.get('novelId')}, 'desktop-ui')
+
+    async def skill_visibility(self, params: dict[str, Any], *, write=False, draft=False) -> Any:
+        method = 'agent_skill.draft.publication.set' if draft else ('agent_skill.visibility.set' if write else 'agent_skill.visibility.preview')
+        if write:
+            async with self._persisted_skill_refresh_lock:
+                result = await self.automation.invoke(method, params, 'desktop-ui')
+                self._persisted_skill_registrations = {}
+                self._persisted_skill_bindings = []
+                self.agent_skill_service = AgentSkillService(BUILTIN_AGENT_SKILL_REGISTRY)
+                return result
+        return await self.automation.invoke(method, params, 'desktop-ui')
+
+    @staticmethod
+    def _apply_publication_scope(plan, scope, novel_id=None):
+        if scope is None:
+            return plan
+        if scope not in {'user', 'novel'}:
+            raise ValueError('Skill 可见范围不合法。')
+        steps = []
+        for step in plan.steps:
+            if step.toolchain and step.toolchain.id == 'agent_skill.style_extract':
+                data = {**step.toolchain.input, 'publicationScope': scope}
+                if novel_id and not data.get('novelId'):
+                    data['novelId'] = novel_id
+                if scope == 'novel' and not data.get('novelId'):
+                    raise ValueError('请先选择归属小说。')
+                step = step.model_copy(update={'toolchain': step.toolchain.model_copy(update={'input': data})})
+            steps.append(step)
+        return plan.model_copy(update={'steps': steps})
+
+    async def skill_pack(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
+        return await self.automation.invoke('agent_skill.pack.get', {**params, 'novelId': params.get('novelId') or context.get('novelId')}, 'desktop-ui')
+
+    async def skill_pack_default(self, params: dict[str, Any], context: dict[str, Any], *, write=False) -> Any:
+        result = await self.automation.invoke('agent_skill.pack.default.set' if write else 'agent_skill.pack.default.get',
+            {**params, 'novelId': params.get('novelId') or context.get('novelId')}, 'desktop-ui')
+        return result
+
+    async def preview_skill_pack(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
+        from .agent_skills.packs import SkillPackRequest, resolve_pack
+        request = SkillPackRequest.model_validate(params)
+        pack = await self.skill_pack({'packId': request.packId, 'revisionId': request.requestedPackRevisionId, **params}, context)
+        refs, selection = resolve_pack(pack, request, params['operationId'], params['roleId'], params.get('novelId') or context.get('novelId'))
+        await self._load_skill_refs(refs)
+        compiled = self.agent_skill_service.compiler.compile(ResolvedSkillSet(primary=refs[0] if refs else None, auxiliary=refs[1] if len(refs) > 1 else None))
+        return {'selection': selection, 'skills': [r.model_dump() for r in refs], 'compiled': compiled.model_dump()}
+
+    async def _load_skill_refs(self, refs) -> None:
+        from dataclasses import replace
+        for ref in refs:
+            persisted = await self.automation.invoke('agent_skill.get', {'skillId': ref.skillId, 'revisionId': ref.revisionId}, 'desktop-ui')
+            registration = registration_from_persisted(persisted)
+            revision = registration.revisions[0]
+            if revision.revisionId != ref.revisionId or revision.contentHash != ref.contentHash:
+                raise AgentSkillError('AGENT_SKILL_PACK_HASH_MISMATCH', '文风包锁定的成员版本与内容不一致。')
+            old = self._persisted_skill_registrations.get(ref.skillId)
+            if old:
+                registration = replace(registration, revisions=tuple({r.revisionId: r for r in (*old.revisions, *registration.revisions)}.values()))
+            self._persisted_skill_registrations[ref.skillId] = registration
+        self.agent_skill_service = AgentSkillService(AgentSkillRegistry([*BUILTIN_AGENT_SKILL_REGISTRY.registrations(), *self._persisted_skill_registrations.values()]))
+
+    async def _apply_pack_to_plan(self, plan, decision, novel_id):
+        from .agent_skills.packs import SkillPackRequest, resolve_pack
+        if decision and decision.disabledSkillsForTurn:
+            return plan
+        requested = decision.requestedSkillPack if decision else None
+        if decision and decision.requestedSkills:
+            if requested:
+                raise AgentSkillError('AGENT_SKILL_SELECTION_CONFLICT', '不能同时选择单个 Skill 与文风包。')
+            return plan
+        source = requested.get('source', 'explicit') if requested else 'explicit'
+        if not requested:
+            if not novel_id:
+                return plan
+            preference = await self.skill_pack_default({'novelId': novel_id}, {})
+            if not isinstance(preference, dict) or not preference.get('packId'):
+                if isinstance(preference, dict) and preference.get('source') == 'cleared':
+                    return self._apply_agent_skills_to_plan(plan, decision, locale='zh-CN', novel_id=novel_id, suppress_pack_bindings=True)
+                return plan
+            pairs = preference.get('operationPairs')
+            if isinstance(pairs, list) and not any({'operationId': self._step_operation_id(step, decision), 'roleId': 'team' if step.agent == 'supervisor' else step.agent} in pairs for step in plan.steps):
+                return plan
+            if not preference.get('enabled', True):
+                raise AgentSkillError('AGENT_SKILL_PACK_DEFAULT_DISABLED', '恢复的本书文风默认尚未启用，请重新选择或取消默认。')
+            requested = {'packId': preference['packId'], 'requestedPackRevisionId': preference['packRevisionId']}
+            source = 'novel_default'
+        request = SkillPackRequest.model_validate(requested)
+        pack = await self.skill_pack({'packId': request.packId, 'revisionId': request.requestedPackRevisionId, 'novelId': novel_id}, {})
+        plan = self._apply_agent_skills_to_plan(plan, decision, locale='zh-CN', novel_id=novel_id, suppress_pack_bindings=True)
+        steps = []
+        applied = False
+        for step in plan.steps:
+            operation = self._step_operation_id(step, decision)
+            if not operation:
+                steps.append(step)
+                continue
+            refs, selection = resolve_pack(pack, request, operation, 'team' if step.agent == 'supervisor' else step.agent, novel_id, source)
+            if refs:
+                applied = True
+                await self._load_skill_refs(refs)
+                self.agent_skill_service.compiler.compile(ResolvedSkillSet(primary=refs[0], auxiliary=refs[1] if len(refs) > 1 else None))
+            steps.append(step.model_copy(update={'skills': refs if refs else step.skills, 'skillPackSelection': selection}))
+        if not applied and source == 'explicit':
+            raise AgentSkillError('AGENT_SKILL_PACK_NOT_APPLICABLE', '所选文风包不适用于本次任务，请选择其他包或取消本次选择。')
+        # Unrelated tasks retain their existing non-pack defaults.
+        if not applied:
+            return plan
+        return plan.model_copy(update={'steps': steps, 'skillPackRequest': {**request.model_dump(), 'requestedPackRevisionId': pack['revisionId'], 'source': source, 'novelId': novel_id}})
 
     async def author_skill(self, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -653,6 +1143,64 @@ class NovelAgentRuntime:
             "validationReport": workspace.get("validationReport"),
         }
 
+    async def revise_skill(self, params: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request = AgentSkillReviseRequest.model_validate({
+                **params,
+                "novelId": params.get("novelId") or context.get("novelId"),
+                "locale": params.get("locale") or context.get("locale") or "zh-CN",
+            })
+        except ValidationError as error:
+            raise AgentSkillError("AGENT_SKILL_AUTHOR_INPUT_INVALID", str(error)) from error
+        request_id = str(context.get("_requestId") or new_id("skill_revise"))
+        deadline = (datetime.now(timezone.utc) + timedelta(minutes=8)).isoformat()
+
+        async def invoke(method: str, payload: dict[str, Any], stage: str) -> Any:
+            return await self.automation.invoke(
+                method, payload, "desktop-ui",
+                request_id=f"{request_id}:{stage}", parent_request_id=request_id, deadline_at=deadline,
+            )
+
+        persisted = await invoke("agent_skill.draft.get", {"draftId": request.draftId}, "read")
+        if not isinstance(persisted, dict):
+            raise AgentSkillError("AGENT_SKILL_DRAFT_NOT_FOUND", "Skill 草稿不存在。")
+        if persisted.get("version") != request.expectedVersion:
+            raise AgentSkillError("AGENT_SKILL_DRAFT_VERSION_CONFLICT", "规则已被更新，请重新读取后再修改。")
+        if persisted.get("status") not in {"editing", "ready_for_review"}:
+            raise AgentSkillError("AGENT_SKILL_DRAFT_NOT_EDITABLE", "已保存或放弃的草稿不能继续修改。")
+        if persisted.get("scope") == "novel" and persisted.get("sourceNovelId") != request.novelId:
+            raise AgentSkillError("AGENT_SKILL_SCOPE_MISMATCH", "这份创作规则属于其他小说。")
+        projection = persisted.get("draft") if isinstance(persisted.get("draft"), dict) else {}
+        authoring = projection.get("authoring") if isinstance(projection.get("authoring"), dict) else {}
+        documents = authoring.get("documents") if isinstance(authoring.get("documents"), list) else []
+        document = next((
+            item for item in documents if isinstance(item, dict)
+            and not item.get("deleted") and item.get("logicalPath") == request.logicalPath
+            and (request.logicalPath == "SKILL.md" or request.logicalPath.endswith("/SKILL.md"))
+        ), None)
+        if not document or not isinstance(document.get("contentText"), str):
+            raise AgentSkillError("AGENT_SKILL_WORKSPACE_DOCUMENT_NOT_FOUND", "没有可修改的创作规则正文。")
+        generated = await invoke("agent.generate_skill_document", {
+            "goal": request.goal,
+            "scope": persisted.get("scope"),
+            "novelId": persisted.get("sourceNovelId"),
+            "locale": request.locale,
+            "currentDocument": document["contentText"],
+            "contentOnly": True,
+        }, "generate")
+        content = generated.get("contentText") if isinstance(generated, dict) else None
+        if not isinstance(content, str) or not content.strip():
+            raise AgentSkillError("AGENT_SKILL_AUTHOR_OUTPUT_INVALID", "AI 没有返回可用规则，原草稿已保留。")
+        result = await invoke("agent_skill.workspace.prepare", {
+            "draftId": request.draftId,
+            "expectedVersion": request.expectedVersion,
+            "logicalPath": request.logicalPath,
+            "rules": {"instructions": content},
+        }, "save")
+        if not isinstance(result, dict) or not isinstance(result.get("draft"), dict):
+            raise AgentSkillError("AGENT_SKILL_DRAFT_PERSIST_FAILED", "规则保存结果无效。")
+        return result
+
     async def list_skill_drafts(self, params: dict[str, Any], context: dict[str, Any]) -> Any:
         return await self.automation.invoke(
             "agent_skill.draft.list",
@@ -690,6 +1238,7 @@ class NovelAgentRuntime:
         *,
         locale: str,
         novel_id: str | None,
+        suppress_pack_bindings: bool = False,
     ) -> AgentPlan:
         requested = list(decision.requestedSkills) if decision else []
         disabled_for_turn = bool(decision.disabledSkillsForTurn) if decision else False
@@ -708,6 +1257,8 @@ class NovelAgentRuntime:
                 registration = self.agent_skill_service.registry.require(item.skillId)
                 if operation_id not in registration.definition.supportedOperations:
                     continue
+                if registration.definition.allowedRoles and role_id not in registration.definition.allowedRoles:
+                    continue
                 matching_explicit.append(AgentSkillSelection(
                     skillId=item.skillId,
                     requestedRevisionId=item.requestedRevisionId,
@@ -722,6 +1273,7 @@ class NovelAgentRuntime:
                     reverse=True,
                 )
                 if binding.get("operationId") == operation_id
+                and not ((requested or suppress_pack_bindings) and str(binding.get('bindingType', '')).startswith('pack_'))
                 and (not binding.get("roleId") or binding.get("roleId") == role_id)
                 and (not binding.get("novelId") or binding.get("novelId") == novel_id)
             ]
@@ -766,10 +1318,52 @@ class NovelAgentRuntime:
     def _compile_step_skills(self, step: AgentPlanStep) -> dict[str, Any] | None:
         if not step.skills:
             return None
-        primary = next((item for item in step.skills if item.position == "primary"), None)
-        auxiliary = next((item for item in step.skills if item.position == "auxiliary"), None)
-        compiled = self.agent_skill_service.compiler.compile(ResolvedSkillSet(primary=primary, auxiliary=auxiliary))
+        compiled = self.agent_skill_service.compiler.compile(ResolvedSkillSet.from_refs(step.skills))
         return compiled.model_dump()
+
+    # Only task-producing model nodes consume a step's method. Chat, planning,
+    # summaries, data reads and the final execution report keep their own contracts.
+    _SKILL_MODEL_METHODS = frozenset({
+        "chapter.generate_draft", "creative_assets.generate_draft",
+        "agent.generate_chapter_beats", "agent.generate_consistency_review",
+        "agent.generate_editor_range_review", "agent.generate_writer_range_revision_plan",
+        "agent.generate_reader_chapter_evaluation", "agent.generate_worldbuilding_range_consistency",
+        "agent.generate_research_fact_check", "agent.generate_scope_audit",
+        "agent.generate_plotline_analysis", "agent.generate_novel_bootstrap",
+        "agent.plan_style_skill_pack", "agent.style_quality",
+        "agent.analyze_skill_work_unit", "agent.merge_skill_analysis", "agent.plan_skill_execution",
+    })
+
+    async def _step_skill_params(
+        self, run: AgentRun | None, method: str, params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if run is None or method not in self._SKILL_MODEL_METHODS:
+            return params
+        plan = self.state.plans.get(run.planId)
+        step = next((item for item in plan.steps if item.stepId == run.currentStepId), None) if plan else None
+        if step is None:
+            return params
+        normalized = {key: value for key, value in params.items() if key != "agentSkill"}
+        if not step.skills:
+            return normalized
+        registrations = {item.definition.id: item for item in self.agent_skill_service.registry.registrations()}
+        for ref in step.skills:
+            try:
+                self.agent_skill_service.registry.revision(ref.skillId, ref.revisionId)
+            except AgentSkillError as error:
+                if error.code not in {"AGENT_SKILL_NOT_FOUND", "AGENT_SKILL_VERSION_UNAVAILABLE"}:
+                    raise
+                persisted = await self.automation.invoke(
+                    "agent_skill.get", {"skillId": ref.skillId, "revisionId": ref.revisionId}, "desktop-ui",
+                )
+                if not isinstance(persisted, dict):
+                    raise AgentSkillError("AGENT_SKILL_REVISION_NOT_FOUND", f"Locked Skill revision is unavailable: {ref.revisionId}")
+                registrations[ref.skillId] = registration_from_persisted(persisted)
+        resolved = ResolvedSkillSet.from_refs(step.skills)
+        # Compile the locked revision, never the newest revision or a summary.
+        compiled = AgentSkillCompiler(AgentSkillRegistry(list(registrations.values()))).compile(resolved)
+        normalized["agentSkill"] = compiled.model_dump()
+        return normalized
 
     def _explicit_chapter_scope(
         self,
@@ -818,18 +1412,25 @@ class NovelAgentRuntime:
         context: dict[str, Any],
     ) -> AgentPlan:
         explicit = self._explicit_chapter_scope(params, context, goal=plan.goal)
-        if not explicit:
-            return plan
         next_steps: list[AgentPlanStep] = []
         for step in plan.steps:
             invocation = step.toolchain
             if invocation is None or invocation.id not in self._CHAPTER_SCOPE_TOOLCHAINS:
                 next_steps.append(step)
                 continue
-            if (
-                invocation.id == "agent_skill.style_extract"
-                and invocation.input.get("sourceMode") == "named_work_model_prior"
-            ):
+            if invocation.id == "agent_skill.style_extract" and invocation.input.get("sourceMode") == "named_work_model_prior":
+                requested_title = extract_style_work_title(plan.goal)
+                if requested_title:
+                    next_steps.append(step.model_copy(update={"toolchain": invocation.model_copy(update={
+                        "input": {**invocation.input, "sourceWorkTitle": requested_title},
+                    })}))
+                    continue
+                # Model plans and registered plans obey the same source rule:
+                # history alone never authorizes skipping project samples.
+                project_input = {key: value for key, value in invocation.input.items() if key not in {"sourceMode", "sourceWorkTitle"}}
+                invocation = invocation.model_copy(update={"input": {**project_input, "sourceMode": "project_chapter_scope"}})
+                step = step.model_copy(update={"toolchain": invocation})
+            if not explicit:
                 next_steps.append(step)
                 continue
             scope_input = {key: value for key, value in explicit.items() if key != "experts"}
@@ -871,6 +1472,8 @@ class NovelAgentRuntime:
                 "chapterId": target.id,
                 "_resolvedTarget": resolved_target,
             }
+            if target.selector == "new_chapter_ordinal" and invocation.id == "chapter.sequence_continuation":
+                target_input["chapterCount"] = 1
             if target.ids:
                 target_input.update({
                     "chapterIds": target.ids,
@@ -927,6 +1530,8 @@ class NovelAgentRuntime:
                 "chapterId": target.chapterId,
                 "_resolvedTarget": resolved_target,
             }
+            if target.selector == "new_chapter_ordinal" and invocation.id == "chapter.sequence_continuation":
+                target_input["chapterCount"] = 1
             if target.volumeId:
                 target_input["volumeId"] = target.volumeId
             if invocation.id == "chapter.batch_rewrite":
@@ -1332,7 +1937,7 @@ class NovelAgentRuntime:
         authoritative_catalog_selector = bool(
             requested_target
             and requested_target.source in {"user_message", "structured_selection"}
-            and requested_target.selector in {"last_in_novel", "last_in_volume", "last_in_current_volume"}
+            and requested_target.selector in {"last_in_novel", "last_in_volume", "last_in_current_volume", "new_chapter_ordinal"}
         )
         if (unresolved_project_target or authoritative_catalog_selector) and novel_id:
             try:
@@ -1356,7 +1961,7 @@ class NovelAgentRuntime:
                     chapter_catalog = hydrated_catalog
                     requested_target = hydrated_target
                 elif requested_target:
-                    requested_target = ResolvedIntentTarget(
+                    requested_target = hydrated_target or ResolvedIntentTarget(
                         selector=requested_target.selector,
                         source=requested_target.source,
                     )
@@ -1532,6 +2137,7 @@ class NovelAgentRuntime:
                 previous_intent = None
         entry_hint_payload = params.get("entryHint")
         entry_hint = IntentEntryHint.model_validate(entry_hint_payload) if isinstance(entry_hint_payload, dict) else None
+        skill_selection_context = await self._chat_skill_selection_context(entry_hint, novel_id or None)
         intent_request = IntentRequest(
             message=message,
             conversationId=conversation_id,
@@ -1606,6 +2212,7 @@ class NovelAgentRuntime:
                     "availableReadToolDefinitions": [] if finalizing else available_read_tool_definitions,
                     "availableOperations": INTENT_OPERATION_REGISTRY.list_public(),
                     "intentPreflight": preflight.model_dump(),
+                    "skillSelectionContext": skill_selection_context,
                     "selectionContext": model_selection_context,
                     "toolObservations": graph_state["observations"],
                     "explorationNotes": graph_state.get("exploration_notes") or [],
@@ -1855,7 +2462,9 @@ class NovelAgentRuntime:
 
         evidence_snapshot: AgentEvidenceSnapshot | None = None
 
-        if self.intent_service.retry_failed_run_action(intent_request) is not None:
+        if (self.intent_service.retry_failed_run_action(intent_request) is not None
+                or self.intent_service.is_completed_results_request(intent_request.message)
+                or self.intent_service.requires_unconfirmed_resume_choice(intent_request)):
             graph_result = {
                 "decision": {"content": "resume", "shouldPlan": False, "needsClarification": False},
                 "tool_trace": [],
@@ -2369,26 +2978,38 @@ class NovelAgentRuntime:
             return None
         if any(run.retryOfRunId == failed_run.runId for run in self.state.runs.values()):
             return None
+        self._refresh_unconfirmed_analysis_recovery(failed_run)
+        self._refresh_style_workspace_recovery(failed_run)
+        self._refresh_readonly_analysis_recovery(failed_run)
         events = self.store.list_events(failed_run.runId)
         terminal = next((event for event in reversed(events) if event.type == "run_failed"), None)
         terminal_code = str((terminal.payload if terminal else {}).get("code") or "")
-        if terminal_code == "SIDE_EFFECT_UNKNOWN" or any(
+        analysis_checkpoint_retry = self._analysis_checkpoint_can_recover(failed_run)
+        if not analysis_checkpoint_retry and (terminal_code == "SIDE_EFFECT_UNKNOWN" or any(
             event.payload.get("code") == "SIDE_EFFECT_UNKNOWN" for event in events
-        ):
+        )):
             return None
         exhausted = next((event for event in reversed(events) if event.type == "request_retry_exhausted"), None)
         # Toolchain nodes can fail after request-level retry handling (for
         # example, a truncated synthesis). Their terminal event is retryable
         # even when no request_retry_exhausted event was emitted.
-        if not (
+        can_finalize = self._can_finalize_completed(failed_run)
+        requires_unconfirmed = bool(failed_run.recovery and failed_run.recovery.blockedReason == "unconfirmed_model_request")
+        retryable = (
             (exhausted is not None and exhausted.payload.get("retryable") is True)
             or (terminal is not None and terminal.payload.get("retryable") is True)
-        ):
+            or (analysis_checkpoint_retry and terminal_code in self._READONLY_CHECKPOINT_RETRY_CODES)
+            or self._legacy_style_review_input_can_recover(failed_run)
+            or (terminal_code == "STYLE_SKILL_WORKSPACE_NEEDS_ATTENTION" and self._style_workspace_checkpoint_can_recover(failed_run))
+        )
+        retryable = retryable and not requires_unconfirmed
+        if not retryable and not can_finalize and not requires_unconfirmed:
             return None
         return FailedRunRef(
             runId=failed_run.runId,
             failureRevision=failed_run.failureRevision,
-            retryable=True,
+            retryable=retryable, canFinalizeCompleted=can_finalize,
+            requiresUnconfirmedRetry=requires_unconfirmed,
             code=str((exhausted.payload.get("code") if exhausted else None) or terminal_code) or None,
         )
 
@@ -2587,7 +3208,7 @@ class NovelAgentRuntime:
         if (
             request_target
             and request_target.source in {"user_message", "structured_selection"}
-            and not request_target.chapterId
+            and (not request_target.chapterId or request_target.selector == "new_chapter_ordinal")
         ):
             novel_id = str(params.get("novelId") or context.get("novelId") or "").strip()
             if novel_id:
@@ -2603,9 +3224,13 @@ class NovelAgentRuntime:
                         editor_chapter_id=editor_chapter_id or None,
                         editor_volume_id=editor_volume_id or None,
                     )
-                    if hydrated_target and hydrated_target.chapterId:
+                    if hydrated_target:
                         request_target = hydrated_target
                 except Exception:
+                    if request_target.selector == "new_chapter_ordinal":
+                        # Creation depends on the destination still being the
+                        # next ordinal; a cached source anchor is insufficient.
+                        request_target = ResolvedIntentTarget(selector=request_target.selector, source=request_target.source)
                     # The renderer catalog remains a valid best-effort source.
                     # If it was incomplete, the guarded unresolved-target path
                     # below returns a user-actionable planning error.
@@ -2619,7 +3244,8 @@ class NovelAgentRuntime:
             requested_operation_ids = (
                 [operation.type for operation in intent_decision.operations]
                 if intent_decision
-                else detect_explicit_operations(goal)
+                else ["chapter.create"] if request_target.selector.startswith("new_chapter_ordinal")
+                else detect_explicit_operations(target_resolution_text)
             )
             if any(
                 (definition := INTENT_OPERATION_REGISTRY.get(operation_id)) is not None
@@ -2631,7 +3257,7 @@ class NovelAgentRuntime:
                     code="CHAPTER_TARGET_UNRESOLVED",
                     retryable=False,
                     attempts=1,
-                    user_message="暂时无法确定目标章节。请刷新章节目录后直接重试生成计划。",
+                    user_message=request_target.label or "暂时无法确定目标章节。请刷新章节目录后直接重试生成计划。",
                     diagnostic_ref=new_id("diagnostic"),
                     details={"recoveryAction": "refresh_catalog_and_retry_plan"},
                 ))
@@ -2709,12 +3335,15 @@ class NovelAgentRuntime:
         plan = self._apply_resolved_operation_targets(plan, intent_decision)
         plan = self._apply_fallback_resolved_target(plan, request_target)
         plan = self._apply_novel_project_initialization_source(plan, params)
+        await self._refresh_persisted_skills(str(params.get("novelId") or context.get("novelId") or "").strip() or None)
         plan = self._apply_agent_skills_to_plan(
             plan,
             intent_decision,
             locale=str(params.get("locale") or context.get("locale") or "zh-CN"),
             novel_id=str(params.get("novelId") or context.get("novelId") or "").strip() or None,
         )
+        plan = await self._apply_pack_to_plan(plan, intent_decision, str(params.get('novelId') or context.get('novelId') or '').strip() or None)
+        plan = self._apply_publication_scope(plan, params.get('publicationScope') or (intent_decision.publicationScope if intent_decision else None), params.get('novelId') or context.get('novelId'))
         # A novel bootstrap is read-only until the user accepts its resulting
         # project blueprint, but it still represents a high-impact creative
         # commitment. Keep its execution visible and explicitly confirmed.
@@ -2802,8 +3431,13 @@ class NovelAgentRuntime:
             },
         )
         revised = revise_plan_from_model(plan, result, revision=revision)
+        prior_publication = next((s.toolchain.input.get('publicationScope') for s in plan.steps if s.toolchain and s.toolchain.id == 'agent_skill.style_extract'), None)
+        revised = self._apply_publication_scope(revised, prior_publication)
         revised = self._apply_explicit_chapter_scope(revised, params, context)
         revised = self._preserve_resolved_operation_targets(plan, revised)
+        if plan.skillPackRequest:
+            preserved_selection = IntentDecision(interaction='task', route='plan', responseContent='', requestedSkillPack=plan.skillPackRequest)
+            revised = await self._apply_pack_to_plan(revised, preserved_selection, str(params.get('novelId') or context.get('novelId') or plan.skillPackRequest.get('novelId') or '').strip() or None)
         revision_target = resolve_intent_chapter_target(
             revision,
             params.get("chapterCatalog") or context.get("chapterCatalog"),
@@ -2826,8 +3460,8 @@ class NovelAgentRuntime:
         self._save()
         return revised
 
-    @staticmethod
     def _run_deadline_at(
+        self,
         plan: AgentPlan,
         params: dict[str, Any],
         context: dict[str, Any],
@@ -2851,6 +3485,16 @@ class NovelAgentRuntime:
                 continue
             definition = TOOLCHAIN_REGISTRY.resolve(step.toolchain.id, step.toolchain.version)
             toolchain_timeout_seconds += definition.budget.timeoutSeconds
+            if step.toolchain.id in {"writer.range_revision_plan", "editor.range_review", "worldbuilding.range_consistency"}:
+                primary = next((ref for ref in step.skills if ref.position == "primary"), None)
+                if primary:
+                    try:
+                        revision = self.agent_skill_service.registry.revision(primary.skillId, primary.revisionId)
+                        hints = SkillExecutionHints.model_validate(revision.manifest.get("executionHints") or {})
+                        if hints.supports_chapter_analysis:
+                            toolchain_timeout_seconds += max(0, 10800 - definition.budget.timeoutSeconds)
+                    except AgentSkillError:
+                        pass
         timeout_seconds = toolchain_timeout_seconds or 600
         return (datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)).isoformat()
 
@@ -2924,10 +3568,18 @@ class NovelAgentRuntime:
             )
 
         skill_snapshot = []
+        pack_snapshot = []
         seen_skill_revisions: set[tuple[str, str]] = set()
         for step in plan.steps:
             if step.stepId not in approved_step_ids:
                 continue
+            if step.skillPackSelection and step.skillPackSelection.get('applicable'):
+                selection = step.skillPackSelection
+                pack = await self.skill_pack({'packId': selection['packId'], 'revisionId': selection['revisionId'],
+                    'novelId': params.get('novelId') or context.get('novelId')}, {})
+                if not pack.get('available') or pack.get('contentHash') != selection['contentHash']:
+                    raise AgentSkillError('AGENT_SKILL_PACK_UNAVAILABLE', '计划锁定的文风包已停用或内容发生变化，请调整计划。')
+                pack_snapshot.append({'stepId': step.stepId, **selection, 'skills': [r.model_dump() for r in step.skills]})
             for skill in step.skills:
                 key = (skill.skillId, skill.revisionId)
                 if key in seen_skill_revisions:
@@ -2935,6 +3587,15 @@ class NovelAgentRuntime:
                 seen_skill_revisions.add(key)
                 skill_snapshot.append(skill.model_copy(deep=True))
 
+        access_snapshot = []
+        persisted_refs = [r.model_dump() for r in skill_snapshot if r.scope != 'builtin']
+        if persisted_refs:
+            access_snapshot = await self.automation.invoke('agent_skill.visibility.check', {
+                'novelId': params.get('novelId') or context.get('novelId'), 'skills': persisted_refs,
+            }, 'desktop-ui')
+            expected = {(r['skillId'], r['revisionId'], r['contentHash']) for r in persisted_refs}
+            if not isinstance(access_snapshot, list) or {(r.get('skillId'), r.get('revisionId'), r.get('contentHash')) for r in access_snapshot if isinstance(r, dict)} != expected:
+                raise AgentSkillError('AGENT_SKILL_VISIBILITY_CHECK_FAILED', 'Skill 范围校验未返回完整结果，任务尚未开始。')
         run = AgentRun(
             runId=new_id("run"),
             threadId=plan.threadId,
@@ -2942,6 +3603,8 @@ class NovelAgentRuntime:
             status="running",
             deadlineAt=self._run_deadline_at(plan, params, context, step_ids=approved_step_ids),
             skillSnapshot=skill_snapshot,
+            skillPackSnapshot=pack_snapshot,
+            skillAccessSnapshot=access_snapshot,
             userInputResponses=[plan.userDecisions] if plan.userDecisions else [],
         )
         self.state.runs[run.runId] = run
@@ -2984,7 +3647,7 @@ class NovelAgentRuntime:
             pending_operation=None,
         )
         task = asyncio.create_task(self._run_graph_guarded(run.runId, initial_state=execution_state))
-        self._run_tasks[run.runId] = task
+        self._track_run_task(run.runId, task)
         self._save()
         return run
 
@@ -2999,19 +3662,31 @@ class NovelAgentRuntime:
         if failed_run.status != "failed":
             raise ValueError("Only a failed run can be retried")
         self._refresh_local_recovery_capability(failed_run)
+        self._refresh_readonly_analysis_recovery(failed_run)
+        self._refresh_style_workspace_recovery(failed_run)
         expected_revision = params.get("expectedFailureRevision")
         if not isinstance(expected_revision, int) or expected_revision < 1:
             raise ValueError("expectedFailureRevision must be a positive integer")
         if failed_run.failureRevision != expected_revision:
             raise ValueError("Failed run revision conflict")
         mode = str(params.get("mode") or "failed_node")
+        if mode not in {"failed_node", "use_completed_results", "retry_unconfirmed_units"}:
+            raise ValueError("Unsupported failed-run recovery mode")
+        self._refresh_unconfirmed_analysis_recovery(failed_run)
+        unconfirmed_retry = mode == "retry_unconfirmed_units"
+        if unconfirmed_retry and (not self._analysis_checkpoint_can_recover(failed_run)
+                or not failed_run.recovery or failed_run.recovery.blockedReason != "unconfirmed_model_request"):
+            raise ValueError("Only an unresolved read-only analysis request can be explicitly requested again")
+        if mode == "failed_node" and failed_run.recovery and failed_run.recovery.blockedReason == "unconfirmed_model_request":
+            raise ValueError(self._UNCONFIRMED_RESULT_MESSAGE)
+        frozen_scope = await asyncio.to_thread(self._freeze_completed_for_run, failed_run) if mode == "use_completed_results" else None
         strategy = str(params.get("strategy") or (
             failed_run.recovery.retryStrategy if failed_run.recovery else "retry_request"
-        ))
+        )) if frozen_scope is None and not unconfirmed_retry else "retry_request"
         allowed_strategies = {"retry_request", "repair_model_output", "reprocess_saved_result"}
         if strategy not in allowed_strategies:
             raise ValueError(f"Unsupported recovery strategy: {strategy}")
-        if failed_run.recovery and strategy != failed_run.recovery.retryStrategy:
+        if frozen_scope is None and not unconfirmed_retry and failed_run.recovery and strategy != failed_run.recovery.retryStrategy:
             raise ValueError("Recovery strategy conflict")
         linked_retry = next(
             (run for run in self.state.runs.values() if run.retryOfRunId == failed_run.runId),
@@ -3024,9 +3699,10 @@ class NovelAgentRuntime:
         exhausted = next((event for event in reversed(events) if event.type == "request_retry_exhausted"), None)
         terminal = next((event for event in reversed(events) if event.type == "run_failed"), None)
         terminal_code = str((terminal.payload if terminal else {}).get("code") or "")
-        if terminal_code == "SIDE_EFFECT_UNKNOWN" or any(
+        analysis_checkpoint_retry = self._analysis_checkpoint_can_recover(failed_run)
+        if not analysis_checkpoint_retry and (terminal_code == "SIDE_EFFECT_UNKNOWN" or any(
             event.payload.get("code") == "SIDE_EFFECT_UNKNOWN" for event in events
-        ):
+        )):
             raise ValueError("SIDE_EFFECT_UNKNOWN must be reconciled before retry")
         retry_after_repair_exhausted = bool(
             failed_run.recovery
@@ -3042,8 +3718,14 @@ class NovelAgentRuntime:
         )
         if (
             strategy == "retry_request"
+            and frozen_scope is None
+            and not unconfirmed_retry
             and not retry_after_repair_exhausted
             and not retry_saved_draft_review
+            and not (terminal_code == "NARRATIVE_STATE_EXTRACTION_FAILED" and failed_run.recovery and failed_run.recovery.canRecover)
+            and not (analysis_checkpoint_retry and terminal_code in self._READONLY_CHECKPOINT_RETRY_CODES)
+            and not self._legacy_style_review_input_can_recover(failed_run)
+            and not (terminal_code == "STYLE_SKILL_WORKSPACE_NEEDS_ATTENTION" and self._style_workspace_checkpoint_can_recover(failed_run))
             and not (
                 (exhausted is not None and exhausted.payload.get("retryable") is True)
                 or (terminal is not None and terminal.payload.get("retryable") is True)
@@ -3062,6 +3744,7 @@ class NovelAgentRuntime:
         retry_root_run_id = failed_run.retryRootRunId or failed_run.retryOfRunId or failed_run.runId
         recovery_record = self.state.recoveryRecords.get(failed_run.runId) or {}
         resumed_from = {
+            "mode": mode,
             "phase": checkpoint_state.get("phase"),
             "stepIndex": checkpoint_state.get("step_index"),
             "toolIndex": checkpoint_state.get("tool_index"),
@@ -3129,6 +3812,8 @@ class NovelAgentRuntime:
             progress=failed_run.progress,
             artifacts=[artifact.model_copy(deep=True) for artifact in failed_run.artifacts],
             skillSnapshot=[skill.model_copy(deep=True) for skill in failed_run.skillSnapshot],
+            skillPackSnapshot=[dict(snapshot) for snapshot in failed_run.skillPackSnapshot],
+            skillAccessSnapshot=[dict(snapshot) for snapshot in failed_run.skillAccessSnapshot],
             draftSessionId=failed_run.draftSessionId,
             draftBatchId=failed_run.draftBatchId,
             approvalResponses=[dict(response) for response in failed_run.approvalResponses],
@@ -3161,6 +3846,16 @@ class NovelAgentRuntime:
             "resume_response": None,
             "pending_operation": None,
         })
+        if frozen_scope is not None:
+            resumed_state["toolchain_state"] = {**(checkpoint_state.get("toolchain_state") or {}),
+                                               "completedResultsClosure": frozen_scope}
+        inherited_closure = (resumed_state.get("toolchain_state") or {}).get("completedResultsClosure")
+        if inherited_closure:
+            retry_run.resumedFrom["closureRef"] = inherited_closure["manifestHash"]
+            retry_run.resumedFrom["analyzedChapterCount"] = len(inherited_closure["chapters"])
+            retry_run.resumedFrom["omittedChapterCount"] = len(inherited_closure["omittedChapters"])
+            if inherited_closure["omittedChapters"]:
+                retry_run.completionKind = "partial"
         await self._emit(
             retry_run,
             "run_started",
@@ -3188,7 +3883,7 @@ class NovelAgentRuntime:
             },
         )
         task = asyncio.create_task(self._run_graph_guarded(retry_run.runId, initial_state=resumed_state))
-        self._run_tasks[retry_run.runId] = task
+        self._track_run_task(retry_run.runId, task)
         self._save()
         return retry_run
 
@@ -3289,7 +3984,7 @@ class NovelAgentRuntime:
             source_artifact_id=str(params.get("sourceArtifactId") or "").strip(),
             draft_kind="creative_assets" if is_creative_assets else "chapter",
         ))
-        self._run_tasks[run.runId] = task
+        self._track_run_task(run.runId, task)
         self._save()
         return run
 
@@ -3567,7 +4262,7 @@ class NovelAgentRuntime:
             pending_operation=None,
         )
         task = asyncio.create_task(self._run_graph_guarded(run.runId, initial_state=execution_state))
-        self._run_tasks[run.runId] = task
+        self._track_run_task(run.runId, task)
         self._save()
         return run
 
@@ -3767,7 +4462,7 @@ class NovelAgentRuntime:
                 self._watch_draft_operation(run_id, dict(pending_operation))
             )
             self._operation_watch_tasks[run_id] = task
-            self._run_tasks[run_id] = task
+            self._track_run_task(run_id, task)
 
         if delay_seconds <= 0:
             launch()
@@ -3856,7 +4551,7 @@ class NovelAgentRuntime:
                 }
         except asyncio.CancelledError:
             run = self.state.runs.get(run_id)
-            if run and run.status not in {"completed", "failed", "cancelled"}:
+            if run and not (run.cancelRequested and run.draftOperationId) and run.status not in {"completed", "failed", "cancelled"}:
                 try:
                     await asyncio.shield(self._cancel_draft_operation(operation_id))
                 except Exception:
@@ -3884,6 +4579,8 @@ class NovelAgentRuntime:
                 await self._emit(run, "error", payload=payload)
                 await self._finish_run(run, "failed", "run_failed", payload)
         finally:
+            if reschedule is not None and current_task:
+                self._intentional_worker_exits.add(current_task)
             if self._operation_watch_tasks.get(run_id) is current_task:
                 self._operation_watch_tasks.pop(run_id, None)
             if self._run_tasks.get(run_id) is current_task:
@@ -3933,12 +4630,16 @@ class NovelAgentRuntime:
     async def _cancel_draft_operation(self, operation_id: str) -> None:
         if not operation_id:
             return
-        await self.tool_adapter.invoke(
-            "chapter.draft.cancel",
-            {"operationId": operation_id},
-            "desktop-ui",
-            request_id=new_id("automation"),
-        )
+        async with asyncio.timeout(self._CANCELLATION_GRACE_SECONDS):
+            result = await self.tool_adapter.invoke(
+                "chapter.draft.cancel",
+                {"operationId": operation_id},
+                "desktop-ui",
+                request_id=new_id("automation"),
+            )
+        if not isinstance(result, dict) or result.get("status") not in {"cancelled", "cancel_requested"}:
+            raise ToolchainError("SIDE_EFFECT_UNKNOWN", "后台草稿未确认接受取消，请先到草稿中心核对结果。",
+                details={"operationId": operation_id}, retryable=False)
 
     async def _run_graph_guarded(
         self,
@@ -3974,7 +4675,7 @@ class NovelAgentRuntime:
                 pending_operation = dict(candidate)
         except asyncio.CancelledError:
             run = self.state.runs.get(run_id)
-            if run and run.status not in {"completed", "failed", "cancelled"}:
+            if run and not (run.cancelRequested and run.draftOperationId) and run.status not in {"completed", "failed", "cancelled"}:
                 await asyncio.shield(
                     self._finish_run(run, "cancelled", "run_cancelled", {"reason": "User cancelled active request"})
                 )
@@ -3988,73 +4689,84 @@ class NovelAgentRuntime:
                 else:
                     public_message = self._public_failure_message(run, error)
                     code = getattr(error, "code", None)
-                    details = error.failure.payload() if isinstance(error, AgentRequestError) else (
-                        error.payload() if isinstance(error, ToolchainError) else {}
-                    )
+                    if isinstance(error, AgentRequestError):
+                        details = error.failure.payload()
+                    elif isinstance(error, ToolchainError):
+                        details = error.payload()
+                    elif isinstance(error, AutomationInvokeError) and isinstance(error.details, dict):
+                        details = {key: value for key, value in error.details.items()
+                            if key in {"method", "requestId", "transportLayer", "transportErrorType"}}
+                    else:
+                        details = {}
                 recovery_payload = error.details.get("recovery") if isinstance(error, ToolchainError) else None
                 if isinstance(recovery_payload, dict):
                     run.recovery = AgentRecoveryDescriptor.model_validate(recovery_payload)
-                failure_payload = {**details, "message": public_message, "stage": "execution_graph", "code": code}
+                failure_payload = {**details, "message": public_message, "stage": "execution_graph", "code": code or "EXECUTION_FAILED", **(storage_failure(error) or {})}
                 plan = self.state.plans.get(run.planId)
                 step = next(
                     (item for item in (plan.steps if plan else []) if item.stepId == run.currentStepId),
                     None,
                 )
-                if step is not None and step.status not in {"completed", "failed", "skipped"}:
-                    active_tool_call = next(
-                        (
-                            event for event in reversed(run.events)
-                            if event.type == "tool_call" and event.stepId == step.stepId and event.status == "running"
-                        ),
-                        None,
-                    )
-                    if active_tool_call is not None:
-                        has_later_result = any(
-                            event.type == "tool_result"
-                            and event.stepId == step.stepId
-                            and event.toolName == active_tool_call.toolName
-                            and event.sequence > active_tool_call.sequence
-                            for event in run.events
+                if step is not None and step.status not in {"completed", "skipped"}:
+                    step.status = "failed"
+                try:
+                    if step is not None and step.status not in {"completed", "skipped"}:
+                        active_tool_call = next(
+                            (
+                                event for event in reversed(run.events)
+                                if event.type == "tool_call" and event.stepId == step.stepId and event.status == "running"
+                            ),
+                            None,
                         )
-                        if not has_later_result:
+                        if active_tool_call is not None:
+                            has_later_result = any(
+                                event.type == "tool_result"
+                                and event.stepId == step.stepId
+                                and event.toolName == active_tool_call.toolName
+                                and event.sequence > active_tool_call.sequence
+                                for event in run.events
+                            )
+                            if not has_later_result:
+                                await self._emit(
+                                    run,
+                                    "tool_result",
+                                    step_id=step.stepId,
+                                    agent=step.agent,
+                                    tool_name=active_tool_call.toolName,
+                                    status="failed",
+                                    payload={
+                                        "summary": public_message,
+                                        "code": code,
+                                        "retryable": bool(details.get("retryable")),
+                                        "transport": self.tool_transport,
+                                        **{
+                                            key: active_tool_call.payload[key]
+                                            for key in ("toolchainId", "nodeId")
+                                            if key in active_tool_call.payload
+                                        },
+                                    },
+                                )
+                        if step.toolchain is not None:
                             await self._emit(
                                 run,
-                                "tool_result",
+                                "toolchain_failed",
                                 step_id=step.stepId,
                                 agent=step.agent,
-                                tool_name=active_tool_call.toolName,
                                 status="failed",
-                                payload={
-                                    "summary": public_message,
-                                    "code": code,
-                                    "retryable": bool(details.get("retryable")),
-                                    "transport": self.tool_transport,
-                                    **{
-                                        key: active_tool_call.payload[key]
-                                        for key in ("toolchainId", "nodeId")
-                                        if key in active_tool_call.payload
-                                    },
-                                },
+                                payload={**failure_payload, "toolchain": step.toolchain.model_dump()},
                             )
-                    if step.toolchain is not None:
+                        step.status = "failed"
                         await self._emit(
                             run,
-                            "toolchain_failed",
+                            "step_failed",
                             step_id=step.stepId,
                             agent=step.agent,
                             status="failed",
-                            payload={**failure_payload, "toolchain": step.toolchain.model_dump()},
+                            payload={"title": step.title, "message": public_message, "code": code},
                         )
-                    step.status = "failed"
-                    await self._emit(
-                        run,
-                        "step_failed",
-                        step_id=step.stepId,
-                        agent=step.agent,
-                        status="failed",
-                        payload={"title": step.title, "message": public_message, "code": code},
-                    )
-                await self._emit(run, "error", payload=failure_payload)
+                    await self._emit(run, "error", payload=failure_payload)
+                except Exception as publication_error:
+                    failure_payload = {**failure_payload, **(storage_failure(publication_error) or {}), "persistenceFailed": True}
                 await self._finish_run(
                     run,
                     "failed",
@@ -4063,6 +4775,9 @@ class NovelAgentRuntime:
                 )
         finally:
             current_task = asyncio.current_task()
+            run = self.state.runs.get(run_id)
+            if current_task and run and (run.status in {"waiting_approval", "waiting_user_input"} or pending_operation is not None):
+                self._intentional_worker_exits.add(current_task)
             if self._run_tasks.get(run_id) is current_task:
                 self._run_tasks.pop(run_id, None)
             self._active_request_ids.pop(run_id, None)
@@ -4088,13 +4803,15 @@ class NovelAgentRuntime:
 
     async def _advance_execution_inner(self, graph_state: ExecutionState) -> dict[str, Any]:
         run = self.state.runs.get(graph_state["run_id"])
-        if not run:
+        if not run or run.status in {"completed", "failed", "cancelled"}:
             return {"action": "terminal"}
         plan = self.state.plans.get(run.planId)
         if not plan:
             await self._finish_run(run, "failed", "run_failed", {"message": "plan not found"})
             return {"action": "terminal"}
         if run.cancelRequested:
+            if run.draftOperationId:
+                return {"action": "terminal"}
             await self._finish_run(run, "cancelled", "run_cancelled", {"reason": "User cancelled"})
             return {"action": "terminal"}
 
@@ -4133,7 +4850,7 @@ class NovelAgentRuntime:
                     run,
                     "agent.generate_report",
                     {
-                        "goal": plan.goal,
+                        "goal": self._execution_goal(run, plan),
                         "planTitle": plan.title,
                         "role": plan.preferredRole,
                         "locale": graph_state["locale"],
@@ -4141,6 +4858,7 @@ class NovelAgentRuntime:
                         "findings": graph_state["report_findings"],
                         "approvalResponses": run.approvalResponses,
                         "draftSessionId": run.draftSessionId,
+                        "artifacts": [self._report_artifact_manifest(artifact) for artifact in run.artifacts],
                         "deliverable": plan.deliverable,
                     },
                     node_id="final_report",
@@ -4708,7 +5426,7 @@ class NovelAgentRuntime:
                         graph_state["locale"],
                         context_bundle,
                         list(toolchain_input.get("dimensions") or []),
-                        self._compile_step_skills(step),
+                        None,
                     ),
                     node_id=node_id,
                 )
@@ -4820,6 +5538,403 @@ class NovelAgentRuntime:
             "resume_response": None,
         }
 
+    async def _step_execution_hints(self, run: AgentRun, step: Any) -> SkillExecutionHints | None:
+        primary = next((ref for ref in step.skills if ref.position == "primary"), None)
+        if primary is None:
+            return None
+        try:
+            revision = self.agent_skill_service.registry.revision(primary.skillId, primary.revisionId)
+            manifest = revision.manifest
+        except AgentSkillError:
+            persisted = await self.automation.invoke("agent_skill.get", {"skillId": primary.skillId, "revisionId": primary.revisionId}, "desktop-ui")
+            manifest = (persisted or {}).get("revision", {}).get("manifest", {})
+        raw = manifest.get("executionHints")
+        if raw is None:
+            return None
+        hints = SkillExecutionHints.model_validate(raw)
+        # An auxiliary method can add global dependencies. Do not infer that it
+        # is independent just because the primary method is marked independent.
+        if any(ref.position == "auxiliary" for ref in step.skills):
+            hints = hints.model_copy(update={"crossUnitDependency": "ordered_state"})
+        return hints if hints.supports_chapter_analysis else None
+
+    async def _analyze_skill_catalog(self, run: AgentRun, plan: AgentPlan, step: Any,
+                                     graph_state: ExecutionState, source: ChapterScopeBundle,
+                                     hints: SkillExecutionHints, expert_support: dict[str, Any] | None = None) -> dict[str, Any]:
+        if (run.resumedFrom or {}).get("mode") == "retry_unconfirmed_units" and not run.resumedFrom.get("unconfirmedReconciled"):
+            await self._reconcile_unconfirmed_analysis_requests(run)
+            run.resumedFrom["unconfirmedReconciled"] = True
+            self._save()
+        closure = (graph_state.get("toolchain_state") or {}).get("completedResultsClosure")
+        if closure:
+            return await self._finalize_completed_analysis(run, plan, step, graph_state, hints, closure)
+        if any(ref.position == "auxiliary" for ref in step.skills):
+            hints = hints.model_copy(update={"crossUnitDependency": "ordered_state"})
+        locked = await self._step_skill_params(run, "agent.analyze_skill_work_unit", {})
+        compiled = locked.get("agentSkill") or {}
+        policy = await self._automation_invoke(run, "agent.get_skill_execution_policy", {
+            "goal": plan.goal, "skillPrompt": compiled.get("prompt", ""),
+        }, node_id="skill_analysis.policy")
+        required = {"maxInputBytes", "outputReserveTokens", "maxConcurrency", "maxModelCalls", "maxTotalTokens"}
+        if not isinstance(policy, dict) or not required.issubset(policy) or any(not isinstance(policy[key], int) or policy[key] < 1 for key in required):
+            raise ToolchainError("INPUT_INVALID", "模型服务未提供有效的分片执行预算，请更新应用与 Runtime。")
+        if expert_support is not None:
+            support = {key: expert_support.get(key) for key in ("narrativeSummaries", "entityContext", "plotContext", "evidence", "stateLedger")}
+            limit = policy.get("stages", {}).get("expert", {}).get("maxInputBytes", policy["maxInputBytes"])
+            if len(json.dumps(support, ensure_ascii=False).encode("utf-8")) + 6000 > limit:
+                raise ToolchainError("BUDGET_EXCEEDED", "专家所需项目资料无法在当前窗口中容纳，尚未开始收费分析。")
+        # Parent checkpoints can outlive source edits. Revalidate the full
+        # catalog before reusing any graph checkpoint or completed unit.
+        fresh_args = ChapterScopeContextInput.model_validate({
+            **source.scope.model_dump(exclude_none=True), "goal": plan.goal,
+            "representation": "catalog", "novelId": graph_state["novel_id"],
+        }).model_dump(exclude_none=True)
+        fresh = ChapterScopeBundle.model_validate(await self._tool_invoke(run, "chapter.scope_context.build", fresh_args))
+        expected_versions = [(item.chapterId, item.version, item.updatedAt) for item in source.chapters if item.target]
+        actual_versions = [(item.chapterId, item.version, item.updatedAt) for item in fresh.chapters if item.target]
+        if expected_versions != actual_versions:
+            raise ToolchainError("CONTEXT_INSUFFICIENT", "来源章节已发生变化，已停止复用旧分析结果。")
+        chapters = [{key: item.model_dump()[key] for key in
+                     ("chapterId", "volumeId", "title", "version", "updatedAt", "contentHash")}
+                    for item in source.chapters if item.target]
+        preflight_analysis(policy, len(chapters), include_expert=expert_support is not None, include_route=True)
+        owner = f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{step.stepId}"
+        routing_input = {"goal": plan.goal, "source": {"chapterCount": len(chapters),
+            "executionHints": hints.model_dump(), "operationId": step.toolchain.id}, "locale": graph_state["locale"]}
+        routing_key = fingerprint([owner, "route-v1", routing_input, chapters, [ref.model_dump() for ref in step.skills]])
+        analysis_graph = await self.skill_execution_engine.get_graph()
+        unit_store = analysis_graph.store
+        routing = await asyncio.to_thread(unit_store.result, routing_key)
+        if routing is None:
+            record = await asyncio.to_thread(unit_store.record, routing_key)
+            if not record or record["status"] != "running":
+                await asyncio.to_thread(unit_store.begin, owner, routing_key, fingerprint(routing_input),
+                    policy.get("stages", {}).get("route", {}).get("inputReserveTokens", len(json.dumps(routing_input, ensure_ascii=False).encode("utf-8"))) + policy["outputReserveTokens"], policy,
+                    policy.get("stages", {}).get("route", {}).get("maxProviderCalls", 1))
+                record = await asyncio.to_thread(unit_store.record, routing_key)
+            try:
+                routing = record.get("rawResult") or await self._invoke_skill_model(run, "agent.plan_skill_execution",
+                    {**routing_input, "executionBudget": policy.get("stages", {}).get("route")}, record["requestId"], routing_key)
+                await asyncio.to_thread(unit_store.save_raw, routing_key, routing)
+                if not isinstance(routing, dict) or routing.get("executionMode") not in {"single", "partitioned", "delegated"} or routing.get("dependency") not in {"none", "ordered", "global"}:
+                    raise ToolchainError("MODEL_OUTPUT_INVALID", "执行规划没有有效的路由与依赖说明。")
+                await asyncio.to_thread(unit_store.finish, routing_key, routing, {"executionUsage": routing.get("_executionUsage")})
+            except Exception as error:
+                if not isinstance(error, (sqlite3.Error, OSError)):
+                    await asyncio.to_thread(unit_store.fail, routing_key, error)
+                raise
+        if routing["dependency"] == "global" and step.toolchain.id != "agent_skill.style_extract":
+            return {"fallbackToBusinessChain": True, "routing": routing}
+        if routing["dependency"] != "none":
+            hints = hints.model_copy(update={"crossUnitDependency": "ordered_state"})
+        policy["executionMode"] = routing["executionMode"]
+
+        def check_cancelled() -> None:
+            if run.cancelRequested or run.status in {"cancelled", "cancelling"}:
+                raise ToolchainError("CANCELLED", "分片执行已取消。")
+
+        async def read(chapter: dict[str, Any]) -> dict[str, Any]:
+            check_cancelled()
+            raw = await self._tool_invoke(run, "chapter.scope_context.build", {
+                "novelId": graph_state["novel_id"], "kind": "current_chapter",
+                "chapterId": chapter["chapterId"], "anchorChapterId": chapter["chapterId"],
+                "goal": plan.goal, "locale": graph_state["locale"],
+                "representation": "verbatim", "processingMode": "detailed",
+                "currentContent": graph_state["current_content"] if chapter["chapterId"] == graph_state["chapter_id"] else "",
+            })
+            bundle = ChapterScopeBundle.model_validate(raw)
+            match = next((item for item in bundle.chapters if item.chapterId == chapter["chapterId"]), None)
+            if match is None:
+                raise ToolchainError("CONTEXT_INSUFFICIENT", "获准章节原文无法读取。")
+            snapshot = next((item for item in bundle.sourceSnapshot if item.chapterId == chapter["chapterId"]), None)
+            material = {**match.model_dump(), "source": snapshot.source if snapshot else "database"}
+            from .style_fidelity import fidelity_enabled, save_profile
+            if fidelity_enabled(step.skills) and step.toolchain.id == 'agent_skill.style_extract':
+                await asyncio.to_thread(save_profile, self.skill_execution_engine.state_dir, material)
+            return material
+
+        async def model(kind: str, payload: dict[str, Any], key: str) -> Any:
+            if kind == "recover":
+                method = "agent.merge_skill_analysis" if payload["sourceKind"] == "merge" else "agent.analyze_skill_work_unit"
+                return await self._recover_skill_model(method, payload["requestId"])
+            payload["locale"] = graph_state["locale"]
+            return await self._invoke_skill_model(run,
+                "agent.merge_skill_analysis" if kind == "merge" else "agent.analyze_skill_work_unit",
+                payload, payload["requestId"], key)
+
+        async def progress(payload: dict[str, Any]) -> None:
+            summary = (f"原文分析 {payload['unitIndex']}/{payload['totalUnits']}：{payload['chapterTitle']}"
+                       if payload["stage"] == "chapter" else "汇总已验证的分析结果")
+            if payload["status"] == "failed":
+                summary += f"：{payload.get('message', '工作单元失败')}"
+            await self._emit(run, "toolchain_node_started" if payload["status"] == "running" else "toolchain_node_completed",
+                step_id=step.stepId, agent=step.agent, status=payload["status"], payload={
+                    "toolchainId": step.toolchain.id, "nodeId": f"skill_unit.{payload['unitId']}",
+                    "kind": "model", "summary": summary,
+                    **payload,
+                })
+
+        concurrency = min(3, policy["maxConcurrency"]) if (hints.parallel
+            and len(chapters) >= policy.get("delegationMinChapters", 4)
+            and routing["executionMode"] == "delegated") else 1
+        execution_mode = "delegated" if concurrency > 1 else ("single" if len(chapters) <= 3 else "partitioned")
+        await self._emit(run, "toolchain_node_started", step_id=step.stepId, agent=step.agent, status="running", payload={
+            "toolchainId": step.toolchain.id, "nodeId": "skill_analysis.dispatch", "kind": "model",
+            "summary": f"获准 {len(chapters)} 章，将逐章分析原文并汇总。",
+            "executionMode": execution_mode, "plannedMode": routing["executionMode"], "reason": routing.get("reason"),
+            "maxConcurrency": concurrency, "budget": policy,
+        })
+        analyzed = await analysis_graph.run(owner=owner, chapters=chapters, goal=plan.goal,
+            skill_hash=fingerprint({"skills": [ref.model_dump() for ref in step.skills],
+                                    "editorBuffer": graph_state["current_content"]}), hints=hints, policy=policy,
+            read=read, model=model, progress=progress, check_cancelled=check_cancelled)
+        await self._emit(run, "toolchain_node_completed", step_id=step.stepId, agent=step.agent, status="completed", payload={
+            "toolchainId": step.toolchain.id, "nodeId": "skill_analysis.dispatch", "coverage": analyzed["coverage"],
+            "summary": f"已分析 {len(chapters)} 章，后续只携带有界特征与证据。",
+        })
+        from .style_fidelity import fidelity_enabled
+        if step.toolchain.id == 'agent_skill.style_extract' and fidelity_enabled(step.skills):
+            analyzed['styleProfileVersion'] = 2
+        return analyzed
+
+    def _execution_goal(self, run: AgentRun, plan: AgentPlan) -> str:
+        if (run.resumedFrom or {}).get("closureRef"):
+            return (f"{plan.goal}\n\n用户本次调整：仅用已完成且核验通过的分析结果收尾，跳过未完成及剩余章节。"
+                    "按来源实际覆盖范围编写并审核产物，不声明全书覆盖，不补造未分析章节的结论。")
+        return plan.goal
+
+    async def _finalize_completed_analysis(self, run: AgentRun, plan: AgentPlan, step: Any,
+                                          graph_state: ExecutionState, hints: SkillExecutionHints,
+                                          closure: dict[str, Any]) -> dict[str, Any]:
+        owner = f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{step.stepId}"
+        if closure.get("owner") != owner:
+            raise ToolchainError("INPUT_INVALID", "已完成结果与原任务不匹配。")
+        chapters = closure["chapters"]
+        ids = [chapter["chapterId"] for chapter in chapters]
+        fresh = ChapterScopeBundle.model_validate(await self._tool_invoke(run, "chapter.scope_context.build", {
+            "novelId": graph_state["novel_id"], "kind": "selected_chapters", "chapterIds": ids,
+            "anchorChapterId": ids[0], "representation": "catalog", "goal": plan.goal, "locale": graph_state["locale"],
+        }))
+        expected = [(chapter["chapterId"], chapter["version"], chapter["updatedAt"]) for chapter in chapters]
+        current = [(chapter.chapterId, chapter.version, chapter.updatedAt) for chapter in fresh.chapters if chapter.target]
+        if expected != current:
+            raise ToolchainError("CONTEXT_INSUFFICIENT", "冻结结果的来源章节已改变，不能使用旧分析收尾；未重新分析正文。")
+        locked = await self._step_skill_params(run, "agent.analyze_skill_work_unit", {})
+        policy = await self._automation_invoke(run, "agent.get_skill_execution_policy", {
+            "goal": plan.goal, "skillPrompt": (locked.get("agentSkill") or {}).get("prompt", ""),
+        }, node_id="skill_analysis.closure.policy")
+        if not isinstance(policy, dict) or any(not isinstance(policy.get(key), int) or policy[key] < 1 for key in (
+            "maxInputBytes", "outputReserveTokens", "maxConcurrency", "maxModelCalls", "maxTotalTokens")):
+            raise ToolchainError("INPUT_INVALID", "模型服务未提供有效的收尾预算。")
+        graph = await self.skill_execution_engine.get_graph()
+
+        def check_cancelled():
+            if run.cancelRequested or run.status in {"cancelled", "cancelling"}:
+                raise ToolchainError("CANCELLED", "结果收尾已取消。")
+
+        async def no_read(_chapter):
+            raise ToolchainError("INPUT_INVALID", "已完成结果收尾禁止重新读取章节正文。")
+
+        async def model(kind, payload, key):
+            if kind == "recover":
+                return await self._recover_skill_model("agent.merge_skill_analysis", payload["requestId"])
+            if kind != "merge":
+                raise ToolchainError("INPUT_INVALID", "已完成结果收尾禁止派发新的原文分析。")
+            payload["locale"] = graph_state["locale"]
+            return await self._invoke_skill_model(run, "agent.merge_skill_analysis", payload, payload["requestId"], key)
+
+        async def progress(payload):
+            await self._emit(run, "toolchain_node_started" if payload["status"] == "running" else "toolchain_node_completed",
+                step_id=step.stepId, agent=step.agent, status=payload["status"],
+                payload={"toolchainId": step.toolchain.id, "nodeId": f"skill_unit.{payload['unitId']}",
+                         "summary": "正在汇总冻结的已完成分析结果", **payload})
+
+        analyzed = await graph.run(owner=owner, chapters=chapters, goal=self._execution_goal(run, plan),
+            skill_hash=fingerprint({"skills": [ref.model_dump() for ref in step.skills], "editorBuffer": graph_state["current_content"]}),
+            hints=hints, policy=policy, read=no_read, model=model, progress=progress,
+            check_cancelled=check_cancelled, completed_scope=closure)
+        if closure["omittedChapters"]:
+            run.completionKind = "partial"
+        await self._emit(run, "toolchain_node_completed", step_id=step.stepId, agent=step.agent, status="completed",
+            payload={"toolchainId": step.toolchain.id, "nodeId": "skill_analysis.closure", "coverage": analyzed["coverage"],
+                     "summary": f"已按调整后的范围收尾：使用 {len(chapters)} 章分析，跳过 {len(closure['omittedChapters'])} 章。"})
+        return analyzed
+
+    async def _recover_skill_model(self, method: str, request_id: str | None) -> Any:
+        if request_id:
+            try:
+                result = await self.automation.invoke("agent.reprocess_saved_structured_output",
+                    {"modelResultRef": request_id, "sourceMethod": method}, "desktop-ui")
+                if isinstance(result, dict) and isinstance(result.get("payload"), dict):
+                    if request_id in self.state.skillRequestRefs:
+                        self.state.skillRequestRefs[request_id]["status"] = "completed"
+                        self._save()
+                    return result["payload"]
+                raise ToolchainError("MODEL_OUTPUT_INVALID", "已保存结果的恢复响应缺少有效 payload；不能据此判断原请求不存在。")
+            except Exception as error:
+                if storage_failure(error) or not isinstance(error, AutomationInvokeError):
+                    raise
+                if error.code != "MODEL_RESULT_NOT_FOUND":
+                    raise ToolchainError(error.code, str(error), details=error.details) from error
+        if request_id in self.state.skillRequestRefs:
+            self.state.skillRequestRefs[request_id]["status"] = "result_unavailable"
+            self._save()
+        raise ToolchainError("MODEL_RESULT_UNAVAILABLE", self._UNCONFIRMED_RESULT_MESSAGE,
+            details={"modelResultRef": request_id, "sourceMethod": method})
+
+    async def _reconcile_unconfirmed_analysis_requests(self, run: AgentRun) -> None:
+        base_owner = f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{run.currentStepId}"
+        closure_ref = (run.resumedFrom or {}).get("closureRef")
+        request_owner = f"{base_owner}:closure:{closure_ref}" if closure_ref else base_owner
+        pending_refs = {key: value for key, value in self.state.skillRequestRefs.items()
+            if value.get("owner") == request_owner and value.get("status") in {"prepared", "unknown", "result_unavailable"}}
+        if any(ref.get("sourceMethod") not in {"agent.plan_skill_execution", "agent.analyze_skill_work_unit", "agent.merge_skill_analysis", "agent.style_quality"}
+                for ref in pending_refs.values()):
+            raise ToolchainError("INPUT_INVALID", "未确认记录包含非只读分析请求，不能通过分片重试处理。")
+        active_ids = set().union(*self._active_request_ids.values()) if self._active_request_ids else set()
+        if active_ids.intersection(pending_refs):
+            raise ToolchainError("SIDE_EFFECT_UNKNOWN", "原分析请求仍在执行，不能同时重新请求。")
+        graph = await self.skill_execution_engine.get_graph()
+        pending = await asyncio.to_thread(graph.store.pending_requests, base_owner)
+        records = {item["requestId"]: item for item in pending}
+        await self._emit(run, "toolchain_node_started", step_id=run.currentStepId,
+            payload={"nodeId": "skill_analysis.reconcile", "summary": "正在核对未确认分片，优先复用已保存结果"})
+        reused = released = 0
+        for request_id, ref in pending_refs.items():
+            if run.cancelRequested:
+                raise ToolchainError("CANCELLED", "未确认请求核对已取消。")
+            record = records.get(request_id)
+            if record and record["hasRawResult"]:
+                ref["status"] = "completed"
+                reused += 1
+                continue
+            try:
+                raw = await self._recover_skill_model(str(ref["sourceMethod"]), request_id)
+            except ToolchainError as error:
+                if error.code != "MODEL_RESULT_UNAVAILABLE":
+                    raise
+                if record:
+                    released += int(await asyncio.to_thread(graph.store.authorize_unconfirmed_retry, record["unitKey"], request_id))
+                ref["status"] = "abandoned"
+                ref["retryAuthorizedByRunId"] = run.runId
+            else:
+                if record:
+                    await asyncio.to_thread(graph.store.save_raw, record["unitKey"], raw)
+                reused += 1
+            self._save()
+        # A reservation can precede the runtime's prepared ref and be blocked
+        # before any provider dispatch. Release those orphan reservations too.
+        if not closure_ref:
+            for record in pending:
+                if record["requestId"] not in self.state.skillRequestRefs and not record["hasRawResult"]:
+                    released += int(await asyncio.to_thread(graph.store.authorize_unconfirmed_retry,
+                        record["unitKey"], record["requestId"]))
+        await self._emit(run, "toolchain_node_completed", step_id=run.currentStepId, status="completed",
+            payload={"nodeId": "skill_analysis.reconcile", "summary": f"已找回 {reused} 个结果，允许重新请求 {released} 个未确认分片",
+                "reusedResults": reused, "authorizedRetries": released, "possibleDuplicateBilling": True})
+
+    async def _invoke_skill_model(self, run: AgentRun, method: str, params: dict[str, Any],
+                                  request_id: str, unit_key: str) -> Any:
+        if run.cancelRequested or run.status in {"cancelled", "cancelling"}:
+            raise ToolchainError("CANCELLED", "任务已取消，不再派发专家或分析请求。")
+        params = await self._step_skill_params(run, method, params)
+        known = self.state.skillRequestRefs.get(request_id)
+        if known:
+            return await self._recover_skill_model(method, request_id)
+        owner = f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{run.currentStepId}"
+        if (run.resumedFrom or {}).get("closureRef"):
+            owner += f":closure:{run.resumedFrom['closureRef']}"
+        active_ids = set().union(*self._active_request_ids.values()) if self._active_request_ids else set()
+        if any(item.get("owner") == owner and item.get("status") in {"unknown", "prepared", "result_unavailable"} and key not in active_ids
+               for key, item in self.state.skillRequestRefs.items()):
+            raise ToolchainError("SIDE_EFFECT_UNKNOWN", "同一父任务存在未核对的请求，不能通过变更执行策略重新收费运行。")
+        self.state.skillRequestRefs[request_id] = {"runId": run.runId, "stepId": run.currentStepId,
+            "owner": owner,
+            "unitKey": unit_key, "sourceMethod": method, "modelResultRef": request_id,
+            "inputHash": fingerprint(params), "status": "prepared"}
+        self._save()  # Prepared also requires reconciliation after a crash.
+        self._active_request_ids.setdefault(run.runId, set()).add(request_id)
+        try:
+            result = await self._invoke_automation_request(method, params, request_id=request_id, deadline_at=run.deadlineAt)
+            self.state.skillRequestRefs[request_id]["status"] = "completed"
+            self._model_result_refs[(run.runId, f"skill_unit.{unit_key}")] = {
+                "modelResultRef": request_id, "sourceMethod": method, "automaticRepairAttempts": 1}
+            self._save()
+            return result
+        except Exception as error:
+            code = getattr(error, "code", "NODE_FAILED")
+            self.state.skillRequestRefs[request_id]["status"] = "unknown" if code in {
+                "PROVIDER_TIMEOUT", "PROVIDER_UNAVAILABLE", "NETWORK_ERROR", "UPSTREAM_TIMEOUT", "SIDE_EFFECT_UNKNOWN"} else "failed"
+            self.state.skillRequestRefs[request_id]["error"] = str(error)[:500]
+            self._save()
+            raise
+        finally:
+            self._discard_active_request(run.runId, request_id)
+
+    async def _adaptive_expert_review(self, run: AgentRun, step: Any, request: dict[str, Any],
+                                      bundle: ChapterScopeBundle, method: str, normalizer: Callable[[Any], Any]) -> Any:
+        analyzed = bundle.skillAnalysis
+        if not analyzed:
+            raw = await self._automation_invoke(run, method, request, node_id=method)
+            return normalizer(raw)
+        engine = await self.skill_execution_engine.get_graph()
+        policy = analyzed["executionPolicy"]
+        units = []
+        for ref in analyzed["unitRefs"]:
+            record = await asyncio.to_thread(engine.store.record, ref)
+            value = await asyncio.to_thread(engine.store.result, ref)
+            if value is None or record is None:
+                raise ToolchainError("CONTEXT_INSUFFICIENT", "完整分片发现不可用，专家审核不能只使用根摘要。")
+            units.append((ref, {**value, "chapterIds": [record["metadata"]["snapshot"]["chapterId"]]}))
+        pages = expert_pages(bundle, units, int(policy.get("stages", {}).get("expert", {}).get("maxInputBytes", policy["maxInputBytes"])))
+        await self._validate_skill_sources(run, bundle.scope.model_dump(), bundle.sourceSnapshot)
+        owner = f"{run.retryRootRunId or run.retryOfRunId or run.runId}:{step.stepId}"
+        reviews = []
+        expert_result_refs = []
+        for index, page in enumerate(pages):
+            if run.cancelRequested:
+                raise ToolchainError("CANCELLED", "专家审核已取消。")
+            params = {**request, "scopeBundle": page.model_dump(exclude_none=True),
+                "executionBudget": policy.get("stages", {}).get("expert")}
+            key = fingerprint([owner, "expert-review-v2", method, params, [ref.model_dump() for ref in step.skills]])
+            cached = await asyncio.to_thread(engine.store.result, key)
+            if cached is None:
+                await self._emit_toolchain_node_started(run, step, step.toolchain, f"expert.review.{index + 1}", kind="model")
+                record = await asyncio.to_thread(engine.store.record, key)
+                raw = record.get("rawResult") if record and record["status"] == "running" else None
+                if not record or record["status"] != "running":
+                    await asyncio.to_thread(engine.store.begin, owner, key, fingerprint(params),
+                        policy.get("stages", {}).get("expert", {}).get("inputReserveTokens", len(json.dumps(params, ensure_ascii=False).encode("utf-8"))) + policy["outputReserveTokens"], policy,
+                        policy.get("stages", {}).get("expert", {}).get("maxProviderCalls", 1))
+                    record = await asyncio.to_thread(engine.store.record, key)
+                try:
+                    raw = raw or await self._invoke_skill_model(run, method, params, record["requestId"], key)
+                    await asyncio.to_thread(engine.store.save_raw, key, raw)
+                    # Business validation is performed again on the full result below.
+                    cached = verify_expert_evidence(raw, page)
+                    normalizer(cached)
+                    await asyncio.to_thread(engine.store.finish, key, cached, {"executionUsage": raw.get("_executionUsage")})
+                except Exception as error:
+                    if not isinstance(error, (sqlite3.Error, OSError)):
+                        await asyncio.to_thread(engine.store.fail, key, error)
+                    raise
+            reviews.append(cached)
+            expert_result_refs.append(key)
+        bundle.coverage.expertReviewedChapterCount = len(bundle.scope.chapterIds)
+        bundle.skillAnalysis["expertPageCount"] = len(pages)
+        bundle.skillAnalysis["expertResultRefs"] = expert_result_refs
+        bundle.skillAnalysis["candidateDecisions"] = combine_expert_pages(reviews).get("candidateDecisions", [])
+        return normalizer(combine_expert_pages(reviews))
+
+    async def _validate_skill_sources(self, run: AgentRun, scope: dict[str, Any], snapshots: list[Any]) -> None:
+        raw = await self._tool_invoke(run, "chapter.scope_context.build", {
+            **scope, "kind": "selected_chapters", "representation": "catalog", "goal": "核对已分析来源版本"})
+        fresh = ChapterScopeBundle.model_validate(raw)
+        expected = [(item.chapterId, item.version, item.updatedAt) for item in snapshots]
+        actual = [(item.chapterId, item.version, item.updatedAt) for item in fresh.chapters if item.target]
+        if expected != actual:
+            raise ToolchainError("CONTEXT_INSUFFICIENT", "分析来源已改变，已停止专家结果发布；原分析保留。")
+
     async def _advance_builtin_skill_workflow(
         self,
         run: AgentRun,
@@ -4833,6 +5948,13 @@ class NovelAgentRuntime:
         if invocation is None:
             raise ToolchainError("INPUT_INVALID", "Built-in Skill workflow has no invocation")
         stage = str(chain_state.get("stage") or "generate")
+        publication_scope = (chain_state.get('toolchainInput') or {}).get('publicationScope') or ('novel' if graph_state.get('novel_id') else 'user')
+        if invocation.id == "agent_skill.style_extract" and stage in {"evidence_review", "quality_review", "trial"}:
+            from .style_quality import advance_quality
+            return await advance_quality(self, run, plan, step, graph_state, chain_state)
+        if (invocation.id == "agent_skill.style_extract" and stage == "plan" and chain_state.get("styleAnalysisResult")
+                and not (chain_state.get("source") or {}).get("reviewedEvidence")):
+            return {"toolchain_state": {**chain_state, "stage": "evidence_review"}, "action": "continue", "resume_response": None}
 
         if invocation.id == "agent_skill.style_extract" and stage == "context":
             node_id = "style_source.read"
@@ -4861,6 +5983,7 @@ class NovelAgentRuntime:
                     "resume_response": None,
                 }
             scope_tool_input = ChapterScopeContextInput.model_validate(tool_input).model_dump(exclude_none=True)
+            scope_tool_input["representation"] = "catalog"
             await self._emit(
                 run,
                 "toolchain_node_started",
@@ -4920,7 +6043,7 @@ class NovelAgentRuntime:
             return {
                 "toolchain_state": {
                     **chain_state,
-                    "stage": "plan",
+                    "stage": "analyze",
                     "source": source.model_dump(),
                     "toolCallCount": 1,
                     "estimatedTokens": source.estimatedTokens,
@@ -4928,6 +6051,18 @@ class NovelAgentRuntime:
                 "action": "continue",
                 "resume_response": None,
             }
+
+        if invocation.id == "agent_skill.style_extract" and stage == "analyze":
+            profile = builtin_executor_profile(invocation.id, step.skills)
+            hints = STYLE_EXECUTION_HINTS if profile or not step.skills else await self._step_execution_hints(run, step)
+            if hints is None:
+                raise ToolchainError("INPUT_INVALID", "此自建 Skill 未声明可验证的章节拆分方法，无法使用内置文风执行器。")
+            analyzed = await self._analyze_skill_catalog(run, plan, step, graph_state,
+                ChapterScopeBundle.model_validate(chain_state["source"]), hints)
+            bounded = {key: analyzed[key] for key in ("sourceType", "chapterCount", "confidence", "analysis", "analysisRef", "coverage", "warnings")}
+            bounded["coverage"] = {key: value for key, value in bounded["coverage"].items() if key != "omittedChapterIds"}
+            return {"toolchain_state": {**chain_state, "stage": "evidence_review", "source": bounded, "styleAnalysisResult": analyzed},
+                    "action": "continue", "resume_response": None}
 
         if invocation.id == "agent_skill.style_extract" and stage == "plan":
             node_id = "style_pack.plan"
@@ -4943,11 +6078,11 @@ class NovelAgentRuntime:
                 run,
                 "agent.plan_style_skill_pack",
                 workflow_request(
-                    goal=plan.goal,
+                    goal=self._execution_goal(run, plan),
                     locale=graph_state["locale"],
                     user_decisions=plan.userDecisions,
                     source=chain_state.get("source") if isinstance(chain_state.get("source"), dict) else None,
-                    agent_skill=self._compile_step_skills(step),
+                    agent_skill=None,
                 ),
                 node_id=node_id,
             )
@@ -4958,22 +6093,48 @@ class NovelAgentRuntime:
                 raw_value=raw_plan,
                 normalizer=lambda value: StyleSkillPackAuthoringPlan.model_validate(value),
             )
+            from .agent_skills.pack_routing import normalize_style_routing
+            style_routing = normalize_style_routing(style_plan, source_driven=(chain_state.get('source') or {}).get('fidelityMode') == 2)
+            analyzed_source = chain_state.get("source") or {}
+            if analyzed_source.get("sourceType") == "analyzed_chapter_scope":
+                dossier = analyzed_source.get("reviewedEvidence") or {}
+                for member in style_plan.skills:
+                    supported = [f for f in dossier.get("features", []) if f["feature"] in (
+                        {"short_actions", "long_reasoning", "paragraphs", "close_pov", "dialogue", "character_voice", "observable_emotion", "diction"}
+                        if member.draftKey == "language_style" else {"show_then_explain", "hypothesis", "clues", "knowledge_gap", "chapter_end"}
+                        if member.draftKey == "suspense_release" else {"ensemble"})]
+                    if max((f["supportedChapterCount"] for f in supported), default=0) < 2:
+                        member.confidence = "low"
+                    elif member.confidence == "high":
+                        member.confidence = "medium"  # Local observations are not a validated whole-book fingerprint.
+                style_plan.sourceCoverage = {**style_plan.sourceCoverage,
+                    **({'fidelityMode': 2} if (chain_state.get('source') or {}).get('fidelityMode') == 2 else {}),
+                    "chapterCount": analyzed_source["chapterCount"],
+                    "analyzedChapterCount": analyzed_source["chapterCount"],
+                    "expertReviewedCandidateCount": dossier.get("reviewedCandidateCount", 0),
+                    "dossierRef": (chain_state.get("styleEvidenceAudit") or {}).get("dossierRef"),
+                    "analysisCoverage": analyzed_source["coverage"]}
+                coverage = analyzed_source["coverage"]
+                if coverage.get("mode") == "user_completed_results":
+                    note = (f"用户调整范围：仅覆盖 {coverage['analyzedChapterCount']}/{coverage['totalChapterCount']} 章，"
+                            f"跳过 {coverage['omittedChapterCount']} 章；不能声明全书分析完成。")
+                    style_plan.sourceCoverage["gaps"] = [*style_plan.sourceCoverage.get("gaps", []), note]
+                warnings = list(dict.fromkeys([*analyzed_source.get("warnings", []), *style_plan.warnings]))
+                style_plan.warnings = warnings if len(warnings) <= 20 else [*warnings[:19], "更多告警见来源分析和规划记录。"]
             first_path = STYLE_SKILL_MEMBER_PATHS[style_plan.skills[0].draftKey]
             workspace = await self._automation_invoke(
                 run,
                 "agent_skill.workspace.create",
                 {
                     "action": "pack",
-                    "scope": "novel" if graph_state.get("novel_id") else "user",
+                    "scope": publication_scope,
                     "sourceNovelId": graph_state.get("novel_id") or None,
                     "logicalPath": first_path,
-                    "sourceSnapshotRefs": [
-                        str(item.get("sourceId"))
-                        for item in (chain_state.get("source") or {}).get("evidence", [])
-                        if isinstance(item, dict) and item.get("sourceId")
-                    ][:50],
+                    "sourceSnapshotRefs": [str((chain_state.get("source") or {}).get("analysisRef") or ""),
+                        str((chain_state.get("styleEvidenceAudit") or {}).get("dossierRef") or "")],
                     "derivationReport": {
                         "kind": "style_skill_pack_extraction",
+                        "qualityRequired": bool(chain_state.get("styleAnalysisResult")),
                         "sourceCoverage": style_plan.sourceCoverage,
                         "omittedDimensions": style_plan.omittedDimensions,
                         "warnings": style_plan.warnings,
@@ -5001,6 +6162,7 @@ class NovelAgentRuntime:
                     **chain_state,
                     "stage": "author",
                     "stylePlan": style_plan.model_dump(),
+                    "stylePackRouting": style_routing,
                     "skillWorkspace": workspace,
                     "styleMemberIndex": 0,
                     "styleValidationAttempt": 0,
@@ -5057,8 +6219,8 @@ class NovelAgentRuntime:
                     )
                     current_document = str(current.get("contentText") or "") if isinstance(current, dict) else ""
                 authoring_goal = (
-                    "为文风 Skill Pack 编写一个独立成员。严格采用成员规划中的 stableId、标题、描述、"
-                    "guidanceMode、触发条件、支持操作、约束和方法维度；正文把方法维度展开为可执行步骤、"
+                    "为文风 Skill Pack 编写一个独立成员的正文。文件头、身份、归属、操作和角色由程序维护，不生成技术头部。"
+                    "成员规划中的描述、方法与约束是待校准材料；依据核验材料与当前诊断修订，不保留被专家否定的硬阈值。正文把方法维度展开为可执行步骤、"
                     "判断标准、证据边界与去污染规则。不要编写其他成员或 Pack。成员规划："
                     + json.dumps(member.model_dump(), ensure_ascii=False)
                 )
@@ -5067,10 +6229,11 @@ class NovelAgentRuntime:
                     "agent.generate_skill_document",
                     {
                         "goal": authoring_goal,
-                        "scope": "novel" if graph_state.get("novel_id") else "user",
+                        "scope": publication_scope,
                         "novelId": graph_state.get("novel_id") or None,
                         "locale": graph_state["locale"],
                         "creatorProfile": "builtin.style-skill-extractor.member",
+                        "contentOnly": True,
                         "targetSkillId": member.stableIdCandidate,
                         "source": {
                             "styleSource": chain_state.get("source") or {},
@@ -5085,6 +6248,12 @@ class NovelAgentRuntime:
                 content_text = str(generated.get("contentText") or "") if isinstance(generated, dict) else ""
                 if not content_text:
                     raise ToolchainError("STYLE_SKILL_DOCUMENT_EMPTY", f"{logical_path} generator returned empty text")
+                from .agent_skills.authoring import style_skill_member_document
+                try:
+                    content_text = style_skill_member_document(member, content_text,
+                        publication_scope, graph_state.get("novel_id"))
+                except ValueError as error:
+                    raise ToolchainError("STYLE_SKILL_DOCUMENT_EMPTY", str(error), details={"skillDraftId": workspace.get("draftId")}) from error
                 workspace = await self._automation_invoke(
                     run,
                     "agent_skill.workspace.write",
@@ -5128,11 +6297,15 @@ class NovelAgentRuntime:
                 },
                 "revision": {
                     "version": "1.0.0",
+                    **({"coreDraftKey": STYLE_SKILL_MEMBER_KEYS[chain_state['stylePackRouting']['coreDraftKey']]}
+                       if chain_state.get('stylePackRouting') else {}),
                     "bindings": [
                         {
                             "operationId": binding.operationId,
                             "roleId": binding.roleId,
                             "primaryDraftKey": STYLE_SKILL_MEMBER_KEYS[binding.primaryDraftKey],
+                            **({"allowedAuxiliaryDraftKeys": [STYLE_SKILL_MEMBER_KEYS[key] for key in chain_state['stylePackRouting']['auxiliaryChoices'].get(binding.operationId + ':' + binding.roleId, [])]}
+                               if chain_state.get('stylePackRouting') else {}),
                             **({"auxiliaryDraftKey": STYLE_SKILL_MEMBER_KEYS[binding.auxiliaryDraftKey]}
                                if binding.auxiliaryDraftKey else {}),
                         }
@@ -5170,6 +6343,26 @@ class NovelAgentRuntime:
             )
             if isinstance(latest_workspace, dict):
                 workspace = latest_workspace
+            # Repair software-managed metadata before the validation gate,
+            # including legacy checkpoints whose format retries are exhausted.
+            from .agent_skills.authoring import style_skill_member_document
+            style_plan = StyleSkillPackAuthoringPlan.model_validate(chain_state["stylePlan"])
+            for member in style_plan.skills:
+                logical_path = STYLE_SKILL_MEMBER_PATHS[member.draftKey]
+                document = await self._automation_invoke(run, "agent_skill.workspace.read",
+                    {"draftId": workspace["draftId"], "logicalPath": logical_path}, node_id="style_pack.metadata.read")
+                try:
+                    managed = style_skill_member_document(member, str(document.get("contentText") or ""),
+                        publication_scope, graph_state.get("novel_id"))
+                except ValueError as error:
+                    raise ToolchainError("STYLE_SKILL_WORKSPACE_NEEDS_ATTENTION", "成员正文无法恢复，草稿已保留，请修订该成员后继续。",
+                        details={"skillDraftId": workspace["draftId"], "logicalPath": logical_path}) from error
+                if managed != document.get("contentText"):
+                    workspace = await self._automation_invoke(run, "agent_skill.workspace.write", {
+                        "draftId": workspace["draftId"], "expectedVersion": workspace["version"], "logicalPath": logical_path,
+                        "mediaType": "text/markdown", "contentText": managed}, node_id="style_pack.metadata.write")
+            if chain_state.get("styleDocumentFormatVersion") != 2:
+                chain_state = {**chain_state, "styleDocumentFormatVersion": 2, "styleValidationAttempt": 0}
             validation_attempt = int(chain_state.get("styleValidationAttempt") or 0) + 1
             workspace = await self._automation_invoke(
                 run,
@@ -5186,7 +6379,7 @@ class NovelAgentRuntime:
                 return {
                     "toolchain_state": {
                         **chain_state,
-                        "stage": "compile",
+                        "stage": "quality_review" if chain_state.get("styleAnalysisResult") else "compile",
                         "skillWorkspace": workspace,
                         "styleValidationAttempt": validation_attempt,
                         "styleDiagnostics": {},
@@ -5232,6 +6425,13 @@ class NovelAgentRuntime:
             }
 
         if invocation.id == "agent_skill.style_extract" and stage == "compile":
+            if chain_state.get("styleAnalysisResult") and not chain_state.get("styleQualityReview"):
+                return {"toolchain_state": {**chain_state, "stage": "quality_review"}, "action": "continue", "resume_response": None}
+            if chain_state.get("styleAnalysisResult"):
+                from .toolchains.schemas import AgentChapterSnapshot
+                snapshots = chain_state["styleAnalysisResult"]["sourceSnapshot"]
+                await self._validate_skill_sources(run, {"novelId": graph_state["novel_id"], "chapterIds": [s["chapterId"] for s in snapshots]},
+                    [AgentChapterSnapshot.model_validate(s) for s in snapshots])
             style_plan = StyleSkillPackAuthoringPlan.model_validate(chain_state.get("stylePlan") or {})
             workspace = chain_state.get("skillWorkspace") if isinstance(chain_state.get("skillWorkspace"), dict) else {}
             latest_workspace = await self._automation_invoke(
@@ -5242,6 +6442,10 @@ class NovelAgentRuntime:
             )
             if isinstance(latest_workspace, dict):
                 workspace = latest_workspace
+            if (chain_state.get("styleQualityReview") and workspace.get("authoringInputHash")
+                    and chain_state["styleQualityReview"]["inputHash"] != workspace["authoringInputHash"]):
+                return {"toolchain_state": {**chain_state, "stage": "quality_review", "skillWorkspace": workspace},
+                    "action": "continue", "resume_response": None}
             if workspace.get("phase") != "compiled" or workspace.get("status") != "ready_for_review":
                 workspace = await self._automation_invoke(
                     run,
@@ -5249,6 +6453,7 @@ class NovelAgentRuntime:
                     {
                         "draftId": workspace.get("draftId"),
                         "expectedVersion": workspace.get("version"),
+                        "qualityReview": chain_state.get("styleQualityReview"),
                     },
                     node_id="style_pack.workspace.compile",
                 )
@@ -5286,8 +6491,24 @@ class NovelAgentRuntime:
                     "contaminationWarnings": member.contaminationWarnings,
                     "evaluationPrompt": member.evaluationPrompt,
                 })
+            analyzed_source = chain_state.get("source") or {}
+            completion_summary = f"已生成 {len(artifact_skills)} 个独立文风 Skill 成员及 Pack，成员文档已编写并通过校验，草稿待审核。"
+            if chain_state.get("styleQualityReview"):
+                completion_summary += "成员内容审核及原创场景对照试写通过；不代表所有场景的文风效果均已验证。"
+            if analyzed_source.get("sourceType") == "analyzed_chapter_scope":
+                coverage = analyzed_source.get("coverage") or {}
+                if coverage.get("mode") == "user_completed_results":
+                    completion_summary += (f"已按用户调整后的范围完成，实际覆盖 {analyzed_source['chapterCount']}/{coverage['totalChapterCount']} 章，"
+                                           f"跳过 {coverage['omittedChapterCount']} 章，未分析章节见覆盖记录。")
+                else:
+                    completion_summary += f"已分析 {analyzed_source['chapterCount']} 章正文。"
+                gap_count = (analyzed_source.get("coverage") or {}).get("evidenceGapChapterCount", 0)
+                if gap_count:
+                    completion_summary += f"其中 {gap_count} 章存在引用核验缺口，详见告警。"
+            elif analyzed_source.get("sourceType") == "model_prior":
+                completion_summary += "未读取作品正文，文风结论仅为低置信度候选。"
             output = StyleSkillPackDraftArtifact.model_validate({
-                "summary": style_plan.summary,
+                "summary": completion_summary,
                 "sourceCoverage": style_plan.sourceCoverage,
                 "skills": artifact_skills,
                 "pack": style_plan.pack.model_dump(),
@@ -5299,7 +6520,11 @@ class NovelAgentRuntime:
                 artifact_type="agent_skill_pack_draft",
                 title=output.pack.title,
                 summary=output.summary[:500],
-                content=style_skill_pack_markdown(output),
+                content=style_skill_pack_markdown(output, chain_state.get("styleQualityReview")) + (
+                    "\n\n## 本次调整的分析范围\n\n"
+                    + f"实际覆盖 {analyzed_source['chapterCount']}/{analyzed_source['coverage']['totalChapterCount']} 章。以下章节未用于本次提炼：\n\n"
+                    + "\n".join(f"- {chapter.get('title') or chapter['chapterId']}" for chapter in chain_state["completedResultsClosure"]["omittedChapters"])
+                    if chain_state.get("completedResultsClosure") else ""),
                 reference={
                     "novelId": graph_state.get("novel_id"),
                     "toolchainId": invocation.id,
@@ -5308,8 +6533,12 @@ class NovelAgentRuntime:
                 },
                 metadata={
                     "draft": output.model_dump(),
+                    "authoringPlanSummary": style_plan.summary,
+                    **({"completedResultsClosure": chain_state["completedResultsClosure"]} if chain_state.get("completedResultsClosure") else {}),
                     "skills": [skill.model_dump() for skill in step.skills],
-                    "source": chain_state.get("source") or {},
+                    "source": {**(chain_state.get("source") or {}),
+                        **({"coverage": chain_state["styleAnalysisResult"]["coverage"]} if chain_state.get("styleAnalysisResult") else {})},
+                    "qualityReview": chain_state.get("styleQualityReview"),
                     "skillDraft": persisted,
                 },
                 step_id=step.stepId,
@@ -5391,7 +6620,7 @@ class NovelAgentRuntime:
                     locale=graph_state["locale"],
                     user_decisions=plan.userDecisions,
                     source=chain_state.get("source") if isinstance(chain_state.get("source"), dict) else None,
-                    agent_skill=self._compile_step_skills(step),
+                    agent_skill=None,
                 ),
                 node_id=node_id,
             )
@@ -5468,6 +6697,36 @@ class NovelAgentRuntime:
         invocation = step.toolchain
         if invocation is None:
             raise ToolchainError("INPUT_INVALID", "Chapter scope context has no Toolchain invocation")
+
+        # User methods opt into the same generic, read-only graph. Their identity
+        # does not select a builtin authoring executor or grant additional tools.
+        if invocation.id in {"writer.range_revision_plan", "editor.range_review", "worldbuilding.range_consistency"}:
+            hints = await self._step_execution_hints(run, step)
+            if hints is not None and not chain_state.get("adaptiveFallback"):
+                if not chain_state.get("adaptiveSource"):
+                    args = ChapterScopeContextInput.model_validate(chain_state["toolchainInput"]).model_dump(exclude_none=True)
+                    args["representation"] = "catalog"
+                    raw = await self._tool_invoke(run, "chapter.scope_context.build", args)
+                    return {"toolchain_state": {**chain_state, "adaptiveSource": ChapterScopeBundle.model_validate(raw).model_dump()},
+                            "action": "continue", "resume_response": None}
+                if not chain_state.get("adaptiveSupport"):
+                    args = ChapterScopeContextInput.model_validate(chain_state["toolchainInput"]).model_dump(exclude_none=True)
+                    args["representation"] = "expert_context"
+                    raw = await self._tool_invoke(run, "chapter.scope_context.build", args)
+                    return {"toolchain_state": {**chain_state, "adaptiveSupport": ChapterScopeBundle.model_validate(raw).model_dump()},
+                            "action": "continue", "resume_response": None}
+                if not chain_state.get("adaptiveResult"):
+                    analyzed = await self._analyze_skill_catalog(run, plan, step, graph_state,
+                        ChapterScopeBundle.model_validate(chain_state["adaptiveSource"]), hints, chain_state["adaptiveSupport"])
+                    if analyzed.get("fallbackToBusinessChain"):
+                        return {"toolchain_state": {**chain_state, "adaptiveFallback": True},
+                                "action": "continue", "resume_response": None}
+                    bundle = attach_analysis(ChapterScopeBundle.model_validate(chain_state["adaptiveSupport"]), analyzed)
+                    return {"toolchain_state": {**chain_state, "adaptiveResult": analyzed, "analysisCompleted": True,
+                            "bundle": bundle.model_dump(), "nodeIndex": 1, "toolCallCount": 1, "estimatedTokens": 0},
+                            "action": "continue", "resume_response": None}
+                # Analysis is an intermediate phase. Continue through the existing
+                # RAG, role-specific review, normalization and typed publication.
 
         scope_nodes = ("scope.read",) if invocation.id == "reader.journey_review" else SCOPE_CONTEXT_NODES
         node_index = int(chain_state.get("nodeIndex") or 0)
@@ -6667,24 +7926,16 @@ class NovelAgentRuntime:
                     input_data = WorldbuildingRangeConsistencyInput.model_validate(
                         chain_state.get("toolchainInput") or {}
                     )
-                    raw_review = await self._automation_invoke(
-                        run,
-                        "agent.generate_worldbuilding_range_consistency",
-                        worldbuilding_consistency_request(
-                            plan.goal,
-                            graph_state["locale"],
-                            bundle,
-                            input_data.dimensions,
-                        ),
-                        node_id=node_id,
-                    )
-                    review = await self._normalize_model_output(
-                        run,
-                        node_id=node_id,
-                        source_method="agent.generate_worldbuilding_range_consistency",
-                        raw_value=raw_review,
-                        normalizer=lambda value: normalize_worldbuilding_consistency(value, bundle),
-                    )
+                    review_request = worldbuilding_consistency_request(plan.goal, graph_state["locale"], bundle, input_data.dimensions)
+                    if bundle.skillAnalysis:
+                        review = await self._adaptive_expert_review(run, step, review_request, bundle,
+                            "agent.generate_worldbuilding_range_consistency", lambda value: normalize_worldbuilding_consistency(value, bundle))
+                    else:
+                        raw_review = await self._automation_invoke(
+                            run, "agent.generate_worldbuilding_range_consistency", review_request, node_id=node_id)
+                        review = await self._normalize_model_output(
+                            run, node_id=node_id, source_method="agent.generate_worldbuilding_range_consistency",
+                            raw_value=raw_review, normalizer=lambda value: normalize_worldbuilding_consistency(value, bundle))
                 except Exception as error:
                     raise ToolchainError(
                         "NODE_FAILED",
@@ -6743,6 +7994,7 @@ class NovelAgentRuntime:
                     metadata={
                         "expertReport": report.model_dump(),
                         "worldbuildingConsistency": review.model_dump(),
+                        **({"skillAnalysis": bundle.skillAnalysis, "skillRefs": [ref.model_dump() for ref in step.skills]} if bundle.skillAnalysis else {}),
                         "contextStats": {
                             "toolCallCount": int(chain_state.get("toolCallCount") or 0),
                             "estimatedTokens": bundle.estimatedTokens,
@@ -6755,8 +8007,9 @@ class NovelAgentRuntime:
                 updated = {
                     **chain_state,
                     "reviewCompleted": True,
+                    **({"expertReviewCompleted": True, "artifactPublished": True} if bundle.skillAnalysis else {}),
                     "artifactId": artifact.artifactId,
-                    "output": report.model_dump(),
+                    "output": artifact.metadata.get("expertReport") or report.model_dump(),
                 }
                 await self._emit(
                     run,
@@ -6792,24 +8045,16 @@ class NovelAgentRuntime:
                 await self._emit_toolchain_node_started(run, step, invocation, node_id, kind="model")
                 try:
                     input_data = WriterRangeRevisionPlanInput.model_validate(chain_state.get("toolchainInput") or {})
-                    raw_plan = await self._automation_invoke(
-                        run,
-                        "agent.generate_writer_range_revision_plan",
-                        writer_range_revision_plan_request(
-                            plan.goal,
-                            graph_state["locale"],
-                            bundle,
-                            input_data.dimensions,
-                        ),
-                        node_id=node_id,
-                    )
-                    revision_plan = await self._normalize_model_output(
-                        run,
-                        node_id=node_id,
-                        source_method="agent.generate_writer_range_revision_plan",
-                        raw_value=raw_plan,
-                        normalizer=lambda value: normalize_writer_range_revision_plan(value, bundle),
-                    )
+                    review_request = writer_range_revision_plan_request(plan.goal, graph_state["locale"], bundle, input_data.dimensions)
+                    if bundle.skillAnalysis:
+                        revision_plan = await self._adaptive_expert_review(run, step, review_request, bundle,
+                            "agent.generate_writer_range_revision_plan", lambda value: normalize_writer_range_revision_plan(value, bundle))
+                    else:
+                        raw_plan = await self._automation_invoke(
+                            run, "agent.generate_writer_range_revision_plan", review_request, node_id=node_id)
+                        revision_plan = await self._normalize_model_output(
+                            run, node_id=node_id, source_method="agent.generate_writer_range_revision_plan",
+                            raw_value=raw_plan, normalizer=lambda value: normalize_writer_range_revision_plan(value, bundle))
                 except Exception as error:
                     raise ToolchainError(
                         "NODE_FAILED",
@@ -6868,6 +8113,7 @@ class NovelAgentRuntime:
                     metadata={
                         "expertReport": report.model_dump(),
                         "writerRevisionPlan": revision_plan.model_dump(),
+                        **({"skillAnalysis": bundle.skillAnalysis, "skillRefs": [ref.model_dump() for ref in step.skills]} if bundle.skillAnalysis else {}),
                         "contextStats": {
                             "toolCallCount": int(chain_state.get("toolCallCount") or 0),
                             "estimatedTokens": bundle.estimatedTokens,
@@ -6880,8 +8126,9 @@ class NovelAgentRuntime:
                 updated = {
                     **chain_state,
                     "reviewCompleted": True,
+                    **({"expertReviewCompleted": True, "artifactPublished": True} if bundle.skillAnalysis else {}),
                     "artifactId": artifact.artifactId,
-                    "output": report.model_dump(),
+                    "output": artifact.metadata.get("expertReport") or report.model_dump(),
                 }
                 await self._emit(
                     run,
@@ -6917,24 +8164,16 @@ class NovelAgentRuntime:
                 await self._emit_toolchain_node_started(run, step, invocation, node_id, kind="model")
                 try:
                     input_data = EditorRangeReviewInput.model_validate(chain_state.get("toolchainInput") or {})
-                    raw_review = await self._automation_invoke(
-                        run,
-                        "agent.generate_editor_range_review",
-                        editor_range_review_request(
-                            plan.goal,
-                            graph_state["locale"],
-                            bundle,
-                            input_data.dimensions,
-                        ),
-                        node_id=node_id,
-                    )
-                    review = await self._normalize_model_output(
-                        run,
-                        node_id=node_id,
-                        source_method="agent.generate_editor_range_review",
-                        raw_value=raw_review,
-                        normalizer=lambda value: normalize_editor_range_review(value, bundle),
-                    )
+                    review_request = editor_range_review_request(plan.goal, graph_state["locale"], bundle, input_data.dimensions)
+                    if bundle.skillAnalysis:
+                        review = await self._adaptive_expert_review(run, step, review_request, bundle,
+                            "agent.generate_editor_range_review", lambda value: normalize_editor_range_review(value, bundle))
+                    else:
+                        raw_review = await self._automation_invoke(
+                            run, "agent.generate_editor_range_review", review_request, node_id=node_id)
+                        review = await self._normalize_model_output(
+                            run, node_id=node_id, source_method="agent.generate_editor_range_review",
+                            raw_value=raw_review, normalizer=lambda value: normalize_editor_range_review(value, bundle))
                 except Exception as error:
                     raise ToolchainError(
                         "NODE_FAILED",
@@ -6993,6 +8232,7 @@ class NovelAgentRuntime:
                     metadata={
                         "expertReport": report.model_dump(),
                         "editorReview": review.model_dump(),
+                        **({"skillAnalysis": bundle.skillAnalysis, "skillRefs": [ref.model_dump() for ref in step.skills]} if bundle.skillAnalysis else {}),
                         "contextStats": {
                             "toolCallCount": int(chain_state.get("toolCallCount") or 0),
                             "estimatedTokens": bundle.estimatedTokens,
@@ -7005,8 +8245,9 @@ class NovelAgentRuntime:
                 updated = {
                     **chain_state,
                     "reviewCompleted": True,
+                    **({"expertReviewCompleted": True, "artifactPublished": True} if bundle.skillAnalysis else {}),
                     "artifactId": artifact.artifactId,
-                    "output": report.model_dump(),
+                    "output": artifact.metadata.get("expertReport") or report.model_dump(),
                 }
                 await self._emit(
                     run,
@@ -7808,7 +9049,7 @@ class NovelAgentRuntime:
                         graph_state["locale"],
                         draft_context,
                         input_data.reviewDimensions,
-                        self._compile_step_skills(step),
+                        None,
                     ),
                     node_id=review_node_id,
                 )
@@ -8792,6 +10033,13 @@ class NovelAgentRuntime:
                     message=str(error),
                     side_effect_unknown=False,
                 )
+                details = getattr(error, "details", {}) or {}
+                if (getattr(error, "code", None) == "NARRATIVE_STATE_EXTRACTION_FAILED"
+                        and details.get("textPersisted") is True and details.get("generationCheckpointRef")):
+                    run.recovery = AgentRecoveryDescriptor(failureKind="execution_incomplete", failedAtPhase="model_received",
+                        retryStrategy="retry_request", canRecover=True, actionLabel="重新核对章节状态",
+                        diagnosticRef=str(details["generationCheckpointRef"]))
+                    raise ToolchainError("NARRATIVE_STATE_EXTRACTION_FAILED", str(error), node_id=node_id, details=details) from error
                 raise ToolchainError("NODE_FAILED", str(error), node_id=node_id) from error
 
             run.draftSessionId = session.draftSessionId
@@ -9748,7 +10996,12 @@ class NovelAgentRuntime:
         run = self.state.runs.get(run_id)
         if not run:
             raise ValueError("runId not found")
-        self._refresh_local_recovery_capability(run)
+        self._refresh_readonly_analysis_recovery(run)
+        self._refresh_style_workspace_recovery(run)
+        self._refresh_unconfirmed_analysis_recovery(run)
+        self._refresh_completed_recovery(run)
+        if not (run.failure or {}).get("persistenceFailed"):
+            self._refresh_local_recovery_capability(run)
         plan = self.state.plans.get(run.planId)
         completed_steps = 0
         current_step_title: str | None = None
@@ -9758,7 +11011,16 @@ class NovelAgentRuntime:
                     completed_steps += 1
                 if step.stepId == run.currentStepId:
                     current_step_title = step.title
-        last_event = self.store.get_last_event(run.runId)
+        last_event = max(run.events, key=lambda event: event.sequence, default=None)
+        try:
+            persisted_event = self.store.get_last_event(run.runId)
+            if persisted_event and (not last_event or persisted_event.sequence > last_event.sequence):
+                last_event = persisted_event
+        except Exception as error:
+            if failure := storage_failure(error):
+                self._fail_live_runs_for_storage(failure)
+            if not run.failure:
+                raise
         return AgentRunStatusResult(
             runId=run.runId,
             planId=run.planId,
@@ -9786,6 +11048,7 @@ class NovelAgentRuntime:
             failureRevision=run.failureRevision,
             completionKind=run.completionKind,
             recovery=run.recovery,
+            failure=run.failure,
         )
 
     async def cancel(self, params: dict[str, Any]) -> AgentRun:
@@ -9793,48 +11056,68 @@ class NovelAgentRuntime:
         run = self.state.runs.get(run_id)
         if not run:
             raise ValueError("runId not found")
-        was_waiting_approval = run.status in {"waiting_approval", "waiting_user_input"}
-        if run.status in {"running", "waiting_approval", "waiting_user_input"}:
-            run.status = "cancelling"
-            run.cancelRequested = True
-        elif run.status == "cancelling":
-            run.cancelRequested = True
-        self._save()
+        if run.status in {"completed", "failed", "cancelled"}:
+            return run
+        run.status = "cancelling"
+        run.cancelRequested = True
+        save_error = None
+        try:
+            self._save()
+        except Exception as error:
+            save_error = error
         request_ids = list(self._active_request_ids.get(run_id) or set())
         tool_request_ids = set(self._active_tool_request_ids.get(run_id) or set())
-        operation_timer = self._operation_watch_timers.pop(run_id, None)
-        if operation_timer is not None:
-            operation_timer.cancel()
-        task = self._run_tasks.get(run_id)
-        if task and not task.done():
-            task.cancel()
-        if request_ids:
-            async def cancel_request(request_id: str) -> None:
-                try:
-                    cancel_target = self.tool_adapter if request_id in tool_request_ids else self.automation
-                    await cancel_target.cancel(request_id)
-                except Exception:
-                    # Local task cancellation remains authoritative if the upstream request already ended.
-                    pass
+        timer = self._operation_watch_timers.pop(run_id, None)
+        if timer:
+            timer.cancel()
+        worker = self._run_tasks.get(run_id)
+        if worker and not worker.done():
+            worker.cancel()
 
-            await asyncio.gather(*(cancel_request(request_id) for request_id in request_ids))
-        if run.draftOperationId and operation_timer is not None and (not task or task.done()):
-            try:
-                await self._cancel_draft_operation(run.draftOperationId)
-            except Exception:
-                pass
-            await self._finish_run(
-                run,
-                "cancelled",
-                "run_cancelled",
-                {"reason": "User cancelled durable draft operation", "operationId": run.draftOperationId},
-            )
-        if was_waiting_approval and (not task or task.done()):
-            run.pendingApproval = None
-            if run.pendingUserInput:
-                self.state.pendingUserInputs.pop(run.pendingUserInput.requestId, None)
-            run.pendingUserInput = None
-            await self._finish_run(run, "cancelled", "run_cancelled", {"reason": "User cancelled pending approval"})
+        async def cancel_request(request_id: str) -> bool:
+            target = self.tool_adapter if request_id in tool_request_ids else self.automation
+            return await target.cancel(request_id)
+
+        upstream = [asyncio.create_task(cancel_request(request_id)) for request_id in request_ids]
+        operation = asyncio.create_task(self._cancel_draft_operation(run.draftOperationId)) if run.draftOperationId else None
+        tasks = [*upstream, *([operation] if operation else []), *([worker] if worker else [])]
+        pending = set()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=self._CANCELLATION_GRACE_SECONDS)
+        outcomes = {}
+        for task in tasks:
+            if task in pending:
+                # Do not await a cancellation-resistant cleanup coroutine forever.
+                task.cancel()
+                task.add_done_callback(lambda item: None if item.cancelled() else item.exception())
+            elif not task.cancelled():
+                try:
+                    outcomes[task] = task.result()
+                except Exception as error:
+                    outcomes[task] = error
+        if run.status in {"completed", "failed", "cancelled"}:
+            return run
+        if run.pendingUserInput:
+            self.state.pendingUserInputs.pop(run.pendingUserInput.requestId, None)
+        run.pendingApproval = None
+        run.pendingUserInput = None
+        uncertain_operation = operation and (operation in pending or operation.cancelled() or isinstance(outcomes.get(operation), Exception))
+        if save_error:
+            await self._finish_run(run, "failed", "run_failed", storage_failure(save_error) or {
+                "code": "PERSISTENCE_FAILED", "message": "取消已请求，但无法保存状态，请检查数据目录。", "retryable": False})
+        elif uncertain_operation or (worker and worker in pending):
+            await self._finish_run(run, "failed", "run_failed", {
+                "code": "SIDE_EFFECT_UNKNOWN" if run.draftOperationId or request_ids else "CANCELLATION_TIMEOUT",
+                "message": "取消等待超时或后台未确认停止。请检查任务与草稿中心的已有结果，不要直接重复启动。",
+                "retryable": False, "operationId": run.draftOperationId, "cancellationUnconfirmed": True,
+            })
+        else:
+            upstream_confirmed = all(outcomes.get(task) is True for task in upstream)
+            await self._finish_run(run, "cancelled", "run_cancelled", {
+                "reason": "User cancelled", "operationId": run.draftOperationId,
+                "upstreamCancellationConfirmed": upstream_confirmed,
+                **({"message": "本地执行已停止；上游停止状态未确认，请先检查已有结果。"} if not upstream_confirmed else {}),
+            })
         return run
 
     def _validate_user_input_answers(
@@ -10232,7 +11515,7 @@ class NovelAgentRuntime:
                 )
             self._save()
             resume_task = asyncio.create_task(self._run_graph_guarded(run_id, resume=compatibility_response))
-            self._run_tasks[run_id] = resume_task
+            self._track_run_task(run_id, resume_task)
             resolution = AgentUserInputResolution(
                 requestId=request_id,
                 inputSessionId=request.inputSessionId,
@@ -10379,7 +11662,7 @@ class NovelAgentRuntime:
             )
         self._save()
         resume_task = asyncio.create_task(self._run_graph_guarded(run_id, resume=response))
-        self._run_tasks[run_id] = resume_task
+        self._track_run_task(run_id, resume_task)
         return run
 
     async def event_stream(self, run_id: str, after_sequence: int = 0):
@@ -10416,11 +11699,18 @@ class NovelAgentRuntime:
             status=status,
             payload=payload or {},
         )
-        persisted = await self.event_bus.append(event)
-        run.events.append(persisted)
-        if len(run.events) > 50:
-            run.events = run.events[-50:]
-        self._save()
+        try:
+            persisted = await self.event_bus.append(event)
+            run.events.append(persisted)
+            if len(run.events) > 50:
+                run.events = run.events[-50:]
+            self._save()
+        except Exception as error:
+            if run.status not in {"completed", "failed", "cancelled"}:
+                await self._finish_run(run, "failed", "run_failed", storage_failure(error) or {
+                    "code": "EVENT_PUBLICATION_FAILED", "message": "无法保存执行记录，任务已停止。请检查应用日志。", "retryable": False,
+                })
+            raise
         return persisted
 
     async def _publish_artifact(
@@ -10438,6 +11728,9 @@ class NovelAgentRuntime:
         agent=None,
         tool_name: str | None = None,
     ) -> AgentArtifact:
+        if metadata and metadata.get("skillAnalysis") and isinstance(metadata.get("expertReport"), dict):
+            report = ExpertReportPayload.model_validate(metadata["expertReport"])
+            await self._validate_skill_sources(run, report.scope.model_dump(), report.sourceSnapshot)
         normalized_reference = reference or {}
         existing = next(
             (
@@ -10460,15 +11753,21 @@ class NovelAgentRuntime:
             metadata=metadata or {},
         )
         run.artifacts.append(artifact)
-        await self._emit(
-            run,
-            "artifact_created",
-            step_id=step_id,
-            agent=agent,
-            tool_name=tool_name,
-            status="completed",
-            payload={"artifact": artifact.model_dump()},
-        )
+        try:
+            await self._emit(
+                run,
+                "artifact_created",
+                step_id=step_id,
+                agent=agent,
+                tool_name=tool_name,
+                status="completed",
+                payload={"artifact": artifact.model_dump()},
+            )
+        except Exception as error:
+            if metadata and metadata.get("skillAnalysis") and metadata.get("expertReport"):
+                raise ToolchainError("NODE_FAILED", "专家结果已保存，产物发布失败；恢复时复用原结果。",
+                    node_id="expert.artifact_publish", retryable=True) from error
+            raise
         return artifact
 
     async def _publish_scope_audit_child(
@@ -10566,8 +11865,43 @@ class NovelAgentRuntime:
         event_type,
         payload: dict[str, Any],
     ) -> None:
+        if run.runId in self._terminal_notified_runs:
+            return
+        self._terminal_notified_runs.add(run.runId)
         if final_status == "failed":
+            plan = self.state.plans.get(run.planId)
+            if plan:
+                for step in plan.steps:
+                    if step.stepId == run.currentStepId and step.status not in {"completed", "skipped"}:
+                        step.status = "failed"
             run.failureRevision += 1
+            if payload.get("code") == "STYLE_SKILL_WORKSPACE_NEEDS_ATTENTION" and self._style_workspace_checkpoint_can_recover(run):
+                run.recovery = AgentRecoveryDescriptor(failureKind="local_transform_failed", failedAtPhase="model_received",
+                    retryStrategy="retry_request", canRecover=True, recoveryRevision=run.failureRevision,
+                    actionLabel="修复草稿并继续", diagnosticRef=f"style_workspace_{run.runId}_{run.failureRevision}")
+            if payload.get("code") == "MODEL_RESULT_UNAVAILABLE" and self._analysis_checkpoint_can_recover(run):
+                run.recovery = self._unconfirmed_analysis_recovery(run)
+            if (payload.get("code") in self._READONLY_TRANSPORT_FAILURE_CODES and self._has_unconfirmed_readonly_request(run)
+                    and self._analysis_checkpoint_can_recover(run)):
+                run.recovery = self._unconfirmed_analysis_recovery(run)
+                payload = {**payload, "message": self._UNCONFIRMED_TRANSPORT_MESSAGE}
+            if (run.recovery is None and payload.get("code") in self._READONLY_CHECKPOINT_RETRY_CODES
+                    and self._analysis_checkpoint_can_recover(run)):
+                run.recovery = AgentRecoveryDescriptor(
+                    failureKind=("persistence_failed" if payload["code"] == "STORAGE_BUSY" else
+                                 "transport" if payload["code"] == "SIDE_EFFECT_UNKNOWN" or payload["code"] in self._READONLY_TRANSPORT_FAILURE_CODES else
+                                 "model_output_truncated" if payload["code"] == "MODEL_OUTPUT_TRUNCATED" else "model_output_invalid"),
+                    failedAtPhase="model_pending", retryStrategy="retry_request", canRecover=True,
+                    recoveryRevision=run.failureRevision, actionLabel="从检查点继续",
+                    diagnosticRef=f"analysis_checkpoint_{run.runId}_{run.failureRevision}",
+                )
+            if self._can_finalize_completed(run.model_copy(update={"status": "failed"})):
+                if run.recovery:
+                    run.recovery = run.recovery.model_copy(update={"canFinalizeCompleted": True})
+                else:
+                    run.recovery = AgentRecoveryDescriptor(failureKind="execution_incomplete", failedAtPhase="model_received",
+                        retryStrategy="none", canRecover=False, canFinalizeCompleted=True, recoveryRevision=run.failureRevision,
+                        diagnosticRef=f"completed_results_{run.runId}_{run.failureRevision}")
             if any(artifact.status in {"ready", "committed"} for artifact in run.artifacts):
                 run.completionKind = "partial"
             payload = {**payload, "failureRevision": run.failureRevision}
@@ -10576,9 +11910,53 @@ class NovelAgentRuntime:
             "completionKind": run.completionKind,
             **({"recovery": run.recovery.model_dump()} if run.recovery else {}),
         }
-        await self._emit(run, event_type, status=final_status, payload=payload)
-        run.status = final_status
-        self._save()
+        def prepare_terminal(terminal: AgentRunEvent) -> None:
+            # No await between live status, event snapshot and state persistence.
+            # Subscribers receive success only after both durable writes succeed.
+            run.status = final_status
+            run.failure = payload if final_status == "failed" else None
+            run.events = [*run.events, terminal][-50:]
+
+        final_run = run.model_copy(update={"status": final_status, "failure": payload if final_status == "failed" else None})
+        snapshot = self.state.model_copy(update={"runs": {**self.state.runs, run.runId: final_run}})
+
+        try:
+            terminal = self.store.commit_terminal(snapshot, AgentRunEvent(
+                eventId=new_id("evt"), runId=run.runId, planId=run.planId, threadId=run.threadId,
+                type=event_type, status=final_status, payload=payload,
+            ))
+            # The short terminal transaction uses the same synchronous storage
+            # boundary as _save, so another state save cannot race its snapshot.
+            prepare_terminal(terminal)
+            await self.event_bus.publish(terminal)
+        except Exception as error:
+            failure = storage_failure(error) or {
+                "code": "TERMINAL_PUBLICATION_FAILED", "message": "无法保存任务结束状态，任务已停止。请检查应用日志和数据目录。",
+                "retryable": False, "persistenceFailed": True,
+            }
+            if final_status != "failed":
+                run.failureRevision += 1
+            run.status = "failed"
+            run.failure = {**failure, "failureRevision": run.failureRevision,
+                "originalFailure": payload if final_status == "failed" else None}
+            if storage_failure(error):
+                self._fail_live_runs_for_storage(failure)
+            if any(artifact.status in {"ready", "committed"} for artifact in run.artifacts):
+                run.completionKind = "partial"
+            run.failure["completionKind"] = run.completionKind
+            if run.recovery:
+                run.failure["recovery"] = run.recovery.model_dump()
+            # Journal-only failure may still allow the snapshot to store the
+            # corrected state. Never advertise completion if either write fails.
+            try:
+                self.store.save(self.state)
+            except Exception:
+                pass
+            terminal = await self.event_bus.publish_terminal(AgentRunEvent(
+                eventId=new_id("evt"), runId=run.runId, planId=run.planId, threadId=run.threadId,
+                type="run_failed", status="failed", payload=run.failure,
+            ), max((event.sequence for event in run.events), default=0))
+            run.events = [*run.events, terminal][-50:]
 
     async def _invoke_tool(
         self,
@@ -10689,7 +12067,7 @@ class NovelAgentRuntime:
         raise ValueError(f"Unsupported Agent tool mapping: {tool_name}")
 
     async def _tool_invoke(self, run: AgentRun, method: str, params: dict[str, Any]) -> Any:
-        normalized_params = normalize_tool_arguments(params)
+        normalized_params = normalize_tool_arguments(await self._step_skill_params(run, method, params))
         if method == "chapter.generate_draft":
             return await self._durable_chapter_draft_invoke(run, normalized_params)
         definition = AGENT_TOOL_BY_NAME.get(method)
@@ -10697,23 +12075,13 @@ class NovelAgentRuntime:
             return await self._side_effect_tool_invoke(run, method, normalized_params)
 
         async def invoke_adapter(request_id: str) -> Any:
-            try:
-                return await self.tool_adapter.invoke(
-                    method,
-                    normalized_params,
-                    "desktop-ui",
-                    request_id=request_id,
-                    deadline_at=run.deadlineAt,
-                )
-            except TypeError as error:
-                if "unexpected keyword argument" not in str(error):
-                    raise
-                return await self.tool_adapter.invoke(
-                    method,
-                    normalized_params,
-                    "desktop-ui",
-                    request_id=request_id,
-                )
+            return await self.tool_adapter.invoke(
+                method,
+                normalized_params,
+                "desktop-ui",
+                request_id=request_id,
+                deadline_at=run.deadlineAt,
+            )
 
         return await self._retryable_request_invoke(
             run,
@@ -10814,6 +12182,22 @@ class NovelAgentRuntime:
             return record.result
         if record.status in {"in_flight", "unknown"}:
             raise SideEffectResultUnknown("chapter.generate_draft", operation_key)
+        if (record.status == "failed" and run.retryOfRunId and (record.error or {}).get("code") == "NARRATIVE_STATE_EXTRACTION_FAILED"
+                and (record.error or {}).get("textPersisted") is True and (record.error or {}).get("generationCheckpointRef")):
+            operation_id = str((record.result or {}).get("operationId") or (record.error or {}).get("operationId") or "")
+            if not operation_id:
+                raise DraftOperationFailed("INVALID_OPERATION_RECEIPT", "章节状态核对缺少原 Operation 回执。", operation_key)
+            observed = await self._get_draft_operation_status(run, operation_id)
+            if observed.get("status") == "definitive_failed" and (observed.get("error") or {}).get("code") == "NARRATIVE_STATE_EXTRACTION_FAILED":
+                retried = await self._invoke_automation_request("chapter.draft.retry", {
+                    "operationId": operation_id, "expectedVersion": observed["version"],
+                }, request_id=new_id("automation"), deadline_at=run.deadlineAt)
+            elif observed.get("status") in {"queued", "running_generation", "retry_wait", "running_postprocess", "committing", "succeeded"}:
+                # A retry receipt may be lost while the original Operation proceeds.
+                retried = observed
+            else:
+                raise DraftOperationFailed("INVALID_STATE", "原章节任务尚未确认可核对状态。", operation_id)
+            record = self.store.mark_invocation_operation_retried(operation_key, retried)
         if record.status in {"failed", "reconciled_absent"}:
             code = str((record.error or {}).get("code") or "DRAFT_OPERATION_FAILED")
             message = str((record.error or {}).get("message") or "章节草稿任务此前已明确失败。")
@@ -11193,6 +12577,9 @@ class NovelAgentRuntime:
 
     @staticmethod
     def _public_failure_message(run: AgentRun, error: Exception) -> str:
+        infrastructure = storage_failure(error)
+        if infrastructure:
+            return infrastructure["message"]
         if run.recovery and run.recovery.actionLabel == "重试审校" and run.draftSessionId:
             return f"正文已保存，审校未完成。可重试审校，无需重新生成正文。原因：{error}"
         if run.recovery and run.recovery.failureKind == "model_output_invalid":
@@ -11300,6 +12687,7 @@ class NovelAgentRuntime:
         *,
         node_id: str | None = None,
     ) -> Any:
+        params = await self._step_skill_params(run, method, params)
         effective_node_id = node_id or method
         owner_id = run.runId if run else "request"
         pending_key = f"{owner_id}:{effective_node_id}"
@@ -11560,7 +12948,8 @@ class NovelAgentRuntime:
             payload = result["payload"]
             snapshot["payload"] = {
                 key: payload[key]
-                for key in ("chapterId", "generatedText", "content")
+                for key in ("chapterId", "generatedText", "content", "narrativeStateDelta",
+                            "warnings", "usedContext", "contextSnapshot", "consistency")
                 if key in payload
             }
         return snapshot
@@ -11586,6 +12975,44 @@ class NovelAgentRuntime:
         if isinstance(result, list):
             return f"{tool_name} returned {len(result)} items"
         return f"{tool_name} completed"
+
+    @staticmethod
+    def _report_artifact_manifest(artifact: AgentArtifact) -> dict[str, Any]:
+        manifest = {"artifactId": artifact.artifactId, "type": artifact.type,
+                    "title": artifact.title, "status": artifact.status, "reference": artifact.reference}
+        if artifact.type == "chapter_draft_batch":
+            drafts = artifact.metadata.get("generatedDrafts") or []
+            sources = {source["chapterId"]: source for draft in drafts for source in draft.get("contextSources", []) if source.get("chapterId")}
+            manifest["writingDelivery"] = {
+                "generatedCount": len(drafts), "contextChapterCount": len(sources),
+                "contextSources": list(sources.values())[:30],
+                "warnings": list(dict.fromkeys(str(warning) for draft in drafts for warning in draft.get("warnings", []))),
+                "checks": [draft.get("consistency", {}) for draft in drafts],
+                "semanticReviewCompleted": False, "styleReviewCompleted": False,
+                "stateVerifiedCount": sum(bool(draft.get("narrativeStateDelta")) for draft in drafts),
+                "contextEvidenceAvailable": bool(sources),
+            }
+        if artifact.type == "agent_skill_pack_draft":
+            draft = artifact.metadata.get("draft") or {}
+            members = draft.get("skills") or []
+            source = artifact.metadata.get("source") or {}
+            coverage = source.get("coverage") if isinstance(source.get("coverage"), dict) else {}
+            manifest["skillDelivery"] = {
+                "memberCount": len(members),
+                "authoredMemberCount": sum(bool(str(item.get("instructions") or "").strip()) for item in members),
+                "sourceType": source.get("sourceType"),
+                "chaptersRead": source.get("chapterCount", 0) if source.get("sourceType") == "analyzed_chapter_scope" else 0,
+                "draftStatus": (artifact.metadata.get("skillDraft") or {}).get("status"),
+                "contentReviewPassed": (artifact.metadata.get("qualityReview") or {}).get("status") == "passed",
+                "applicationTrialsCompleted": len((artifact.metadata.get("qualityReview") or {}).get("trials", {})),
+                "qualityLimitation": (artifact.metadata.get("qualityReview") or {}).get("limitation"),
+                **({"evidenceGapChapterCount": coverage["evidenceGapChapterCount"]}
+                   if coverage.get("evidenceGapChapterCount") else {}),
+                **({"completionMode": "use_completed_results", "totalChapterCount": coverage["totalChapterCount"],
+                    "omittedChapterCount": coverage["omittedChapterCount"]}
+                   if coverage.get("mode") == "user_completed_results" else {}),
+            }
+        return manifest
 
     def _compact_report_result(self, result: Any, depth: int = 0) -> Any:
         if depth >= 3:

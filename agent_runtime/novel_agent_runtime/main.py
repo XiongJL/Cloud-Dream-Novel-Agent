@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from .automation import AutomationClient
 from .agent_skills.errors import AgentSkillError
+from .system_errors import storage_failure
 from .events import AgentEventBus, serialize_sse_event
 from .retry import AgentRequestError
 from .runtime import NovelAgentRuntime
@@ -67,7 +68,7 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
             "code": "OK",
             "message": "healthy",
             "data": {
-                "capabilities": ["agent.roles", "agent.skills", "agent.skill.resolve", "agent.skill.preview", "agent.skill.author", "agent.skill.drafts", "agent.skill.draft", "agent.skill.commit", "agent.skill.discard", "agent.chat", "agent.recover_chat", "agent.retry_chat_summary", "agent.delete_chat_context", "agent.plan", "agent.register_plan", "agent.revise_plan", "agent.execute_plan", "agent.retry_run", "agent.revise_draft", "agent.regenerate_batch", "agent.inspect_side_effect", "agent.reconcile_side_effect", "agent.run_status", "agent.cancel", "agent.submit_approval", "agent.submit_user_input", "agent.dismiss_user_input", "agent.operation_completed", "agent.events"],
+                "capabilities": ["agent.roles", "agent.skills", "agent.skill.packs", "agent.skill.visibility", "agent.skill.pack", "agent.skill.pack.preview", "agent.skill.pack.default.get", "agent.skill.pack.default.set", "agent.skill.resolve", "agent.skill.preview", "agent.skill.author", "agent.skill.drafts", "agent.skill.draft", "agent.skill.commit", "agent.skill.discard", "agent.chat", "agent.recover_chat", "agent.retry_chat_summary", "agent.delete_chat_context", "agent.plan", "agent.register_plan", "agent.revise_plan", "agent.execute_plan", "agent.retry_run", "agent.revise_draft", "agent.regenerate_batch", "agent.inspect_side_effect", "agent.reconcile_side_effect", "agent.run_status", "agent.cancel", "agent.submit_approval", "agent.submit_user_input", "agent.dismiss_user_input", "agent.operation_completed", "agent.events"],
                 "toolTransport": runtime.tool_transport,
             },
         }
@@ -102,12 +103,30 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
                 data = runtime.roles(params, context)
             elif method == "agent.skills":
                 data = await runtime.skills(params, context)
+            elif method == 'agent.skill.packs':
+                data = await runtime.skill_packs(params, context)
+            elif method == 'agent.skill.pack':
+                data = await runtime.skill_pack(params, context)
+            elif method == 'agent.skill.pack.preview':
+                data = await runtime.preview_skill_pack(params, context)
+            elif method == 'agent.skill.pack.default.get':
+                data = await runtime.skill_pack_default(params, context)
+            elif method == 'agent.skill.pack.default.set':
+                data = await runtime.skill_pack_default(params, context, write=True)
+            elif method == 'agent.skill.visibility.preview':
+                data = await runtime.skill_visibility(params)
+            elif method == 'agent.skill.visibility.set':
+                data = await runtime.skill_visibility(params, write=True)
+            elif method == 'agent.skill.draft.publication.set':
+                data = await runtime.skill_visibility(params, write=True, draft=True)
             elif method == "agent.skill.resolve":
                 data = await runtime.resolve_skill(params)
             elif method == "agent.skill.preview":
                 data = await runtime.preview_skill(params)
             elif method == "agent.skill.author":
                 data = await runtime.author_skill(params, context)
+            elif method == "agent.skill.revise":
+                data = await runtime.revise_skill(params, context)
             elif method == "agent.skill.drafts":
                 data = await runtime.list_skill_drafts(params, context)
             elif method == "agent.skill.draft":
@@ -144,6 +163,8 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
                 data = await runtime.reconcile_side_effect(params, context)
             elif method == "agent.run_status":
                 data = runtime.run_status(params)
+            elif method == "agent.report_system_failure":
+                data = await runtime.report_system_failure(params)
             elif method == "agent.cancel":
                 data = await runtime.cancel(params)
             elif method == "agent.submit_approval":
@@ -199,6 +220,9 @@ def build_app(runtime: NovelAgentRuntime, token: str | None) -> FastAPI:
                     "type": "request_failed", "stage": "finalization",
                     "displayName": str(error), "status": "failed",
                 })
+            failure = storage_failure(error)
+            if failure:
+                return {"ok": False, "code": failure["code"], "message": failure["message"], "data": failure}
             return {"ok": False, "code": "AGENT_RUNTIME_ERROR", "message": str(error)}
         finally:
             if request_id and active_requests.get(request_id) is current_task:

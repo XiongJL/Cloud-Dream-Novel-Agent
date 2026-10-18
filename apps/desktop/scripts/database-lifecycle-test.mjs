@@ -151,6 +151,23 @@ try {
     const duplicateVersionRows = await duplicateClient.$queryRawUnsafe('PRAGMA user_version');
     assert.equal(Number(duplicateVersionRows[0].user_version), 1);
     await duplicateClient.$disconnect();
+    const visibilityPath = path.join(tempRoot, 'visibility-v2.db');
+    const visibilityClient = new PrismaClient({datasources: {db: {url: `file:${visibilityPath}`}}});
+    try {
+        await visibilityClient.$executeRawUnsafe('CREATE TABLE AgentMessage (id TEXT PRIMARY KEY, conversationId TEXT NOT NULL, sequence INTEGER NOT NULL)');
+        for (const table of ['AgentSkill', 'AgentSkillPack', 'AgentSkillDraft']) await visibilityClient.$executeRawUnsafe(`CREATE TABLE ${table} (id TEXT PRIMARY KEY, scope TEXT NOT NULL)`);
+        await visibilityClient.$executeRawUnsafe("INSERT INTO AgentSkill VALUES ('preserved', 'novel')");
+        await visibilityClient.$executeRawUnsafe('PRAGMA user_version=1');
+        await lifecycle.runDatabaseMigrations({database: visibilityClient, databasePath: visibilityPath, userDataPath: tempRoot, migrations: [migration], expectedVersion: 2, initialDatabase: false});
+        const upgraded = await lifecycle.runDatabaseMigrations({database: visibilityClient, databasePath: visibilityPath, userDataPath: tempRoot, migrations: DATABASE_MIGRATIONS, expectedVersion: 3, initialDatabase: false});
+        assert.deepEqual(upgraded.applied, ['3:skill-visibility-metadata']);
+        const preserved = await visibilityClient.$queryRawUnsafe('SELECT * FROM AgentSkill');
+        assert.equal(preserved[0].id, 'preserved'); assert.equal(preserved[0].scope, 'novel'); assert.equal(Number(preserved[0].visibilityVersion), 1);
+        const fields = await visibilityClient.$queryRawUnsafe('PRAGMA table_info(AgentSkillDraft)');
+        assert.ok(fields.some(c => c.name === 'publicationVersion'));
+        const repeat = await lifecycle.runDatabaseMigrations({database: visibilityClient, databasePath: visibilityPath, userDataPath: tempRoot, migrations: DATABASE_MIGRATIONS, expectedVersion: 3, initialDatabase: false});
+        assert.deepEqual(repeat.applied, []);
+    } finally {await visibilityClient.$disconnect();}
     console.log('database lifecycle tests passed');
 } finally {
     await fs.rm(tempRoot, { recursive: true, force: true });

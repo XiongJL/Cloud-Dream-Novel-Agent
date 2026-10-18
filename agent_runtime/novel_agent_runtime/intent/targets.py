@@ -198,14 +198,75 @@ _CHAPTER_RANGE = re.compile(
 )
 
 
-def extract_style_work_title(message: str) -> str | None:
+def _new_chapter_target(message: str, catalog: list[dict[str, Any]]) -> ResolvedIntentTarget | None:
+    """Resolve a destination ordinal separately from its existing source anchor.
+
+    Explicit ordinal creation is unambiguous. For the compact Arabic shorthand
+    without 第, only the immediate next ordinal outside the supported 1..10
+    batch-count range is inferred. Explicit batch/quantity wording stays a count.
+    Never turn a missing arbitrary chapter into permission to write the open one.
+    """
+    from .rules import _is_negated, _mask_non_requested_draft_language
+    text = _mask_non_requested_draft_language(message)
+    match = re.search(
+        rf"(?:新建|新增|创建|新写|开始写|开始创作)\s*(?P<ordinal>第\s*){{1,2}}(?P<number>{_CHAPTER_NUMBER})\s*章",
+        text,
+    )
+    explicit = match is not None
+    if not match:
+        match = re.search(r"(?:新建|新增|创建)\s*(?P<number>\d+)\s*章", text)
+        if not match or re.search(r"(?:连续|批量|一共|总共)", text[:match.end()]):
+            return None
+    if _is_negated(text, match.start()) or _CHAPTER_RANGE.search(text):
+        return None
+    prefix = text[:match.start()]
+    clause = re.split(r"[，,。；;\n]", prefix)[-1]
+    if re.search(r"(?:为什么|怎么|如何|解释|分析|讨论)", clause):
+        return None
+    if any(prefix.count(left) > prefix.count(right) for left, right in [('“', '”'), ('「', '」'), ('『', '』'), ('《', '》')]) or prefix.count('"') % 2:
+        return None
+    ordinal = _positive_number(match['number'])
+    if not ordinal:
+        return None
+    if not explicit and ordinal <= 10:
+        return None
+    if not catalog:
+        return ResolvedIntentTarget(selector="new_chapter_ordinal", source="user_message")
+    if ordinal != len(catalog) + 1:
+        description = (
+            f"第{ordinal}章已存在，不能按新章重复创建。"
+            if ordinal <= len(catalog)
+            else f"当前目录共有{len(catalog)}章，新章应为第{len(catalog) + 1}章，不能直接跳到第{ordinal}章。若指批量数量，请使用“连续新写N章”（每批最多10章）。"
+        )
+        return ResolvedIntentTarget(selector="new_chapter_ordinal_conflict", label=description, source="user_message")
+    anchor = _target(catalog[-1], "new_chapter_ordinal", "user_message")
+    return anchor.model_copy(update={"label": f"新建第{ordinal}章（续写锚点：{anchor.label}）"})
+
+
+def extract_style_work_title(message: str, *, include_project_title: bool = False) -> str | None:
     """Return a quoted work title only when the request is a style extraction.
 
     Book titles and chapter titles use the same Chinese quotation marks.  A
     style-extraction request such as ``提炼《十日终焉》的文风`` must therefore
     not enter the chapter-target resolver merely because it contains ``《》``.
     """
+    # Renderer appends past turns to planning goals for understanding only.
+    # A book mentioned in that history must not change this turn's source.
+    message = message.split("\n\n会话背景（仅用于理解当前任务）：\n", 1)[0].strip()
     normalized = message.lower()
+    source_words = re.sub(r"《[^》]+》", "", normalized)
+    source_words = re.sub(
+        r"(?:不要|无需|不用|不必|不使用|不读取|忽略|排除)[^，,。；;\n]{0,40}"
+        r"(?:当前|本书|本小说|本项目|已导入|已上传)[^，,。；;\n]{0,40}",
+        "", source_words,
+    )
+    if not include_project_title and re.search(
+        r"(?:当前|选中|选定|已选择|本书|本小说|本项目|已导入|已上传).{0,40}"
+        r"(?:样本|正文|章节|小说|作品)|(?:当前样本|本书|本小说|本项目)|"
+        r"(?:提供的|附件中的|导入的|上传的).{0,20}(?:样本|正文|小说|作品)",
+        source_words,
+    ):
+        return None
     style_markers = (
         "提炼文风", "抽取文风", "文风 skill", "语言风格 skill",
         "风格技能包", "style extraction", "writing style skill",
@@ -228,10 +289,16 @@ def resolve_intent_chapter_target(
     editor_volume_id: str | None = None,
 ) -> ResolvedIntentTarget | None:
     """Resolve user-facing chapter references against a renderer-provided ordered catalog."""
+    message = message.split("\n\n会话背景（仅用于理解当前任务）：\n", 1)[0]
     normalized = message.strip().lower()
+    style_work_title = extract_style_work_title(message, include_project_title=True)
     catalog = _normalized_catalog(raw_catalog)
     by_id = {entry["chapterId"]: entry for entry in catalog}
     range_match = _CHAPTER_RANGE.search(normalized)
+
+    creation_target = _new_chapter_target(normalized, catalog)
+    if creation_target:
+        return creation_target
 
     if catalog:
         if range_match:
@@ -274,8 +341,8 @@ def resolve_intent_chapter_target(
         if re.search(r"(?:最后一章|末章|最终章|全书最后|整本.{0,3}最后)", normalized):
             return _last_target(catalog, "last_in_novel")
 
-        quoted_titles = [value.strip() for value in re.findall(r"《([^》]+)》", message) if value.strip()]
-        title_candidates = quoted_titles or [
+        quoted_titles = [] if style_work_title else [value.strip() for value in re.findall(r"《([^》]+)》", message) if value.strip()]
+        title_candidates = [] if style_work_title else quoted_titles or [
             entry["title"]
             for entry in catalog
             if entry["title"] and len(entry["title"]) >= 2 and entry["title"].lower() in normalized
@@ -307,12 +374,15 @@ def resolve_intent_chapter_target(
     ):
         return ResolvedIntentTarget(selector="volume_chapter_reference", source="user_message")
     if re.search(rf"第\s*{_CHAPTER_NUMBER}\s*章", normalized):
+        if catalog:
+            return ResolvedIntentTarget(selector="novel_chapter_ordinal_not_found", source="user_message",
+                label=f"当前目录共有{len(catalog)}章，未找到指定章节。若要新增下一章，请明确使用“新建第{len(catalog) + 1}章”。")
         return ResolvedIntentTarget(selector="novel_chapter_ordinal", source="user_message")
     if extract_style_work_title(message):
         # A work title is handled by the style-source workflow. Do not fall
         # through to the open editor chapter and silently replace the source.
         return None
-    if re.findall(r"《([^》]+)》", message):
+    if not style_work_title and re.findall(r"《([^》]+)》", message):
         return ResolvedIntentTarget(selector="chapter_title", source="user_message")
     if editor_chapter_id and editor_chapter_id in by_id:
         selector = "current_editor_chapter" if re.search(r"(?:当前章|当前章节|这一章|这章|本章)", normalized) else "operation_default"

@@ -186,7 +186,7 @@ def test_scope_toolchain_publishes_reader_safe_artifact(tmp_path: Path) -> None:
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "多章节读者上下文",

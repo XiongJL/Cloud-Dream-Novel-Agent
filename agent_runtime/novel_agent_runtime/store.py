@@ -86,27 +86,43 @@ class AgentStateStore:
     def save(self, state: AgentState) -> None:
         payload = state.model_dump_json()
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO agent_state (id, payload, updated_at)
-                VALUES ('default', ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP
-                """,
-                (payload,),
-            )
+            self._write_state(conn, payload)
+
+    @staticmethod
+    def _write_state(conn: sqlite3.Connection, payload: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO agent_state (id, payload, updated_at)
+            VALUES ('default', ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = CURRENT_TIMESTAMP
+            """,
+            (payload,),
+        )
 
     def append_event(self, event: AgentRunEvent) -> AgentRunEvent:
-        payload = event.model_dump_json()
         with self._connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO run_events (run_id, event_id, event_type, event_payload)
-                VALUES (?, ?, ?, ?)
-                """,
-                (event.runId, event.eventId, event.type, payload),
-            )
-            sequence = int(cursor.lastrowid)
-        return event.model_copy(update={"sequence": sequence})
+            return self._insert_event(conn, event)
+
+    @staticmethod
+    def _insert_event(conn: sqlite3.Connection, event: AgentRunEvent) -> AgentRunEvent:
+        cursor = conn.execute(
+            """
+            INSERT INTO run_events (run_id, event_id, event_type, event_payload)
+            VALUES (?, ?, ?, ?)
+            """,
+            (event.runId, event.eventId, event.type, event.model_dump_json()),
+        )
+        return event.model_copy(update={"sequence": int(cursor.lastrowid)})
+
+    def commit_terminal(self, state: AgentState, event: AgentRunEvent) -> AgentRunEvent:
+        """Commit the event and final run snapshot together, or neither."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            persisted = self._insert_event(conn, event)
+            run = state.runs[event.runId]
+            run.events = [*run.events, persisted][-50:]
+            self._write_state(conn, state.model_dump_json())
+        return persisted
 
     def list_events(self, run_id: str, after_sequence: int = 0) -> list[AgentRunEvent]:
         with self._connect() as conn:
@@ -126,8 +142,14 @@ class AgentStateStore:
         return events
 
     def get_last_event(self, run_id: str) -> AgentRunEvent | None:
-        events = self.list_events(run_id, 0)
-        return events[-1] if events else None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT event_payload, sequence FROM run_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return AgentRunEvent.model_validate_json(row[0]).model_copy(update={"sequence": int(row[1])})
 
     def prepare_invocation(self, record: ToolInvocationRecord) -> ToolInvocationRecord:
         with self._connect() as conn:
@@ -184,6 +206,9 @@ class AgentStateStore:
             expected={"in_flight", "operation_pending"},
             result=result,
         )
+
+    def mark_invocation_operation_retried(self, invocation_key: str, operation: Any) -> ToolInvocationRecord:
+        return self._transition_invocation(invocation_key, "operation_pending", expected={"failed"}, result=operation)
 
     def mark_invocation_failed(self, invocation_key: str, error: dict[str, Any]) -> ToolInvocationRecord:
         return self._transition_invocation(

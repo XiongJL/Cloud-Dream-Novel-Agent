@@ -19,6 +19,12 @@ assert.equal(module.shouldOpenAgentSkillSlashMenu(null, firstSlashQuery), false)
 const secondSlashQuery = module.findAgentSkillSlashQuery('/');
 assert.equal(module.shouldOpenAgentSkillSlashMenu(secondSlashQuery, firstSlashQuery), true);
 assert.equal(module.agentSkillShortcutSeed('builtin.novel-bootstrap'), '新建小说');
+const packEntry={id:'pack-a',stableId:'pack.a',title:'文风包 A',description:'语言与悬念',scope:'novel',version:'1.0.0',revisionId:'pack-rev-a',enabled:true,available:true,entryType:'pack',members:[]};
+assert.deepEqual(module.agentSkillEntryHint({kind:'skill.pack.use',pack:packEntry,auxiliaryMode:'member',auxiliaryMemberKey:'ensemble'}),{
+  actionId:'skill.pack.use',kind:'skill.pack.use',packId:'pack-a',requestedPackRevisionId:'pack-rev-a',auxiliaryMode:'member',auxiliaryMemberKey:'ensemble',
+});
+assert.equal(module.buildAgentSkillMenuItems([], '文风', [packEntry])[2].kind,'pack');
+assert.equal(module.buildAgentSkillMenuItems([], '', [{...packEntry,available:false}]).length,2);
 assert.match(module.agentSkillShortcutSeed('builtin.style-skill-extractor'), /文风 Skill Pack/);
 assert.equal(
   module.removeAgentSkillSlashQuery('请帮我 /悬念', { start: 4, end: 7, query: '悬念' }),
@@ -43,6 +49,10 @@ assert.deepEqual(module.agentSkillEntryHint({ kind: 'skill.author' }), {
   actionId: 'skill.author',
   kind: 'skill.author',
 });
+assert.deepEqual(module.agentSkillEntryHint({kind: 'skill.author', publicationScope: 'novel'}), {
+  actionId: 'skill.author', kind: 'skill.author', publicationScope: 'novel',
+});
+assert.equal(module.agentSkillEntryHint({kind: 'skill.use', skill: skills[0], publicationScope: 'user'}).publicationScope, 'user');
 assert.deepEqual(module.agentSkillEntryHint({ kind: 'skill.none' }), {
   actionId: 'skill.none',
   kind: 'skill.none',
@@ -54,4 +64,18 @@ assert.deepEqual(module.agentSkillEntryHint({ kind: 'skill.use', skill: skills[2
   requestedRevisionId: 'rev-novel',
 });
 
-console.log('Agent Skill composer tests passed.');
+let selected = module.selectAgentSkillMode(undefined, {kind:'skill', skill:skills[0]});
+selected = module.selectAgentSkillMode(selected, {kind:'skill', skill:skills[1]});
+selected = module.selectAgentSkillMode(selected, {kind:'skill', skill:skills[2]});
+assert.deepEqual(module.selectedAgentSkills(selected).map(skill => skill.id), skills.slice(0,3).map(skill => skill.id));
+assert.deepEqual(module.agentSkillEntryHint(selected).skills, skills.slice(0,3).map(skill => ({skillId:skill.id, requestedRevisionId:skill.revisionId})));
+assert.equal(module.agentSkillEntryHint(selected).skillId, undefined, 'Multi-selection cannot masquerade as a single selection');
+selected = module.removeSelectedAgentSkill(selected, skills[0].id);
+assert.equal(selected.skill.id, skills[1].id);
+assert.deepEqual(module.selectedAgentSkills(selected).map(skill => skill.id), [skills[1].id, skills[2].id]);
+selected = module.selectAgentSkillMode(selected, {kind:'skill',skill:skills[2]});
+assert.deepEqual(module.selectedAgentSkills(selected).map(skill => skill.id), [skills[1].id], 'Selecting an already selected item toggles it off');
+assert.equal(module.selectAgentSkillMode(selected, {kind:'skill',skill:skills[1]}), undefined);
+assert.equal(module.selectAgentSkillMode(selected, {kind:'none',id:'skill.none'}).kind, 'skill.none');
+assert.equal(module.selectAgentSkillMode(selected, {kind:'pack',pack:packEntry}).kind, 'skill.pack.use');
+console.log('Agent Skill composer tests passed: multi-selection, independent removal, toggle, locked revisions and legacy modes.');

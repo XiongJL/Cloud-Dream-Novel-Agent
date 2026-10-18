@@ -37,4 +37,21 @@ export const DATABASE_MIGRATIONS: DatabaseMigration[] = [
             );
         },
     },
+    {
+        version: 3,
+        name: 'skill-visibility-metadata',
+        checksum: 'skill-visibility-metadata-v1',
+        up: async database => {
+            for (const table of ['AgentSkill', 'AgentSkillPack', 'AgentSkillDraft']) {
+                const columns = await database.$queryRawUnsafe<Array<{name: string}>>(`PRAGMA table_info("${table}")`);
+                if (!columns.length) throw new Error(`Cannot migrate Skill visibility: missing ${table}`);
+                const additions = table === 'AgentSkillDraft'
+                    ? {publicationScope: 'TEXT', publicationOwnerNovelId: 'TEXT', publicationVersion: 'INTEGER NOT NULL DEFAULT 1'}
+                    : {visibilityVersion: 'INTEGER NOT NULL DEFAULT 1'};
+                for (const [name, declaration] of Object.entries(additions)) {
+                    if (!columns.some(c => c.name === name)) await database.$executeRawUnsafe(`ALTER TABLE "${table}" ADD COLUMN "${name}" ${declaration}`);
+                }
+            }
+        },
+    },
 ];

@@ -63,7 +63,11 @@ const aiSource = fs.readFileSync(path.join(desktopRoot, 'electron', 'ai', 'AiSer
 const aiAst = ts.createSourceFile('AiService.ts', aiSource, ts.ScriptTarget.Latest, true);
 const aiClass = aiAst.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'AiService');
 const draftPromptMethod = aiClass.members.find(node => node.name?.getText(aiAst) === 'assembleDraftGenerationPrompt').getText(aiAst);
-const harnessJs = ts.transpileModule(`class PromptHarness { ${draftPromptMethod} }`, {
+const writingPromptSource = fs.readFileSync(path.join(desktopRoot, 'shared', 'chapterWritingPrompt.ts'), 'utf8');
+const writingPromptAst = ts.createSourceFile('chapterWritingPrompt.ts', writingPromptSource, ts.ScriptTarget.Latest, true);
+const requestForModelMethod = writingPromptAst.statements.find(node => ts.isFunctionDeclaration(node)
+    && node.name?.text === 'chapterRequestForModel').getText(writingPromptAst).replace(/^export\s+/, '');
+const harnessJs = ts.transpileModule(`${requestForModelMethod}\nclass PromptHarness { ${draftPromptMethod} }`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText;
 const PromptHarness = new Function(`${harnessJs}; return PromptHarness;`)();
@@ -74,7 +78,7 @@ promptHarness.assembleAgentPrompt = input => assembler.assemble({
 const longBlueprint = `${'前期设定。'.repeat(1800)}中段角色必须保留：陈修平、林晓、老郑。${'后期章纲。'.repeat(1800)}`;
 const blueprintPrompt = promptHarness.assembleDraftGenerationPrompt({
     operation: 'creative_assets.generate_draft', systemPrompt: 'Return JSON.', outputTokens: 16384,
-    structured: { goal: 'Initialize approved blueprint' }, effectiveUserPrompt: longBlueprint, usedContext: [],
+    structured: { goal: 'Initialize approved blueprint', params: {} }, effectiveUserPrompt: longBlueprint, usedContext: [],
 });
 assert.ok(blueprintPrompt.includes(longBlueprint), 'Generation must preserve the complete source when it fits');
 assert.doesNotMatch(blueprintPrompt, /reference excerpt omitted/);

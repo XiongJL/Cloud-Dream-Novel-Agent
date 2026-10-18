@@ -2,13 +2,14 @@ export type ProjectedAgentStepStatus = 'pending' | 'running' | 'completed' | 'fa
 export type ProjectedAgentRunStatus = 'idle' | 'waiting_approval' | 'waiting_user_input' | 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
 
 export type ProjectedAgentRecovery = {
-    failureKind: 'transport' | 'model_output_truncated' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown';
+    failureKind: 'transport' | 'model_output_truncated' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown' | 'execution_incomplete';
     failedAtPhase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing';
     retryStrategy: 'retry_request' | 'repair_model_output' | 'reprocess_saved_result' | 'resume_publish' | 'reconcile_side_effect' | 'none';
     canRecover: boolean;
+    canFinalizeCompleted?: boolean;
     recoveryRevision: number;
     actionLabel?: string;
-    blockedReason?: 'processor_update_required' | 'stale_dependency' | 'unsafe_side_effect' | 'repair_exhausted';
+    blockedReason?: 'processor_update_required' | 'stale_dependency' | 'unsafe_side_effect' | 'repair_exhausted' | 'unconfirmed_model_request';
     completedArtifactIds: string[];
     affectedArtifactIds: string[];
     diagnosticRef: string;
@@ -146,6 +147,7 @@ export type ProjectedUserInputRequest = {
 };
 
 export type ProjectedRun = {
+    failure?: { code?: string; message?: string; retryable?: boolean; persistenceFailed?: boolean } | null;
     runId: string;
     threadId: string;
     planId: string;
@@ -513,6 +515,7 @@ export function applyAgentRunEvent(
     createMessageIdentity: () => { id: string; createdAt: string },
 ): AgentRunProjection {
     if (current.run.runId !== event.runId) return current;
+    const alreadyTerminal = ['completed', 'failed', 'cancelled'].includes(current.run.status);
     const payload = event.payload ?? {};
     const messageIdentity = isConversationMessageEvent(event)
         ? createMessageIdentity()
@@ -525,7 +528,7 @@ export function applyAgentRunEvent(
             ...current.plan,
             steps: current.plan.steps.map((step) => {
                 if (step.stepId !== event.stepId) return step;
-                const status: ProjectedAgentStepStatus | null = event.type === 'step_started' ? 'running'
+                const status: ProjectedAgentStepStatus | null = event.type === 'step_started' && !alreadyTerminal ? 'running'
                     : event.type === 'step_completed' ? 'completed'
                         : event.type === 'step_failed' ? 'failed'
                             : null;
@@ -569,6 +572,7 @@ export function applyAgentRunEvent(
     const run: ProjectedRun = {
         ...current.run,
         events: [...current.run.events, event],
+        failure: event.type === "run_failed" ? payload : current.run.failure,
         artifacts,
         draftSessionId,
         draftBatchId,
@@ -576,10 +580,10 @@ export function applyAgentRunEvent(
         draftOperationKey,
         draftOperationStatus,
         draftOperationVersion,
-        status: terminalStatus ?? (userInput ? 'waiting_user_input' : userInputResolved ? 'running' : approval ? 'waiting_approval' : approvalSubmitted ? 'running' : current.run.status),
-        pendingApproval: approval ?? (approvalSubmitted ? null : current.run.pendingApproval),
-        pendingUserInput: userInput ?? (userInputResolved ? null : current.run.pendingUserInput),
-        currentStepId: terminalStatus ? undefined : (event.stepId ?? current.run.currentStepId),
+        status: terminalStatus ?? (alreadyTerminal ? current.run.status : userInput ? 'waiting_user_input' : userInputResolved ? 'running' : approval ? 'waiting_approval' : approvalSubmitted ? 'running' : current.run.status),
+        pendingApproval: terminalStatus || alreadyTerminal ? null : approval ?? (approvalSubmitted ? null : current.run.pendingApproval),
+        pendingUserInput: terminalStatus || alreadyTerminal ? null : userInput ?? (userInputResolved ? null : current.run.pendingUserInput),
+        currentStepId: terminalStatus || alreadyTerminal ? undefined : (event.stepId ?? current.run.currentStepId),
         progress: terminalStatus === 'completed' ? 1 : current.run.progress,
         failureRevision: event.type === 'run_failed' && typeof payload.failureRevision === 'number'
             ? payload.failureRevision

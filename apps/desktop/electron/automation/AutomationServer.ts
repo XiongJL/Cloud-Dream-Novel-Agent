@@ -66,6 +66,7 @@ export class AutomationServer {
             'draft.batch.discard',
             'artifact.review.submit',
             'revision_task.create_plan',
+            'agent_skill.delete',
         ]);
         if (dataChangingMethods.has(method)) {
             this.onDataChanged?.(method);
@@ -83,14 +84,35 @@ export class AutomationServer {
     private async writeRuntime(): Promise<void> {
         if (!this.runtime) return;
         await fs.mkdir(this.getAutomationDir(), { recursive: true });
-        await fs.writeFile(this.getRuntimePath(), JSON.stringify(this.runtime, null, 2), 'utf8');
+        const temporary = path.join(this.getAutomationDir(), `.runtime-${process.pid}-${randomUUID()}.tmp`);
+        try {
+            await fs.writeFile(temporary, JSON.stringify(this.runtime, null, 2), 'utf8');
+            await fs.rename(temporary, this.getRuntimePath());
+        } finally {
+            await fs.rm(temporary, { force: true });
+        }
+    }
+
+    async ensureRuntimeDescriptor(): Promise<void> {
+        if (!this.server?.listening || !this.runtime) return;
+        try {
+            JSON.parse(await fs.readFile(this.getRuntimePath(), 'utf8'));
+        } catch (error: any) {
+            if (error?.code === 'ENOENT' || error instanceof SyntaxError) await this.writeRuntime();
+            else throw error;
+        }
     }
 
     private async removeRuntime(): Promise<void> {
+        if (!this.runtime) return;
         try {
-            await fs.unlink(this.getRuntimePath());
+            const descriptor = JSON.parse(await fs.readFile(this.getRuntimePath(), 'utf8'));
+            // A retiring development process must not delete its successor's connection.
+            if (descriptor.pid === this.runtime.pid && descriptor.port === this.runtime.port && descriptor.token === this.runtime.token) {
+                await fs.unlink(this.getRuntimePath());
+            }
         } catch (error: any) {
-            if (error?.code !== 'ENOENT') {
+            if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) {
                 throw error;
             }
         }

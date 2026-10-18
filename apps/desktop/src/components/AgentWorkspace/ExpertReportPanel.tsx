@@ -180,7 +180,9 @@ export function ExpertReportPanel({
         </div>
         {coverage && (
           <div className={clsx('mt-3 text-[11px] leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-            覆盖 {coverage.contextChapterCount}/{coverage.totalChapterCount} 章 · 详细 {coverage.detailedChapterCount} · 摘要 {coverage.summarizedChapterCount}{coverage.omittedChapterCount > 0 ? ` · 省略 ${coverage.omittedChapterCount}` : ''}
+            {coverage.expertReviewMode === 'analysis_evidence'
+              ? `原文分析 ${coverage.analyzedChapterCount ?? 0}/${coverage.totalChapterCount} 章 · 专家审核材料 ${coverage.expertReviewedChapterCount ?? 0}/${coverage.totalChapterCount} 章`
+              : `覆盖 ${coverage.contextChapterCount}/${coverage.totalChapterCount} 章 · 详细 ${coverage.detailedChapterCount} · 摘要 ${coverage.summarizedChapterCount}${coverage.omittedChapterCount > 0 ? ` · 省略 ${coverage.omittedChapterCount}` : ''}`}
           </div>
         )}
       </section>

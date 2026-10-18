@@ -7,6 +7,7 @@ import http from 'node:http'
 import { execSync } from 'child_process'
 import fs from 'fs'
 import * as searchIndex from './search/searchIndex'
+import { rebuildRagVectorIndex } from './ai/rag/vectorIndex'
 import { AiService } from './ai/AiService'
 import type { RagEvidenceSourceType } from './ai/rag/types'
 import { registerRagSummaryIndexRefresh, scheduleChapterSummaryRebuild } from './ai/summary/chapterSummary'
@@ -27,6 +28,27 @@ import {
     runDatabaseMigrations,
 } from './database/DatabaseLifecycle'
 import { DATABASE_MIGRATIONS } from './database/DatabaseMigrations'
+import { DatasetManager, durableJson, validateActivationResources } from './backup/DatasetManager'
+import { BACKUP_TABLES } from './backup/BackupRegistry'
+import { dataOperation, exclusiveData, sealDataMaintenance } from './backup/MaintenanceGate'
+import type { BackupMode } from '../shared/backup'
+
+let datasetManager: DatasetManager | undefined;
+let startupComplete = false;
+async function rollbackFailedStartup(): Promise<boolean> {
+    if (startupComplete || !datasetManager) return false;
+    if (!await datasetManager.rollbackPending()) return false;
+    app.relaunch(); app.exit(0);
+    return true;
+}
+const getDatasetRoot = () => datasetManager?.current().root ?? app.getPath('userData');
+// Track complete IPC operations, including their awaited file writes. Backup IPC
+// acquires its own exclusive barrier and must not count itself as an active writer.
+const registerDataHandler = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = ((channel: string, listener: (...args: any[]) => any) => {
+    registerDataHandler(channel, /^(db:|ai:|agent:|agent-attachment:|automation:|sync:)/.test(channel)
+        ? (...args: any[]) => dataOperation(async () => listener(...args), !/:(get|list|read|search|check-index-status|health|preview|capability)/.test(channel)) : listener);
+}) as typeof ipcMain.handle;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -128,16 +150,18 @@ export const RENDERER_DIST = path.join(process.env.APP_ROOT, 'dist')
 process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, 'public') : RENDERER_DIST
 
 // Global error handling - ensure process exits on uncaught errors
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', async (error) => {
     devLogError('Main.uncaughtException', error);
     console.error('[Main] Uncaught Exception:', error);
+    try { if (await rollbackFailedStartup()) return; } catch (rollbackError) { console.error('[Backup] Startup rollback failed:', rollbackError); }
     app.quit();
     process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', async (reason, promise) => {
     devLogError('Main.unhandledRejection', reason, { promise: String(promise) });
     console.error('[Main] Unhandled Rejection at:', promise, 'reason:', reason);
+    try { if (await rollbackFailedStartup()) return; } catch (rollbackError) { console.error('[Backup] Startup rollback failed:', rollbackError); }
     app.quit();
     process.exit(1);
 });
@@ -249,6 +273,11 @@ function resolveWindowIcon(): string | undefined {
 }
 
 function resolveDefaultUserDataPath(): string {
+    const developmentDataPath = process.env.NOVEL_EDITOR_USER_DATA_DIR;
+    if (!app.isPackaged && developmentDataPath) {
+        if (!path.isAbsolute(developmentDataPath)) throw new Error('NOVEL_EDITOR_USER_DATA_DIR must be an absolute path');
+        return developmentDataPath;
+    }
     const appDataPath = app.getPath('appData');
     if (app.isPackaged) {
         return path.join(appDataPath, PACKAGED_APP_NAME);
@@ -735,7 +764,7 @@ ipcMain.handle('app:toggle-fullscreen', () => {
 });
 
 ipcMain.handle('app:get-user-data-path', () => {
-    return app.getPath('userData');
+    return getDatasetRoot();
 });
 
 ipcMain.handle('app:get-update-info', () => getAppUpdateInfo());
@@ -790,7 +819,7 @@ ipcMain.handle('db:delete-novel', async (_, novelId: string) => {
         });
 
         if (novel?.coverUrl?.startsWith('covers/')) {
-            const coverPath = path.join(app.getPath('userData'), novel.coverUrl);
+            const coverPath = path.join(getDatasetRoot(), novel.coverUrl);
             if (fs.existsSync(coverPath)) {
                 fs.unlinkSync(coverPath);
             }
@@ -820,13 +849,13 @@ ipcMain.handle('db:upload-novel-cover', async (_, novelId: string) => {
 
         const srcPath = result.filePaths[0];
         const ext = path.extname(srcPath);
-        const coversDir = path.join(app.getPath('userData'), 'covers');
+        const coversDir = path.join(getDatasetRoot(), 'covers');
         if (!fs.existsSync(coversDir)) fs.mkdirSync(coversDir, { recursive: true });
 
         // Remove old cover if exists
         const novel = await db.novel.findUnique({ where: { id: novelId }, select: { coverUrl: true } });
         if (novel?.coverUrl?.startsWith('covers/')) {
-            const oldPath = path.join(app.getPath('userData'), novel.coverUrl);
+            const oldPath = path.join(getDatasetRoot(), novel.coverUrl);
             if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
         }
 
@@ -1586,10 +1615,16 @@ const documentExtractorClient = new DocumentExtractorClient();
 const agentRunSubscriptions = new Map<string, () => void>();
 
 async function refreshRagChapterIndex(chapterId: string, reason: string): Promise<void> {
+    return dataOperation(() => refreshRagChapterIndexForBackup(chapterId, reason)).catch(() => undefined);
+}
+async function refreshRagChapterIndexForBackup(chapterId: string, reason: string): Promise<void> {
     return refreshRagSourceIndex('chapter', chapterId, reason);
 }
 
 async function refreshRagSourceIndex(sourceType: RagEvidenceSourceType, sourceId: string, reason: string): Promise<void> {
+    return dataOperation(() => refreshRagSourceIndexForBackup(sourceType, sourceId, reason)).catch(() => undefined);
+}
+async function refreshRagSourceIndexForBackup(sourceType: RagEvidenceSourceType, sourceId: string, reason: string): Promise<void> {
     try {
         const result = await aiService.upsertRagSourceIndex(sourceType, sourceId, { skipIfNovelNotIndexed: true });
         if (result.skipped) {
@@ -1606,6 +1641,9 @@ async function removeRagChapterIndex(novelId: string, chapterId: string, reason:
 }
 
 async function removeRagSourceIndex(novelId: string, sourceType: RagEvidenceSourceType, sourceId: string, reason: string): Promise<void> {
+    return dataOperation(() => removeRagSourceIndexForBackup(novelId, sourceType, sourceId, reason)).catch(() => undefined);
+}
+async function removeRagSourceIndexForBackup(novelId: string, sourceType: RagEvidenceSourceType, sourceId: string, reason: string): Promise<void> {
     try {
         const result = await aiService.deleteRagSourceIndex(novelId, sourceType, sourceId);
         console.log('[RAG] Source index removed:', { novelId, sourceType, sourceId, reason, deleted: result.deleted });
@@ -2002,12 +2040,14 @@ ipcMain.handle('automation:invoke', async (_, payload: { method: string; params?
             'agent_skill.draft.upsert',
             'agent_skill.draft.commit',
             'agent_skill.draft.discard',
+            'agent_skill.delete',
             'agent_skill.workspace.create',
             'agent_skill.workspace.write',
             'agent_skill.workspace.patch',
             'agent_skill.workspace.remove',
             'agent_skill.workspace.set_pack',
             'agent_skill.workspace.validate',
+            'agent_skill.workspace.prepare',
             'agent_skill.workspace.compile',
         ]);
         if (dataChangingMethods.has(payload.method)) {
@@ -2059,6 +2099,7 @@ ipcMain.handle('agent:invoke', async (_, payload: {
             throw Object.assign(new Error('Agent runtime client is not initialized'), { code: 'AGENT_RUNTIME_NOT_INITIALIZED' });
         }
         const requestId = String(payload.requestId || '').trim() || randomUUID();
+        await automationServer?.ensureRuntimeDescriptor().catch(error => devLogError('Main.automation.runtime-repair', error));
         const result = await agentRuntimeClient.invoke({
             requestId,
             method: payload.method,
@@ -2157,63 +2198,90 @@ ipcMain.handle('sync:pull', async () => {
 // --- Backup IPC ---
 import { backupService } from './services/BackupService';
 
+async function flushBackupWindows(): Promise<void> {
+    await Promise.all(BrowserWindow.getAllWindows().map(window => new Promise<void>((resolve, reject) => {
+        const requestId = randomUUID();
+        const finish = (_event: Electron.IpcMainEvent, response: { requestId: string; error?: string }) => {
+            if (_event.sender !== window.webContents || response.requestId !== requestId) return;
+            clearTimeout(timer); ipcMain.removeListener('backup:flushed', finish);
+            response.error ? reject(new Error('编辑内容保存失败，请先保存后重试。')) : resolve();
+        };
+        const timer = setTimeout(() => { ipcMain.removeListener('backup:flushed', finish); reject(new Error('编辑窗口没有确认保存，请稍后重试。')); }, 15000);
+        ipcMain.on('backup:flushed', finish);
+        window.webContents.send('backup:flush', { requestId });
+    })));
+}
+async function withBackupBarrier<T>(operation: () => Promise<T>): Promise<T> {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('backup:maintenance', true);
+    const originalId = datasetManager?.current().id;
+    let stopped = false;
+    try {
+        await flushBackupWindows();
+        return await exclusiveData(async () => {
+            const runs = await db.$queryRawUnsafe<Array<{ status: string }>>('SELECT status FROM AgentRun');
+            if (runs.some(run => !['completed', 'failed', 'cancelled', 'idle'].includes(run.status))) throw Object.assign(new Error('有 Agent 任务尚未结束，请等待完成或先停止任务。'), { code: 'BUSY' });
+            const operations = await db.$queryRawUnsafe<Array<{ status: string }>>('SELECT status FROM DraftGenerationOperation');
+            if (operations.some(op => !['succeeded', 'definitive_failed', 'cancelled', 'reconcile_required'].includes(op.status))) throw Object.assign(new Error('有草稿生成操作尚未结束，请等待完成或先停止。'), { code: 'BUSY' });
+            stopped = true;
+            await automationService?.shutdown();
+            await agentRuntimeClient?.shutdownForBackup();
+            try { return await operation(); } finally {
+                if (datasetManager?.current().id !== originalId) sealDataMaintenance();
+            }
+        });
+    } finally {
+        if (datasetManager?.current().id === originalId) {
+            if (stopped) { await automationService?.initialize(); agentRuntimeClient?.prewarm(); }
+            for (const window of BrowserWindow.getAllWindows()) window.webContents.send('backup:maintenance', false);
+        } else {
+            backupService.stop();
+            setTimeout(() => { app.relaunch(); app.exit(0); }, 500);
+        }
+    }
+}
+
+const backupFailure = (error: any) => ({ success: false, code: error?.code || 'BACKUP_FAILED', message: error?.message || '备份操作失败。' });
+let selectedBackupPath: string | undefined;
+ipcMain.handle('backup:cancel', () => backupService.cancel());
 ipcMain.handle('backup:export', async (_, password?: string) => {
-    try {
-        return await backupService.exportData(undefined, password);
-    } catch (e) {
-        console.error('[Main] backup:export failed:', e);
-        throw e;
-    }
+    try { const file = await backupService.exportData(undefined, password); return file ? { success: true, path: file } : { success: false, code: 'CANCELLED' }; }
+    catch (error) { return backupFailure(error); }
 });
-
-ipcMain.handle('backup:import', async (_, { filePath, password }: { filePath?: string, password?: string }) => {
+ipcMain.handle('backup:inspect', async (_, { password, filename }: { password?: string; filename?: string }) => {
     try {
-        if (!filePath) {
-            const result = await dialog.showOpenDialog({
-                title: 'Import Backup',
-                filters: [{ name: 'CloudDream Novel Agent Backup', extensions: ['nebak'] }],
-                properties: ['openFile']
-            });
-            if (result.canceled || result.filePaths.length === 0) return { success: false, code: 'CANCELLED' };
-            filePath = result.filePaths[0];
+        if (filename) return { success: true, inspection: await backupService.inspectAuto(filename, password) };
+        if (!selectedBackupPath || !password) {
+            const chosen = await dialog.showOpenDialog({ title: '选择作品资料备份', filters: [{ name: '作品资料备份', extensions: ['nebak'] }], properties: ['openFile'] });
+            if (chosen.canceled || !chosen.filePaths[0]) return { success: false, code: 'CANCELLED' };
+            selectedBackupPath = chosen.filePaths[0];
         }
-        await backupService.importData(filePath, password);
+        const inspection = await backupService.inspectData(selectedBackupPath, password);
+        selectedBackupPath = undefined;
+        return { success: true, inspection };
+    } catch (error) { return backupFailure(error); }
+});
+ipcMain.handle('backup:restore', async (_, { inspectionId, mode }: { inspectionId: string; mode: BackupMode }) => {
+    try {
+        await backupService.restoreData(inspectionId, mode);
+        // No old process may write after the generation switch. Restart creates
+        // fresh database connections, caches and Runtime credentials.
         return { success: true };
-    } catch (e: any) {
-        console.error('[Main] backup:import failed:', e);
-        // Extract error code if possible.
-        // BackupService throws "PASSWORD_REQUIRED" or "PASSWORD_INVALID"
-        const msg = e.message || e.toString();
-
-        if (msg.includes('PASSWORD_REQUIRED')) {
-            return { success: false, code: 'PASSWORD_REQUIRED', filePath };
-        }
-        if (msg.includes('PASSWORD_INVALID')) {
-            return { success: false, code: 'PASSWORD_INVALID', filePath };
-        }
-
-        return { success: false, message: msg };
-    }
+    } catch (error) { return backupFailure(error); }
 });
-
-ipcMain.handle('backup:get-auto', async () => {
-    try {
-        return await backupService.getAutoBackups();
-    } catch (e) {
-        console.error('[Main] backup:get-auto failed:', e);
-        throw e;
-    }
+// Old clients cannot bypass preflight and destructive-operation confirmation.
+ipcMain.handle('backup:import', async () => ({ success: false, code: 'PREFLIGHT_REQUIRED', message: '请先预览备份并确认恢复模式。' }));
+ipcMain.handle('backup:restore-auto', async () => ({ success: false, code: 'PREFLIGHT_REQUIRED', message: '请先预览备份并确认恢复模式。' }));
+ipcMain.handle('backup:get-auto', () => backupService.getAutoBackups());
+ipcMain.handle('backup:get-policy', () => backupService.getPolicy());
+ipcMain.handle('backup:get-last-report', () => backupService.getLastReport());
+ipcMain.handle('backup:open-directory', async () => {
+    const directory = path.join(app.getPath('userData'), 'backups');
+    await fs.promises.mkdir(directory, { recursive: true });
+    const error = await shell.openPath(directory);
+    if (error) throw new Error(error);
 });
-
-ipcMain.handle('backup:restore-auto', async (_, filename: string) => {
-    try {
-        await backupService.restoreAutoBackup(filename);
-        return true;
-    } catch (e) {
-        console.error('[Main] backup:restore-auto failed:', e);
-        throw e;
-    }
-});
+ipcMain.handle('backup:update-policy', (_, enabled: boolean) => backupService.updatePolicy(enabled));
+ipcMain.handle('backup:pin', (_, { filename, pinned }: { filename: string; pinned: boolean }) => backupService.pin(filename, pinned));
 
 ipcMain.handle('sync:push', async () => {
     try {
@@ -2445,7 +2513,7 @@ ipcMain.handle('db:upload-character-image', async (_, { characterId, type }: { c
 
         const srcPath = result.filePaths[0];
         const ext = path.extname(srcPath);
-        const charDir = path.join(app.getPath('userData'), 'characters', characterId);
+        const charDir = path.join(getDatasetRoot(), 'characters', characterId);
         if (!fs.existsSync(charDir)) fs.mkdirSync(charDir, { recursive: true });
 
         if (type === 'avatar') {
@@ -2491,7 +2559,7 @@ ipcMain.handle('db:upload-character-image', async (_, { characterId, type }: { c
 
 ipcMain.handle('db:delete-character-image', async (_, { characterId, imagePath, type }: { characterId: string; imagePath: string; type: 'avatar' | 'fullBody' }) => {
     try {
-        const userDataDir = app.getPath('userData');
+        const userDataDir = getDatasetRoot();
         const fullPath = path.resolve(path.join(userDataDir, imagePath));
         if (!fullPath.startsWith(userDataDir + path.sep)) {
             throw new Error('Invalid image path: path traversal detected');
@@ -2841,7 +2909,7 @@ ipcMain.handle('db:delete-map', async (_, id: string) => {
         // Also clean up background file
         const map = await (db as any).mapCanvas.findUnique({ where: { id }, select: { background: true, novelId: true } });
         if (map?.background) {
-            const bgPath = path.join(app.getPath('userData'), map.background);
+            const bgPath = path.join(getDatasetRoot(), map.background);
             if (fs.existsSync(bgPath)) fs.unlinkSync(bgPath);
         }
         return await (db as any).mapCanvas.delete({ where: { id } });
@@ -2866,12 +2934,12 @@ ipcMain.handle('db:upload-map-bg', async (_, mapId: string) => {
 
         const srcPath = result.filePaths[0];
         const ext = path.extname(srcPath);
-        const mapsDir = path.join(app.getPath('userData'), 'maps', map.novelId);
+        const mapsDir = path.join(getDatasetRoot(), 'maps', map.novelId);
         if (!fs.existsSync(mapsDir)) fs.mkdirSync(mapsDir, { recursive: true });
 
         // Remove old background if exists
         if (map.background) {
-            const oldPath = path.join(app.getPath('userData'), map.background);
+            const oldPath = path.join(getDatasetRoot(), map.background);
             if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
         }
 
@@ -3241,6 +3309,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+    backupService.stop();
     for (const unsubscribe of agentRunSubscriptions.values()) {
         unsubscribe();
     }
@@ -3286,6 +3355,26 @@ app.whenReady().then(async () => {
 
     app.setPath('userData', resolvedUserDataPath);
 
+    migrateLegacyInstalledDataToUserData();
+    migrateLegacyProductDataToCurrentUserData();
+    datasetManager = new DatasetManager(resolvedUserDataPath, app.isPackaged && isPortableMode() ? path.join(getPortableDataDir(), 'novel_editor.db') : path.join(resolvedUserDataPath, 'novel_editor.db'));
+    try {
+        await datasetManager.recover(async (location, activationCheck) => {
+            if (!fs.existsSync(location.databasePath)) throw new Error('数据集数据库不存在，已停止启动以保护资料。');
+            const probe = new PrismaClient({ datasources: { db: { url: `file:${location.databasePath}` } } });
+            try {
+                const check = await probe.$queryRawUnsafe<any[]>('PRAGMA integrity_check');
+                if (check.length !== 1 || Object.values(check[0])[0] !== 'ok') throw new Error('数据集校验失败');
+                const foreign = await probe.$queryRawUnsafe<any[]>('PRAGMA foreign_key_check');
+                if (foreign.length) throw new Error('数据关系校验失败');
+                if (activationCheck) {
+                    const tables = await probe.$queryRawUnsafe<Array<{ name: string }>>("SELECT name FROM sqlite_master WHERE type='table'");
+                    if (BACKUP_TABLES.some(table => !tables.some(known => known.name === table))) throw new Error('候选数据集缺少业务表');
+                    await validateActivationResources(location);
+                }
+            } finally { await probe.$disconnect(); }
+        });
+    } catch (error) { dialog.showErrorBox('恢复需要处理', error instanceof Error ? error.message : String(error)); app.exit(1); return; }
     initDevLogger(app.getPath('userData'));
     patchDevConsoleLogging();
     console.log('[Main] App Ready. Starting DB Setup...');
@@ -3293,7 +3382,7 @@ app.whenReady().then(async () => {
 
     if (!aiDiagParse.command) {
         agentRuntimeClient = new PythonRuntimeClient({
-            getUserDataPath: () => app.getPath('userData'),
+            getUserDataPath: getDatasetRoot,
             getAutomationRuntimePath,
             isPackaged: app.isPackaged,
         });
@@ -3310,7 +3399,7 @@ app.whenReady().then(async () => {
     }
 
     // Register custom protocol for serving local files (map backgrounds etc.)
-    const userDataRoot = path.resolve(app.getPath('userData'));
+    const userDataRoot = path.resolve(getDatasetRoot());
     protocol.handle('local-resource', (request) => {
         const relativePath = decodeURIComponent(request.url.replace('local-resource://', ''));
         const fullPath = path.resolve(path.join(userDataRoot, relativePath));
@@ -3325,20 +3414,12 @@ app.whenReady().then(async () => {
     // Installed package: use userData
     // Portable build: use exe/data
     // Development: use userData
-    let dataPath: string;
-
-    if (app.isPackaged && isPortableMode()) {
-        dataPath = getPortableDataDir();
-    } else {
-        dataPath = app.getPath('userData');
-    }
-
     migrateLegacyInstalledDataToUserData();
     migrateLegacyProductDataToCurrentUserData();
 
     const dbPath = aiDiagParse.command?.dbPath
         ? path.resolve(aiDiagParse.command.dbPath)
-        : path.join(dataPath, 'novel_editor.db');
+        : datasetManager!.current().databasePath;
     const dbUrl = `file:${dbPath}`;
 
     console.log('[Main] Database Path:', dbPath);
@@ -3361,6 +3442,7 @@ app.whenReady().then(async () => {
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.error('[Main] Failed to prepare database:', error);
+        if (await rollbackFailedStartup()) return;
         if (!aiDiagParse.command) {
             dialog.showErrorBox('数据库准备失败', `${message}\n\n数据库：${dbPath}\n日志：${path.join(app.getPath('userData'), 'debug-dev.log')}`);
         }
@@ -3452,13 +3534,14 @@ app.whenReady().then(async () => {
         await agentConversationStore.ensureSchema();
         await agentAttachmentStore.ensureSchema();
         if (!aiDiagParse.command) {
-            const cutover = await applyDurableDraftCutover(app.getPath('userData'), db);
+            const cutover = await applyDurableDraftCutover(getDatasetRoot(), db);
             if (cutover.applied) {
                 console.log('[Main] Durable draft cutover completed.', cutover);
             }
         }
     } catch (error) {
         console.error('[Main] Failed to ensure bundled database schema:', error);
+        if (await rollbackFailedStartup()) return;
         const message = error instanceof Error ? error.message : String(error);
         if (!aiDiagParse.command) {
             const snapshot = path.join(app.getPath('userData'), 'backups', 'database-migrations');
@@ -3470,7 +3553,7 @@ app.whenReady().then(async () => {
         app.exit(1);
         return;
     }
-    aiService = new AiService(() => app.getPath('userData'), agentConversationStore);
+    aiService = new AiService(() => app.getPath('userData'), agentConversationStore, getDatasetRoot());
     registerRagSummaryIndexRefresh((sourceType, sourceId, reason) => {
         void refreshRagSourceIndex(sourceType, sourceId, reason);
     });
@@ -3492,10 +3575,24 @@ app.whenReady().then(async () => {
     // 5. Initialize Search Index
     await searchIndex.initSearchIndex();
     console.log('[Main] Search index initialized');
+    const restoreReportPath = path.join(getDatasetRoot(), 'restore-report.json');
+    if (fs.existsSync(restoreReportPath)) {
+        const report = JSON.parse(fs.readFileSync(restoreReportPath, 'utf8'));
+        if (!report.indexesRebuiltAt) {
+            try {
+                const novels = await db.novel.findMany({ where: { deleted: false }, select: { id: true } });
+                // Omit provider settings deliberately: rebuild uses local vectors
+                // and cannot contact an embedding service during restoration.
+                for (const novel of novels) await rebuildRagVectorIndex(novel.id);
+                report.indexesRebuiltAt = new Date().toISOString(); report.indexMode = 'local-hash';
+                await durableJson(restoreReportPath, report);
+            } catch (error) { console.warn('[Backup] Local index rebuild deferred:', error); }
+        }
+    }
 
     automationService = new AutomationService(
         aiService,
-        () => app.getPath('userData'),
+        getDatasetRoot,
         agentAttachmentStore,
         async (event) => {
             if (!agentRuntimeClient) {
@@ -3532,6 +3629,13 @@ app.whenReady().then(async () => {
         console.warn('[Main] Failed to apply AI proxy settings:', e);
     }
 
+    backupService.configure(datasetManager!, DATABASE_SCHEMA_VERSION, withBackupBarrier, progress => {
+        for (const window of BrowserWindow.getAllWindows()) window.webContents.send('backup:progress', progress);
+    });
+    // Confirm that the migrated stores can read the newly activated database.
+    await db.novel.count(); await db.agentConversation.count(); await db.draftSession.count();
+    await datasetManager!.finishRecovery();
+    startupComplete = true;
     // 6. Create Window
     createWindow();
 })

@@ -679,6 +679,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                         {/* Explorer (Keep Alive) */}
                         <div className={clsx("flex-1 h-full flex flex-col min-h-0", activeTab !== 'explorer' && "hidden")}>
                             <Sidebar
+                                isVisible={activeTab === 'explorer'}
                                 volumes={volumes}
                                 currentChapterId={currentChapter?.id || null}
                                 formatting={novel?.formatting}

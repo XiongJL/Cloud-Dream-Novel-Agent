@@ -256,6 +256,30 @@ try {
     assert.equal((await store.listPendingOutbox()).length, 0);
     await dispatcher.shutdown();
 
+    let stateAttempts = 0;
+    const stateCoordinator = new DraftOperationCoordinator(store, {
+        execute: async operation => {
+            stateAttempts += 1;
+            if (stateAttempts === 1) throw Object.assign(new Error('正文已保存，状态核对失败。'), {
+                code: 'NARRATIVE_STATE_EXTRACTION_FAILED',
+                details: {generationCheckpointRef: 'saved-chapter-text', textPersisted: true, causeCode: 'NETWORK_ERROR'},
+            });
+            await persistDraftResult(operation, 'draft-state-checkpoint');
+            return {draftSessionId: 'draft-state-checkpoint', generationRevision: 1};
+        },
+        findExistingResult: async () => null,
+        getProvider: () => ({providerType: 'http', model: 'test-model'}),
+    });
+    const stateStart = await stateCoordinator.start(input('state-checkpoint'));
+    const stateFailed = await waitForStatus(stateCoordinator, stateStart.operation.operationId, new Set(['definitive_failed']));
+    assert.equal(stateFailed.error.details.generationCheckpointRef, 'saved-chapter-text');
+    assert.equal(stateFailed.error.details.textPersisted, true);
+    await stateCoordinator.retry(stateFailed.operationId, stateFailed.version);
+    const stateRecovered = await waitForStatus(stateCoordinator, stateFailed.operationId, new Set(['succeeded']));
+    assert.equal(stateRecovered.result.draftSessionId, 'draft-state-checkpoint');
+    assert.equal(stateAttempts, 2);
+    await stateCoordinator.shutdown();
+
     let lockedDrainAttempts = 0;
     const lockedDispatcher = new DraftOperationCoordinator({
         ensureSchema: async () => undefined,

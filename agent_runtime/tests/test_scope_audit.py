@@ -248,10 +248,11 @@ def test_scope_audit_shares_context_runs_experts_and_filters_fabricated_sources(
         rag_reads = 0
         active_simple_experts = 0
         peak_simple_experts = 0
+        simple_experts_started = asyncio.Event()
         reader_requests: list[dict[str, Any]] = []
         supervisor_payloads: list[dict[str, Any]] = []
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             nonlocal scope_reads, rag_reads, active_simple_experts, peak_simple_experts
             if method == "agent.generate_plan":
                 return {
@@ -284,7 +285,11 @@ def test_scope_audit_shares_context_runs_experts_and_filters_fabricated_sources(
                 active_simple_experts += 1
                 peak_simple_experts = max(peak_simple_experts, active_simple_experts)
                 try:
-                    await asyncio.sleep(0.03)
+                    if active_simple_experts == 2:
+                        simple_experts_started.set()
+                    # Prove concurrency without a 30 ms scheduling assumption;
+                    # slow Windows SQLite flushes must not make this flaky.
+                    await asyncio.wait_for(simple_experts_started.wait(), timeout=2.0)
                     return _editor_review() if method.endswith("editor_range_review") else _worldbuilding_review()
                 finally:
                     active_simple_experts -= 1
@@ -369,7 +374,7 @@ def test_scope_audit_runs_explicit_research_expert_with_project_search(tmp_path:
         original_invoke = automation.invoke
         method_counts: dict[str, int] = {}
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             method_counts[method] = method_counts.get(method, 0) + 1
             if method == "agent.generate_plan":
                 return {

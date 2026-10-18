@@ -276,6 +276,11 @@ jobs:
       - build-macos
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
       - name: Download verified release assets
         uses: actions/download-artifact@v4
         with:
@@ -287,11 +292,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
-            gh release create "$RELEASE_TAG" \
-              --verify-tag \
-              --generate-notes \
-              --title "$RELEASE_TAG"
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            notes="docs/releases/$RELEASE_TAG.md"
+            if [ -f "$notes" ]; then
+              gh release create "$RELEASE_TAG" --verify-tag --notes-file "$notes" --title "$RELEASE_TAG"
+            else
+              gh release create "$RELEASE_TAG" --verify-tag --generate-notes --title "$RELEASE_TAG"
+            fi
+          fi
           mapfile -d '' files < <(find release-assets -type f -print0)
           test ${#files[@]} -gt 0 || { echo "No verified release assets found" >&2; exit 1; }
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber

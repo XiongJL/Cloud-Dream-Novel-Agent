@@ -228,6 +228,7 @@ def _configure_automation(
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
         automation.calls.append((method, params, origin))
         if request_id:

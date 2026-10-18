@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .schemas import ChapterContinuationInput, ContextBundle, DraftSessionRef, ToolchainError
@@ -113,10 +114,11 @@ def chapter_draft_params(
     resolved_target: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_content = input_data.currentContent or str(context.chapter.get("content") or "")
+    has_prose = bool(_chapter_prose(current_content).strip())
     fills_existing_empty_chapter = (
         isinstance(resolved_target, dict)
         and str(resolved_target.get("chapterId") or "") == input_data.chapterId
-        and not current_content.strip()
+        and not has_prose
         and (
             resolved_target.get("hasContent") is False
             or str(context.chapter.get("id") or "") == input_data.chapterId
@@ -126,7 +128,7 @@ def chapter_draft_params(
             or _requests_blank_chapter_draft(input_data.goal)
         )
     )
-    if not current_content.strip() and not fills_existing_empty_chapter:
+    if not has_prose and not fills_existing_empty_chapter:
         raise ToolchainError(
             "CONTEXT_INSUFFICIENT",
             "生成续写草稿前需要当前章节正文，或可用的前序章节上下文。",
@@ -152,15 +154,39 @@ def chapter_draft_params(
     return params
 
 
+def _chapter_prose(content: str) -> str:
+    """Inspect Lexical text without changing the source used for version checks."""
+    try:
+        document = json.loads(content)
+    except (ValueError, TypeError):
+        return content
+    if not isinstance(document, dict) or not isinstance(document.get("root"), dict):
+        return content
+    root = document["root"]
+    if root.get("type") != "root" or not isinstance(root.get("children"), list):
+        return content
+
+    def text(node: Any) -> str:
+        if not isinstance(node, dict):
+            return ""
+        own = node.get("text") if isinstance(node.get("text"), str) else ""
+        children = node.get("children")
+        if isinstance(children, list):
+            own += "".join(text(child) for child in children)
+        return own
+
+    return text(root)
+
+
 def _requests_blank_chapter_draft(goal: str) -> bool:
     # An explicitly requested first draft does not require prose that has not
     # been written yet. Keep the prior-context guard for ordinary continuation.
     request = goal.split("会话背景（仅用于理解当前任务）", 1)[0].lower()
     blank_target = any(marker in request for marker in (
-        "空白章", "首章", "第一章", "blank chapter", "first chapter",
+        "空白章", "本章内容是空的", "新写整章", "首章", "第一章", "blank chapter", "first chapter",
     ))
     draft_request = any(marker in request for marker in (
-        "创作", "撰写", "生成正文", "完成正文", "写出", "write", "draft",
+        "创作", "撰写", "生成正文", "完成正文", "写出", "新写", "write", "draft",
     ))
     return blank_target and draft_request
 
@@ -172,7 +198,7 @@ def _has_usable_prior_chapter_context(
     content_fields = ("content", "excerpt", "summary", "summaryText", "text")
     return any(
         str(chapter.get("chapterId") or chapter.get("id") or "") != target_chapter_id
-        and any(str(chapter.get(field) or "").strip() for field in content_fields)
+        and any(_chapter_prose(str(chapter.get(field) or "")).strip() for field in content_fields)
         for chapter in adjacent_chapters
         if isinstance(chapter, dict)
     )

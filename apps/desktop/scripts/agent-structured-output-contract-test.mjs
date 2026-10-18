@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises';
 import { jsonrepair } from 'jsonrepair';
 import ts from 'typescript';
 
-const source = await readFile(new URL('../electron/automation/AgentStructuredOutputContracts.ts', import.meta.url), 'utf8');
+const operationsSource = await readFile(new URL('../shared/agentOperationIds.ts', import.meta.url), 'utf8');
+const operationsUrl = `data:text/javascript;base64,${Buffer.from(ts.transpileModule(operationsSource, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText).toString('base64')}`;
+const source = (await readFile(new URL('../electron/automation/AgentStructuredOutputContracts.ts', import.meta.url), 'utf8'))
+    .replace("'../../shared/agentOperationIds'", JSON.stringify(operationsUrl));
 const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText;
@@ -25,7 +28,7 @@ const invokedStructuredMethods = [...automationServiceSource.matchAll(
     /case '([^']+)':\s*\r?\n\s*return invokeStructured\(/g,
 )].map((match) => match[1]).sort();
 const registeredStructuredMethods = contracts.listAgentStructuredOutputMethods();
-assert.equal(registeredStructuredMethods.length, 22, 'The SO-1 coverage baseline must remain explicit');
+assert.equal(registeredStructuredMethods.length, 26, 'The SO-1 baseline, adaptive Skill generators and style quality stages remain explicit');
 assert.deepEqual(
     invokedStructuredMethods,
     registeredStructuredMethods.filter((method) => ![
@@ -34,8 +37,8 @@ assert.deepEqual(
         'outline.generate_draft',
     ].includes(method)),
 );
-assert.match(automationServiceSource, /structuredMethod = type === 'outline-draft'[\s\S]*this\.invokeAgentStructured\([\s\S]*\{ autoRepair: true \}/u);
-assert.match(automationServiceSource, /this\.invokeAgentStructured\(\s*'creative_assets\.revise_draft'[\s\S]*\{ autoRepair: true \}/u);
+assert.match(automationServiceSource, /structuredMethod = type === 'outline-draft'[\s\S]*this\.invokeAgentStructured\([\s\S]*\{ autoRepair: true, agentSkill: payload\.agentSkill \}/u);
+assert.match(automationServiceSource, /this\.invokeAgentStructured\(\s*'creative_assets\.revise_draft'[\s\S]*\{ autoRepair: true, agentSkill: source\.agentSkill \}/u);
 assert.ok(!registeredStructuredMethods.includes('agent.generate_skill_draft'));
 assert.ok(!registeredStructuredMethods.includes('agent.generate_style_skill_pack'));
 for (const method of ['creative_assets.generate_draft', 'creative_assets.revise_draft', 'outline.generate_draft']) {
@@ -57,9 +60,11 @@ const structuredGenerateCallCount = [...aiServiceSource.matchAll(/this\.generate
 const budgetRecoveryCallCount = [...aiServiceSource.matchAll(/this\.generateStructuredWithBudgetRecovery\(/g)].length;
 assert.equal(
     structuredGenerateCallCount + budgetRecoveryCallCount,
-    registeredStructuredMethods.length,
-    'Each structured generator must use a direct contract-aware call or the budget-recovery wrapper',
+    registeredStructuredMethods.length + 1,
+    'Generators and the shared adaptive expert helper must use contract-aware calls or budget recovery',
 );
+assert.equal((aiServiceSource.match(/return this\.generateAdaptiveExpertResult\(/g) || []).length, 3,
+    'Only the three approved range expert methods use the shared adaptive helper');
 assert.match(aiServiceSource, /generateStructuredWithBudgetRecovery\([\s\S]*agent\.generate_consistency_review'\)/u);
 assert.match(
     aiServiceSource,
@@ -195,7 +200,7 @@ const validStylePlan = {
         confidence: 'medium',
         triggerHints: ['需要对应写作能力'],
         antiTriggerHints: ['不适用于事实核查'],
-        supportedOperations: ['chapter.write'],
+        supportedOperations: ['chapter.continuation'],
         constraints: ['不得复制原文长句'],
         methodDimensions: ['节奏', '叙述距离', '信息释放'],
         evidenceNotes: [],
@@ -207,7 +212,7 @@ const validStylePlan = {
         title: '示例文风包',
         description: '组合语言风格与悬念释放能力。',
         bindings: [{
-            operationId: 'chapter.write',
+            operationId: 'chapter.continuation',
             roleId: 'writer',
             primaryDraftKey: 'language_style',
             auxiliaryDraftKey: 'suspense_release',
@@ -218,6 +223,22 @@ const validStylePlan = {
 };
 
 const stylePlanContract = contracts.getAgentStructuredOutputContract('agent.plan_style_skill_pack');
+const qualityContract = contracts.getAgentStructuredOutputContract('agent.style_quality');
+const qualityDocument = { phase: 'document', summary: 'Checked', checks: Object.fromEntries(
+    ['task_fit', 'rule_calibration', 'evidence_trace', 'counterexamples', 'contamination', 'binding_fit'].map(key => [key, 'pass'])), issues: [] };
+assert.deepEqual(contracts.validateAgentStructuredOutput(qualityDocument, qualityContract), []);
+assert.deepEqual(contracts.validateAgentStructuredOutput({ ...qualityDocument,
+    issues: [{ severity: 'advisory', message: '可选例子' }] }, qualityContract), []);
+assert(contracts.validateAgentStructuredOutput({ ...qualityDocument,
+    issues: [{ severity: 'unknown', message: 'unknown classification' }] }, qualityContract).length > 0);
+assert(contracts.validateAgentStructuredOutput({ ...qualityDocument, phase: 'unknown' }, qualityContract).length > 0);
+const missingQualityCheck = structuredClone(qualityDocument);
+delete missingQualityCheck.checks.task_fit;
+assert(contracts.validateAgentStructuredOutput(missingQualityCheck, qualityContract).length > 0);
+assert(contracts.validateAgentStructuredOutput({ phase: 'evidence', decisions: [{ findingRef: 'leaf:0', feature: 'fabricated', disposition: 'supported', reason: 'claim' }] }, qualityContract).length > 0);
+const unregisteredStylePlan = structuredClone(validStylePlan);
+unregisteredStylePlan.pack.bindings[0].operationId = 'draft.chapter';
+assert(contracts.validateAgentStructuredOutput(unregisteredStylePlan, stylePlanContract).length > 0);
 assert.ok(stylePlanContract);
 assert.ok(contracts.listAgentStructuredOutputMethods().includes('agent.plan_style_skill_pack'));
 assert.match(
