@@ -482,6 +482,8 @@ interface AIAPI {
     }>
     getSettings: () => Promise<AISettings>
     getMcpCliSetup: () => Promise<McpCliSetupPayload>
+    getMcpServerStatus: () => Promise<import('../shared/mcpServer').McpServerStatus>
+    configureMcpServer: (enabled: boolean, port?: number) => Promise<import('../shared/mcpServer').McpServerStatus>
     getMapImageStats: () => Promise<{
         totalCalls: number
         successCalls: number
@@ -1594,6 +1596,7 @@ interface AgentSideEffectReconciliationResult {
 }
 
 interface Window {
+    novelExport: import('../shared/novelExport').NovelExportAPI
     ipcRenderer: import('electron').IpcRenderer
     db: DBAPI
     electron: {

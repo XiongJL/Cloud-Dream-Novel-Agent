@@ -1,0 +1,27 @@
+.novel-export-overlay,.novel-export-freeze{position:fixed;inset:0;z-index:11000;background:rgb(0 0 0 / .35);display:flex;align-items:center;justify-content:center;padding:20px}
+.novel-export-dialog,.novel-export-status{background:var(--ui-surface-raised,#fff);color:var(--ui-text-primary,#171717);border:1px solid var(--ui-border,#ddd);border-radius:16px;box-shadow:0 16px 56px #0003;padding:24px}
+[data-theme=dark] .novel-export-dialog,.novel-export-status[data-theme=dark]{background:#17171f;color:#eee;border-color:#383844}
+.novel-export-dialog{width:460px;max-width:100%;max-height:90vh;overflow:auto}
+.novel-export-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.novel-export-heading h2{font-size:20px;font-weight:600}
+.novel-export-book{display:block;overflow-wrap:anywhere}
+.novel-export-dialog p,.novel-export-status p{font-size:13px;line-height:1.7;margin:10px 0;display:flex;gap:8px;align-items:center}
+.novel-export-dialog fieldset{margin-top:20px;min-width:0}
+.novel-export-dialog legend{font-size:13px;margin-bottom:8px}
+.novel-export-dialog label{display:flex;align-items:center;gap:12px;border:1px solid #8885;border-radius:10px;padding:14px;margin-bottom:10px;cursor:pointer}
+.novel-export-dialog label.selected{border-color:#6366f1;background:#6366f10d}
+.novel-export-dialog label small{display:block;font-size:12px;opacity:.7;margin-top:4px}
+.novel-export-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:22px}
+.novel-export-dialog button,.novel-export-status button{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:8px;font-size:13px;background:#8881}
+.novel-export-dialog button:hover,.novel-export-status button:hover{background:#8883}
+.novel-export-dialog button.primary{background:#4f46e5;color:white}
+.novel-export-dialog button:disabled{opacity:.45;cursor:not-allowed}
+.novel-export-dialog .novel-export-scope label{padding:9px 12px;margin-bottom:7px;font-size:13px}
+.novel-export-scope-fields{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:12px;min-width:0}
+.novel-export-dialog .novel-export-scope-fields label{display:flex;flex-direction:column;align-items:stretch;gap:6px;min-width:0;border:0;margin:0;padding:0;font-size:12px;cursor:default}
+.novel-export-scope-fields input{width:100%;min-width:0;border:1px solid #8886;border-radius:6px;padding:7px 10px;background:transparent;color:inherit;font-size:14px}
+.novel-export-scope-fields span{font-size:12px}
+.novel-export-dialog :focus-visible,.novel-export-status :focus-visible{outline:2px solid #6366f1;outline-offset:3px}
+.novel-export-status{position:fixed;bottom:24px;right:24px;z-index:10000;width:380px;max-width:calc(100vw - 32px);padding:18px}
+.novel-export-status .novel-export-path{display:block;overflow-wrap:anywhere;opacity:.7;font-size:12px}
+.novel-export-freeze{z-index:12000;gap:12px;color:white;background:rgb(0 0 0 / .55)}

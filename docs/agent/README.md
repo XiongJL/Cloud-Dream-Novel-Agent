@@ -30,6 +30,11 @@ CloudDream Novel Agent 的 Agent 化目标不是把现有编辑器改成聊天�
 | [python-runtime.md](./python-runtime.md) | Python Agent Runtime、已落地代码、API、开发环境 |
 | [python-ai-capability-migration-requirements.md](./python-ai-capability-migration-requirements.md) | Agent 模型调用渐进迁移至 Python：ModelGateway、双协议适配、Structured Output、灰度回滚与分阶段验收 |
 | [tooling-and-mcp.md](./tooling-and-mcp.md) | Automation、RAG、AI 工作台、MCP/FastMCP、权限边界 |
+| [mcp-application-capabilities-requirements.md](./mcp-application-capabilities-requirements.md) | 实施中：Python 统一 MCP 入口、共享工具契约、写作能力开放、Agent 委托、独立 stdio 模式、长任务与会话持久化、分阶段验收 |
+| [Python MCP stdio 首批实施](./acceptance-mcp-python-stdio-2026-10-19.md) | 现有 31 个外部工具迁移、共享契约、FastMCP、网关校验、启动与打包验证范围 |
+| [Streamable HTTP 与 MCP 开关](./acceptance-mcp-http-2026-10-19.md) | HTTP 主入口、MCP CLI 设置页、接入指令、总开关、生命周期与验收 |
+| [Prisma 启动修复](./acceptance-prisma-startup-2026-10-19.md) | 开发启动显式准备 Core、过期客户端与 Windows 引擎占用修复、主工程同步 |
+| [本轮 MCP 主工程同步](./acceptance-mcp-sync-2026-10-19.md) | MCP 改动完整性、启动修复及主工程 HTTP 端到端验证 |
 | [intent-service-requirements.md](./intent-service-requirements.md) | IntentService 分层、输入输出契约、路由优先级与权限边界 |
 | [structured-user-input-requirements.md](./structured-user-input-requirements.md) | Codex-like 结构化问答、先读取后提问、计划前澄清与执行中决策统一协议 |
 | [agent-workspace-continuity-requirements.md](./agent-workspace-continuity-requirements.md) | 写作/Agent 无损切换、后台 Run、输入与确认表单恢复、跨模式状态提醒和渲染性能约束 |

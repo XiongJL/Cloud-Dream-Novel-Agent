@@ -98,6 +98,9 @@ jobs:
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
+      - name: Test MCP lifecycle, novel export and Prisma readiness
+        run: pnpm --filter novel-editor-desktop run test:mcp-manager && pnpm --filter novel-editor-desktop run test:novel-export && pnpm --filter novel-editor-desktop run test:prisma-client-readiness
+
       - name: Type-check Desktop
         run: pnpm --filter novel-editor-desktop run typecheck
 
@@ -112,6 +115,10 @@ jobs:
             throw "Packaged Agent runtime missing: $binary"
           }
           python agent_runtime/scripts/smoke_runtime.py --binary $binary
+          $env:NOVEL_MCP_PACKAGED_EXE = (Resolve-Path -LiteralPath $binary).Path
+          $exporter = Join-Path (Split-Path -Parent $binary) "document-exporter/document-exporter.exe"
+          $env:NOVEL_EXPORTER_BINARY = (Resolve-Path -LiteralPath $exporter).Path
+          uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime/tests/test_mcp_http.py agent_runtime/tests/test_mcp_stdio.py::test_packaged_launcher_without_system_python_or_node agent_runtime/tests/test_document_exporter.py::test_packaged_worker_without_system_python
 
       - name: Stage Windows release assets
         id: stage
@@ -229,6 +236,9 @@ jobs:
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 
+      - name: Test MCP lifecycle, novel export and Prisma readiness
+        run: pnpm --filter novel-editor-desktop run test:mcp-manager && pnpm --filter novel-editor-desktop run test:novel-export && pnpm --filter novel-editor-desktop run test:prisma-client-readiness
+
       - name: Type-check Desktop
         run: pnpm --filter novel-editor-desktop run typecheck
 
@@ -240,6 +250,10 @@ jobs:
           binary="$(find apps/desktop/release -type f -path '*/Contents/Resources/agent-runtime/novel-agent-runtime' -print -quit)"
           test -n "$binary" || { echo "Packaged Agent runtime missing" >&2; exit 1; }
           python agent_runtime/scripts/smoke_runtime.py --binary "$binary"
+          export NOVEL_MCP_PACKAGED_EXE="$PWD/$binary"
+          export NOVEL_EXPORTER_BINARY="$(dirname "$NOVEL_MCP_PACKAGED_EXE")/document-exporter/document-exporter"
+          test -f "$NOVEL_EXPORTER_BINARY" || { echo "Packaged document exporter missing" >&2; exit 1; }
+          uv run --frozen --project agent_runtime --extra dev --extra build pytest -q agent_runtime/tests/test_mcp_http.py agent_runtime/tests/test_mcp_stdio.py::test_packaged_launcher_without_system_python_or_node agent_runtime/tests/test_document_exporter.py::test_packaged_worker_without_system_python
 
       - name: Stage macOS release assets
         id: stage

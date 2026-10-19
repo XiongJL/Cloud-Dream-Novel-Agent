@@ -7,6 +7,7 @@ import { EditorPreferencesProvider } from './hooks/useEditorPreferences';
 import { Toaster } from 'sonner';
 import type { BackupProgress } from '../shared/backup';
 import { BackupProgressDialog } from './components/Settings/BackupProgressDialog';
+import { NovelExportProvider } from './components/NovelExport/NovelExportProvider';
 
 function App() {
     const [backupBusy, setBackupBusy] = useState(false);
@@ -28,7 +29,7 @@ function App() {
     return (
         <React.StrictMode>
             <EditorPreferencesProvider>
-                <Home />
+                <NovelExportProvider><Home /></NovelExportProvider>
                 <Toaster richColors position="top-right" />
                 {backupBusy && <BackupProgressDialog progress={progress} />}
             </EditorPreferencesProvider>

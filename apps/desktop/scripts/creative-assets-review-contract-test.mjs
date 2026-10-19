@@ -5,7 +5,7 @@ const panel = await readFile(new URL('../src/components/AgentWorkspace/CreativeA
 const workspace = await readFile(new URL('../src/components/AgentWorkspace/AgentWorkspace.tsx', import.meta.url), 'utf8');
 const automation = await readFile(new URL('../electron/automation/AutomationService.ts', import.meta.url), 'utf8');
 const runtime = await readFile(new URL('../../../agent_runtime/novel_agent_runtime/runtime.py', import.meta.url), 'utf8');
-const manifest = await readFile(new URL('../../../agent_runtime/novel_agent_runtime/tool_manifest.py', import.meta.url), 'utf8');
+const toolCatalog = JSON.parse(await readFile(new URL('../../../contracts/tools/catalog.json', import.meta.url), 'utf8'));
 
 assert.match(workspace, /session\.type === 'creative-assets'/);
 assert.match(workspace, /<CreativeAssetsReviewPanel/);
@@ -31,6 +31,7 @@ assert.match(automation, /revisionOfDraftSessionId: source\.draftSessionId/);
 assert.match(automation, /undoCreativeAssetsWriteback/);
 assert.match(runtime, /revision_tool = "creative_assets\.revise_draft"/);
 assert.match(runtime, /deliverable="creative_assets_draft" if is_creative_assets else "chapter_draft"/);
-assert.match(manifest, /"creative_assets\.revise_draft"/);
+assert.ok(toolCatalog.tools.some(tool => tool.name === 'creative_assets.revise_draft'
+    && Object.hasOwn(tool.profiles, 'internal_agent')));
 
 console.log('Creative assets Inspector review and revision contracts passed.');

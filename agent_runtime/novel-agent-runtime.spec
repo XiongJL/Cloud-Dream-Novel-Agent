@@ -6,6 +6,7 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules, copy_metada
 
 runtime_root = Path(SPECPATH)
 datas = []
+datas.append((str(runtime_root.parent / "contracts" / "tools" / "catalog.json"), "novel_mcp"))
 binaries = []
 hiddenimports = [
     "uvicorn.lifespan.on",

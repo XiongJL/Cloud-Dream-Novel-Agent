@@ -103,6 +103,8 @@ pnpm dev:desktop
 
 也可以运行 `pnpm dev`，直接启动桌面端开发任务。
 
+开发启动命令会先检查 Prisma Client，必要时重新生成，再生成首启建库 SQL、编译 Core 并启动 Vite/Electron；`dev:local` 和 `dev:8080` 同样执行准备步骤，避免新 worktree 加载过期客户端。准备步骤直接写在启动命令中，不依赖 pnpm 的 `predev` 自动钩子。客户端与 schema、SDK、引擎一致时复用现有文件，避免 Windows 上已加载的引擎 DLL 被重复替换。
+
 ### 常用命令
 
 | 命令 | 用途 |
@@ -205,6 +207,7 @@ git push origin v0.2.0
 - [User Guide](USER_GUIDE_EN.md)
 - [开发指南](DEVELOPMENT.md)
 - [完整备份与恢复需求与设计](BackupDesign.md)
+- [小说导出需求与设计](docs/novel-export-requirements.md)
 - [Agent 设计文档](docs/agent/README.md)
 - [Agent 路线图](docs/agent/roadmap.md)
 - [手动验收清单](docs/agent/manual-acceptance-checklist.md)

@@ -72,6 +72,19 @@ jobs:
       - name: Build Core and Prisma client
         run: pnpm run build:core
 
+      - name: Setup Python for desktop integration tests
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Prepare Python integration environment
+        run: |
+          python -m pip install "uv==${UV_VERSION}"
+          uv sync --frozen --project agent_runtime --extra dev
+
+      - name: Test MCP lifecycle, novel export and Prisma readiness
+        run: pnpm --filter novel-editor-desktop run test:mcp-manager && pnpm --filter novel-editor-desktop run test:novel-export && pnpm --filter novel-editor-desktop run test:prisma-client-readiness
+
       - name: Test Desktop Agent contracts
         run: pnpm --filter novel-editor-desktop run test:agent-recovery
 

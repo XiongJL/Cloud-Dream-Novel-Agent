@@ -3,8 +3,7 @@ import { initDb, db, ensureDbSchema, PrismaClient } from '@novel-editor/core'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import http from 'node:http'
-import { execSync } from 'child_process'
+import { execSync, execFile } from 'child_process'
 import fs from 'fs'
 import * as searchIndex from './search/searchIndex'
 import { rebuildRagVectorIndex } from './ai/rag/vectorIndex'
@@ -15,10 +14,14 @@ import { formatAiErrorForDisplay, normalizeAiError } from './ai/errors'
 import { devLog, devLogError, initDevLogger, isDevDebugEnabled, redactForLog } from './debug/devLogger'
 import { AutomationService } from './automation/AutomationService'
 import { AutomationServer } from './automation/AutomationServer'
+import { McpServerManager } from './automation/McpServerManager'
 import { PythonRuntimeClient } from './agent/PythonRuntimeClient'
 import { AgentConversationStore, type AgentConversationRecord } from './agent/AgentConversationStore'
 import { AgentAttachmentStore } from './agent/AgentAttachmentStore'
 import { DocumentExtractorClient } from './agent/DocumentExtractorClient'
+import { DocumentExporterClient } from './agent/DocumentExporterClient'
+import { NovelExportService } from './services/NovelExportService'
+import type { NovelExportRequest } from '../shared/novelExport'
 import { applyDurableDraftCutover } from './agent/DurableDraftCutover'
 import { readNovelFileAsStructure } from './importers/novelImport'
 import {
@@ -318,13 +321,13 @@ function resolveMcpLauncherPath(): string {
         if (process.platform === 'win32') {
             return path.join(process.resourcesPath, 'mcp', 'novel-editor-mcp.cmd');
         }
-        return path.join(process.resourcesPath, 'mcp', 'novel-editor-mcp.mjs');
+        return path.join(process.resourcesPath, 'mcp', 'novel-editor-mcp.sh');
     }
 
     if (process.platform === 'win32') {
         return path.join(process.env.APP_ROOT || '', 'scripts', 'novel-editor-mcp.cmd');
     }
-    return path.join(process.env.APP_ROOT || '', 'scripts', 'novel-editor-mcp.mjs');
+    return path.join(process.env.APP_ROOT || '', 'scripts', 'novel-editor-mcp.sh');
 }
 
 function buildMcpCliSetupPayload(): McpCliSetupPayload {
@@ -332,9 +335,9 @@ function buildMcpCliSetupPayload(): McpCliSetupPayload {
     const launcherExists = fs.existsSync(commandPath);
     const serverName = 'novel_editor';
     const startupTimeoutSec = 60;
-    const toolTimeoutSec = 120;
+    const toolTimeoutSec = 300;
 
-    const command = process.platform === 'win32' ? 'cmd' : 'node';
+    const command = process.platform === 'win32' ? 'cmd' : 'sh';
     const args = process.platform === 'win32' ? ['/c', commandPath] : [commandPath];
     const codexToml = process.platform === 'win32'
         ? [
@@ -346,14 +349,14 @@ function buildMcpCliSetupPayload(): McpCliSetupPayload {
         ].join('\n')
         : [
             `[mcp_servers.${serverName}]`,
-            'command = "node"',
+            'command = "sh"',
             `args = ["${commandPath}"]`,
             `startup_timeout_sec = ${startupTimeoutSec}`,
             `tool_timeout_sec = ${toolTimeoutSec}`,
         ].join('\n');
     const claudeCommand = process.platform === 'win32'
         ? `claude mcp add novel-editor --scope local -- cmd /c ${quoteWindowsArg(commandPath)}`
-        : `claude mcp add novel-editor --scope local -- node ${quoteWindowsArg(commandPath)}`;
+        : `claude mcp add novel-editor --scope local -- sh ${quoteWindowsArg(commandPath)}`;
     const jsonConfig = JSON.stringify(
         {
             mcpServers: {
@@ -412,78 +415,28 @@ function readAutomationRuntimeDescriptor(): AutomationRuntimeDescriptor {
     };
 }
 
-async function invokeAutomationForHealth(runtime: AutomationRuntimeDescriptor): Promise<{ ok: boolean; code?: string; message?: string; data?: unknown }> {
-    const payload = {
-        method: 'novel.list',
-        params: {},
-        origin: 'desktop-ui',
-    };
-    const body = JSON.stringify(payload);
-
-    return await new Promise((resolve, reject) => {
-        const request = http.request(
-            {
-                hostname: '127.0.0.1',
-                port: runtime.port,
-                path: '/invoke',
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(body, 'utf8'),
-                    Authorization: `Bearer ${runtime.token}`,
-                },
-            },
-            (response) => {
-                const chunks: Buffer[] = [];
-                response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-                response.on('end', () => {
-                    const text = Buffer.concat(chunks).toString('utf8');
-                    try {
-                        resolve(JSON.parse(text));
-                    } catch (error: any) {
-                        reject(new Error(`Automation health response parse failed: ${error?.message || 'unknown error'}`));
-                    }
-                });
-            },
-        );
-
-        request.setTimeout(8000, () => {
-            request.destroy(new Error('Automation health request timeout'));
-        });
-        request.on('error', (error) => reject(error));
-        request.write(body);
-        request.end();
-    });
-}
-
 async function testNovelEditorMcpBridge(): Promise<{ ok: boolean; detail: string }> {
     const setup = buildMcpCliSetupPayload();
-    if (!setup.launcherExists) {
-        return { ok: false, detail: `MCP launcher missing: ${setup.commandPath}` };
-    }
-
-    let runtime: AutomationRuntimeDescriptor;
+    const status = mcpServerManager?.status();
+    if (!status?.enabled) return { ok: false, detail: 'MCP is disabled. Enable MCP in Settings first.' };
+    if (status.state !== 'running' || !status.token) return { ok: false, detail: status.error || `MCP ${status.state}` };
+    if (!setup.launcherExists) return { ok: false, detail: `MCP launcher missing: ${setup.commandPath}` };
     try {
-        runtime = readAutomationRuntimeDescriptor();
+        readAutomationRuntimeDescriptor();
+        const stdout = await new Promise<string>((resolve, reject) => {
+            execFile(setup.command, [...setup.args, '--smoke', '--url', status.url], {
+                timeout: 60_000, windowsHide: true, encoding: 'utf8',
+                env: { ...process.env, NOVEL_MCP_HTTP_TOKEN: status.token },
+            }, (error, stdout, stderr) => {
+                if (error) reject(new Error(`MCP HTTP test failed: ${stderr || error.message}`));
+                else resolve(stdout);
+            });
+        });
+        const result = JSON.parse(stdout);
+        const count = Array.isArray(result.result?.items) ? result.result.items.length : 0;
+        return { ok: true, detail: `Python FastMCP ready. Streamable HTTP=ok protocol=${result.protocolVersion} tools=${result.toolCount} novels=${count}` };
     } catch (error: any) {
-        return { ok: false, detail: error?.message || 'Automation runtime unavailable' };
-    }
-
-    try {
-        const response = await invokeAutomationForHealth(runtime);
-        if (!response?.ok) {
-            return {
-                ok: false,
-                detail: `Automation invoke failed: ${response?.code || 'UNKNOWN'} ${response?.message || ''}`.trim(),
-            };
-        }
-        const count = Array.isArray(response.data) ? response.data.length : 0;
-        return {
-            ok: true,
-            detail: `MCP bridge ready. launcher=ok runtime=ok invoke=ok novels=${count}`,
-        };
-    } catch (error: any) {
-        return { ok: false, detail: `Automation invoke error: ${error?.message || 'unknown error'}` };
+        return { ok: false, detail: error?.message || 'MCP HTTP test failed' };
     }
 }
 
@@ -1608,6 +1561,7 @@ const syncManager = new SyncManager();
 let aiService!: AiService;
 let automationService!: AutomationService;
 let automationServer: AutomationServer | null = null;
+let mcpServerManager: McpServerManager | null = null;
 let agentRuntimeClient: PythonRuntimeClient | null = null;
 const agentConversationStore = new AgentConversationStore(db);
 const agentAttachmentStore = new AgentAttachmentStore(db);
@@ -1721,6 +1675,16 @@ ipcMain.handle('ai:get-openclaw-manifest', async () => {
         console.error('[Main] ai:get-openclaw-manifest failed:', e);
         throw e;
     }
+});
+
+ipcMain.handle('mcp:get-status', () => {
+    if (!mcpServerManager) throw new Error('MCP service is not initialized');
+    return mcpServerManager.status();
+});
+
+ipcMain.handle('mcp:configure', (_, config: { enabled: boolean; port?: number }) => {
+    if (!mcpServerManager) throw new Error('MCP service is not initialized');
+    return mcpServerManager.configure(config?.enabled, config?.port);
 });
 
 ipcMain.handle('ai:update-settings', async (_, partial: any) => {
@@ -2196,6 +2160,58 @@ ipcMain.handle('sync:pull', async () => {
 });
 
 // --- Backup IPC ---
+// Novel document export only freezes editing while flushing and reading a snapshot.
+// It does not enter the full-backup lifecycle or stop the Agent runtime.
+async function flushExportWindows(novelId: string): Promise<void> {
+    await Promise.all(BrowserWindow.getAllWindows().map(window => new Promise<void>((resolve, reject) => {
+        const requestId = randomUUID();
+        const cleanup = () => {
+            clearTimeout(timer);
+            ipcMain.removeListener('novel-export:flushed', finish);
+            window.removeListener('closed', closed);
+        };
+        const closed = () => { cleanup(); reject(new Error('编辑窗口已关闭，请重试。')); };
+        const finish = (event: Electron.IpcMainEvent, response: { requestId: string; error?: boolean }) => {
+            if (event.sender !== window.webContents || response?.requestId !== requestId) return;
+            cleanup();
+            response.error ? reject(new Error('编辑内容保存失败，请先保存后重试。')) : resolve();
+        };
+        const timer = setTimeout(() => { cleanup(); reject(new Error('等待编辑窗口保存超时，请重试。')); }, 30_000);
+        ipcMain.on('novel-export:flushed', finish);
+        window.once('closed', closed);
+        window.webContents.send('novel-export:flush', { requestId, novelId });
+    })));
+}
+const documentExporter = new DocumentExporterClient();
+const novelExporter = new NovelExportService({
+    database: db,
+    choosePath: async (name, format) => {
+        const result = await dialog.showSaveDialog({ title: '导出整本', defaultPath: name, filters: [{ name: format.toUpperCase(), extensions: [format] }] });
+        return result.canceled ? null : result.filePath || null;
+    },
+    chooseDirectory: async () => {
+        const result = await dialog.showOpenDialog({ title: '选择分批导出的保存目录', properties: ['openDirectory', 'createDirectory'] });
+        return result.canceled ? null : result.filePaths[0] || null;
+    },
+    confirmOverwrite: async file => (await dialog.showMessageBox({ type: 'question', title: '覆盖文件', message: `文件已存在，是否覆盖？\n${file}`, buttons: ['取消', '覆盖'], defaultId: 0, cancelId: 0 })).response === 1,
+    flush: flushExportWindows,
+    freeze: value => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('novel-export:freeze', value); },
+    read: operation => dataOperation(operation, false),
+    datasetId: () => datasetManager?.current().id || getDatasetRoot(),
+    generate: (...args) => documentExporter.generate(...args),
+});
+ipcMain.handle('novel-export:describe', (_event, novelId: string) => novelExporter.describe(novelId));
+ipcMain.handle('novel-export:start', (event, payload: NovelExportRequest) =>
+    novelExporter.start(payload, progress => { if (!event.sender.isDestroyed()) event.sender.send('novel-export:progress', progress); }));
+ipcMain.handle('novel-export:open-directory', async (_event, requestId: string) => {
+    const target = novelExporter.completedTarget(requestId);
+    if (!target) return;
+    if (target.directory) {
+        const error = await shell.openPath(target.path);
+        if (error) throw new Error(error);
+    } else shell.showItemInFolder(target.path);
+});
+
 import { backupService } from './services/BackupService';
 
 async function flushBackupWindows(): Promise<void> {
@@ -3309,6 +3325,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+    void mcpServerManager?.stop();
     backupService.stop();
     for (const unsubscribe of agentRunSubscriptions.values()) {
         unsubscribe();
@@ -3619,7 +3636,29 @@ app.whenReady().then(async () => {
             win?.webContents.send('automation:data-changed', { method });
         },
     );
+    automationServer.setExternalMcpEnabled(false);
     await automationServer.start();
+    // MCP is an application capability, independent of the selected AI provider.
+    // The packaged binary dispatches before importing the internal Agent runtime.
+    const mcpRuntimeRoot = app.isPackaged
+        ? path.join(process.resourcesPath, 'agent-runtime')
+        : path.resolve(process.env.APP_ROOT || '', '..', '..', 'agent_runtime');
+    const mcpPython = process.env.NOVEL_EDITOR_PYTHON_EXE || path.join(
+        mcpRuntimeRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python',
+    );
+    mcpServerManager = new McpServerManager({
+        userDataPath: app.getPath('userData'), runtimePath: getAutomationRuntimePath(),
+        command: app.isPackaged
+            ? path.join(mcpRuntimeRoot, process.platform === 'win32' ? 'novel-agent-runtime.exe' : 'novel-agent-runtime')
+            : mcpPython,
+        argsPrefix: app.isPackaged ? ['--mode', 'mcp-http'] : ['-m', 'novel_mcp'],
+        cwd: mcpRuntimeRoot,
+        onEnabledChanged: enabled => automationServer?.setExternalMcpEnabled(enabled),
+    });
+    // Readiness and any port conflict are displayed in Settings without delaying the window.
+    void mcpServerManager.configure(mcpServerManager.status().enabled).catch(error => {
+        console.error('[MCP] Could not save local configuration:', error);
+    });
     agentRuntimeClient?.prewarm();
 
     // 5.5 Apply AI proxy settings before networked AI calls

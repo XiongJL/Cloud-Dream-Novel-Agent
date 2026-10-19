@@ -15,6 +15,8 @@ extraResources:
     to: mcp/novel-editor-mcp.mjs
   - from: scripts/novel-editor-mcp.cmd
     to: mcp/novel-editor-mcp.cmd
+  - from: scripts/novel-editor-mcp.sh
+    to: mcp/novel-editor-mcp.sh
   - from: build/agent-runtime
     to: agent-runtime
 

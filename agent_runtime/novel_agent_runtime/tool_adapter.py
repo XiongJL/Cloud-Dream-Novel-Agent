@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from fastmcp import Client, FastMCP
+from fastmcp import Client
 from fastmcp.tools import Tool, ToolResult
 from mcp.types import ToolAnnotations
 from pydantic import PrivateAttr
 
 from .automation import AutomationInvokeError
-from .tool_manifest import AGENT_TOOL_MANIFEST, AgentToolDefinition
+from .tool_manifest import AGENT_TOOL_MANIFEST, AGENT_TOOL_BY_NAME, AgentToolDefinition
+from novel_mcp.server import create_registered_server
 
 
 class AutomationInvoker(Protocol):
@@ -164,13 +165,12 @@ class FastMcpAgentToolAdapter:
     def __init__(self, upstream: AutomationInvoker, timeout_seconds: float = 90) -> None:
         self.upstream = upstream
         self.timeout_seconds = timeout_seconds
-        self.server = FastMCP(
-            "CloudDream Novel Agent Tools",
+        self.server = create_registered_server(
+            "internal_agent",
+            lambda definition: _AutomationProxyTool(AGENT_TOOL_BY_NAME[definition["name"]], upstream),
+            name="CloudDream Novel Agent Tools",
             instructions="Internal Agent tools. Side-effect tools require an approved plan before invocation.",
-            strict_input_validation=True,
         )
-        for definition in AGENT_TOOL_MANIFEST:
-            self.server.add_tool(_AutomationProxyTool(definition, upstream))
         self._allowed_tools = frozenset(definition.name for definition in AGENT_TOOL_MANIFEST)
         self._tool_timeouts = {definition.name: definition.timeout_seconds for definition in AGENT_TOOL_MANIFEST}
 

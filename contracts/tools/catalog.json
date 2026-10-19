@@ -1,0 +1,2631 @@
+{
+  "schemaVersion": 1,
+  "tools": [
+    {
+      "name": "novel.list",
+      "description": "列出当前可用小说。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 0
+        },
+        "external_mcp": {
+          "description": "列出小说。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          },
+          "idempotent": true,
+          "order": 0,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "volume.list",
+      "description": "列出小说的卷和章节概要。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 1
+        },
+        "external_mcp": {
+          "description": "列出卷和章节概要。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "novelId"
+            ]
+          },
+          "idempotent": true,
+          "order": 1,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "chapter.list",
+      "description": "列出指定卷下的章节；长范围分析可使用 offset/limit 分批读取。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "volumeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "includeContent": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "volumeId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 2
+        },
+        "external_mcp": {
+          "description": "列出卷下章节。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "volumeId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "volumeId"
+            ]
+          },
+          "idempotent": true,
+          "order": 2,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "chapter.get",
+      "description": "读取指定章节内容。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "chapterId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "chapterId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 3
+        },
+        "external_mcp": {
+          "description": "读取章节内容。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "chapterId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "chapterId"
+            ]
+          },
+          "idempotent": true,
+          "order": 3,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "attachment.list",
+      "description": "列出当前小说、当前会话中用户已经发送的文档附件；只返回元数据。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "conversationId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId",
+          "conversationId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 4
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "attachment.get",
+      "description": "兼容接口：按字符窗口读取当前会话附件。优先使用 attachment.read；同时接受 offset/limit 或 startOffset/endOffset。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "conversationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attachmentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12000
+          },
+          "startOffset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "endOffset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "novelId",
+          "conversationId",
+          "attachmentId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 5
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "attachment.read",
+      "description": "按通用选择器读取附件。可按任意标题章节、字符范围、页码范围或块范围定位；长范围会按块边界分页并返回 nextSelector。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "conversationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attachmentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "selector": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "section"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "occurrence": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "includeSubsections": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "title"
+                ],
+                "additionalProperties": true
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "offset_range"
+                  },
+                  "startOffset": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "endOffset": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "kind",
+                  "startOffset",
+                  "endOffset"
+                ],
+                "additionalProperties": true
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "page_range"
+                  },
+                  "startPage": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "endPage": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "startPage",
+                  "endPage"
+                ],
+                "additionalProperties": true
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "block_range"
+                  },
+                  "startBlockId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "endBlockId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "startBlockId"
+                ],
+                "additionalProperties": true
+              }
+            ]
+          }
+        },
+        "required": [
+          "novelId",
+          "conversationId",
+          "attachmentId",
+          "selector"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 6
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "attachment.outline",
+      "description": "读取当前会话附件的标题、页码和块范围目录，不返回完整正文。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "conversationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "attachmentId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId",
+          "conversationId",
+          "attachmentId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 7
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "attachment.search",
+      "description": "在当前会话已发送的附件中搜索关键词，返回少量命中片段和字符偏移；需要完整范围时调用 attachment.read。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "conversationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "attachmentId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          }
+        },
+        "required": [
+          "novelId",
+          "conversationId",
+          "query"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 8
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "draft.get",
+      "description": "读取指定待审核草稿及其当前版本。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftSessionId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "draftSessionId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 9
+        },
+        "external_mcp": {
+          "description": "读取单个草稿会话。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "draftSessionId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "draftSessionId"
+            ]
+          },
+          "idempotent": true,
+          "order": 22,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "chapter.scope_context.build",
+      "description": "按已批准范围装配有序章节、摘要、实体、情节线、版本快照和覆盖统计。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "scopeId": {
+            "type": "string"
+          },
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "current_chapter",
+              "selected_chapters",
+              "chapter_range",
+              "current_volume",
+              "novel"
+            ]
+          },
+          "volumeId": {
+            "type": "string"
+          },
+          "chapterId": {
+            "type": "string"
+          },
+          "chapterIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "anchorChapterId": {
+            "type": "string"
+          },
+          "processingMode": {
+            "type": "string",
+            "enum": [
+              "detailed",
+              "batched"
+            ]
+          },
+          "representation": {
+            "type": "string",
+            "enum": [
+              "default",
+              "catalog",
+              "verbatim",
+              "expert_context"
+            ]
+          },
+          "currentContent": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "locale": {
+            "type": "string"
+          },
+          "batchSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "maxDetailedChapters": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "maxEstimatedTokens": {
+            "type": "integer",
+            "minimum": 4000,
+            "maximum": 200000
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 10
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "chapter.continuation_context.build",
+      "description": "装配按作品顺序排列的续写上下文、分层正文与摘要、当前编辑内容和版本快照。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "chapterId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "currentContent": {
+            "type": "string"
+          },
+          "contextChapterCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "recentRawChapterCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "targetLength": {
+            "type": "integer",
+            "minimum": 100
+          },
+          "style": {
+            "type": "string"
+          },
+          "tone": {
+            "type": "string"
+          },
+          "pace": {
+            "type": "string"
+          },
+          "locale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "novelId",
+          "chapterId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 11
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "rag.ask",
+      "description": "检索项目知识库并返回带证据的回答。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1
+          },
+          "chapterId": {
+            "type": "string"
+          },
+          "locale": {
+            "type": "string"
+          },
+          "maxEvidenceItems": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "required": [
+          "novelId",
+          "question"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 12
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "search.query",
+      "description": "在当前小说中执行全文搜索。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "keyword": {
+            "type": "string",
+            "minLength": 1
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "novelId",
+          "keyword"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 13
+        },
+        "external_mcp": {
+          "description": "全文搜索。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              },
+              "keyword": {
+                "type": "string"
+              },
+              "limit": {
+                "type": "number"
+              },
+              "offset": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "novelId",
+              "keyword"
+            ]
+          },
+          "idempotent": true,
+          "order": 13,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "plotline.list",
+      "description": "列出小说情节线与情节点。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 14
+        },
+        "external_mcp": {
+          "description": "列出主线和要点。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "novelId"
+            ]
+          },
+          "idempotent": true,
+          "order": 6,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "character.list",
+      "description": "列出小说角色。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 15
+        },
+        "external_mcp": {
+          "description": "列出角色。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "novelId"
+            ]
+          },
+          "idempotent": true,
+          "order": 7,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "item.list",
+      "description": "列出小说物品与技能。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 16
+        },
+        "external_mcp": {
+          "description": "列出物品和技能。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "novelId"
+            ]
+          },
+          "idempotent": true,
+          "order": 8,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "worldsetting.list",
+      "description": "列出小说世界观设定。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 17
+        },
+        "external_mcp": {
+          "description": "列出世界设定。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "novelId"
+            ]
+          },
+          "idempotent": true,
+          "order": 9,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "map.list",
+      "description": "列出小说地图。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 18
+        },
+        "external_mcp": {
+          "description": "列出地图。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "novelId"
+            ]
+          },
+          "idempotent": true,
+          "order": 12,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "agent.generate_chapter_beats",
+      "description": "根据已装配上下文为连续多章生成可审批的章节节拍。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "chapterId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "goal": {
+            "type": "string",
+            "minLength": 1
+          },
+          "chapterCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "locale": {
+            "type": "string"
+          },
+          "context": {
+            "type": "object"
+          },
+          "taskMode": {
+            "type": "string",
+            "enum": [
+              "sequence_continuation",
+              "batch_rewrite"
+            ]
+          },
+          "targetChapterIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "revisionInstruction": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "previousBeats": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "novelId",
+          "chapterId",
+          "goal",
+          "chapterCount"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 180,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 19
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "draft.batch.get",
+      "description": "读取父子章节草稿批次及其节拍和状态。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "draftBatchId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 20
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "draft.batch.create",
+      "description": "创建等待节拍审批的父子章节草稿批次。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "volumeId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "anchorChapterId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "sequence_continuation",
+              "batch_rewrite"
+            ]
+          },
+          "insertionMode": {
+            "type": "string",
+            "enum": [
+              "after_anchor",
+              "volume_end"
+            ]
+          },
+          "beats": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object"
+            }
+          },
+          "sourceSnapshot": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "targetChapterIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "novelId",
+          "volumeId",
+          "anchorChapterId",
+          "mode",
+          "beats"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 21
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.batch.update_outline",
+      "description": "使用乐观锁保存新一版父子章节节拍。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "beats": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "draftBatchId",
+          "version",
+          "beats"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 22
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.batch.approve_outline",
+      "description": "确认批次章节节拍并允许顺序生成正文。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "outlineRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "approvedBy": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "draftBatchId",
+          "version",
+          "outlineRevision"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 23
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.batch.commit_prefix",
+      "description": "将连续且非过期的章节草稿前缀事务性写入作品；范围冲突时整批零写入。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "prefixLength": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          },
+          "insertionMode": {
+            "type": "string",
+            "enum": [
+              "after_anchor",
+              "volume_end"
+            ]
+          }
+        },
+        "required": [
+          "draftBatchId",
+          "version",
+          "prefixLength"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 60,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 24
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.batch.prepare_regeneration",
+      "description": "回滚指定章节及其后续草稿，递增生成修订号，并返回可复用的前缀草稿。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "fromChildIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9
+          },
+          "runId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "draftBatchId",
+          "version",
+          "runId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 25
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.batch.mark_failed",
+      "description": "记录批次子章节的生成失败和副作用确定性，供后续安全续跑。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "childIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9
+          },
+          "generationRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "draftBatchId",
+          "version",
+          "childIndex",
+          "generationRevision",
+          "error"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 26
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "chapter.draft.start",
+      "description": "幂等受理一个后台章节草稿 Operation，并立即返回 operationId。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "generationRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "operationDeadlineAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "maxAttempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4
+          },
+          "owner": {
+            "type": "object"
+          },
+          "payload": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "operationKey",
+          "generationRevision",
+          "payload"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": true,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 27
+        },
+        "external_mcp": {
+          "description": "幂等受理后台章节草稿任务并立即返回 operationId。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operationKey": {
+                "type": "string"
+              },
+              "generationRevision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "operationDeadlineAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "maxAttempts": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4
+              },
+              "owner": {
+                "type": "object"
+              },
+              "payload": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "operationKey",
+              "generationRevision",
+              "payload"
+            ]
+          },
+          "destructive": false,
+          "order": 16,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "chapter.draft.get_status",
+      "description": "读取后台章节草稿 Operation 的权威状态和结果引用。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "operationId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": true,
+      "idempotent": true,
+      "timeoutSeconds": 30,
+      "destructive": false,
+      "profiles": {
+        "internal_agent": {
+          "order": 28
+        },
+        "external_mcp": {
+          "description": "读取后台章节草稿任务的权威状态和结果引用。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operationId"
+            ]
+          },
+          "order": 17,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "chapter.draft.cancel",
+      "description": "请求取消后台章节草稿 Operation。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "operationId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": true,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 29
+        },
+        "external_mcp": {
+          "description": "请求取消后台章节草稿任务。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string"
+              },
+              "expectedVersion": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "operationId"
+            ]
+          },
+          "destructive": false,
+          "order": 18,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "chapter.draft.retry",
+      "description": "对明确失败且仍在预算内的章节草稿 Operation 发起新 attempt。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "operationId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "operationId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 30,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 30
+        },
+        "external_mcp": {
+          "description": "重试明确失败且仍在预算内的后台章节草稿任务。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operationId": {
+                "type": "string"
+              },
+              "expectedVersion": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "operationId"
+            ]
+          },
+          "destructive": false,
+          "order": 19,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "chapter.generate_draft",
+      "description": "生成可审核章节草稿。用户明确要求不读旧章、仅按大纲设定重新创作时，使用 mode=rewrite_chapter、sourcePolicy=outline_only，并将独立的新章任务放入 freshWritingBrief；不要把会话历史或旧修订节拍复制进去。此策略只支持单章直接生成。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "chapterId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "currentContent": {
+            "type": "string"
+          },
+          "userIntent": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "new_chapter",
+              "continue_chapter",
+              "rewrite_chapter"
+            ]
+          },
+          "sourcePolicy": {
+            "type": "string",
+            "enum": [
+              "existing_chapters",
+              "outline_only"
+            ]
+          },
+          "freshWritingBrief": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 12000
+          },
+          "excludedWorldSettingIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "locale": {
+            "type": "string"
+          },
+          "presentation": {
+            "type": "string",
+            "enum": [
+              "silent",
+              "toast",
+              "modal"
+            ]
+          },
+          "contextChapterCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "recentRawChapterCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "preparedContext": {
+            "type": "object"
+          },
+          "draftBatchId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "childIndex": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9
+          },
+          "generationRevision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "batchContext": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "novelId",
+          "chapterId",
+          "currentContent"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 390,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 31
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "chapter.revise_draft",
+      "description": "根据结构化审批意见生成新的可审核章节草稿版本。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sourceDraftSessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceDraftVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reviewRequestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "comments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object"
+            }
+          },
+          "locale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceDraftSessionId",
+          "sourceDraftVersion",
+          "reviewRequestId",
+          "comments"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 390,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 32
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "creative_assets.revise_draft",
+      "description": "根据结构化审批意见生成新的完整创作素材审核包。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sourceDraftSessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sourceDraftVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "reviewRequestId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "comments": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object"
+            }
+          },
+          "locale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceDraftSessionId",
+          "sourceDraftVersion",
+          "reviewRequestId",
+          "comments"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 390,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 33
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "creative_assets.generate_draft",
+      "description": "根据现有项目资料生成可审核创作资产草稿。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "brief": {
+            "type": "string",
+            "minLength": 1
+          },
+          "agentSkill": {
+            "type": "object"
+          },
+          "locale": {
+            "type": "string"
+          },
+          "includeExistingEntities": {
+            "type": "boolean"
+          },
+          "filterCompletedPlotLines": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "novelId",
+          "brief"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 240,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 34
+        },
+        "external_mcp": {
+          "description": "调用软件内置 AI 生成创意草稿，结果同时进入右侧草稿区和 MCP JSON。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "novelId": {
+                "type": "string"
+              },
+              "brief": {
+                "type": "string"
+              },
+              "locale": {
+                "type": "string"
+              },
+              "overrideUserPrompt": {
+                "type": "string"
+              },
+              "targetSections": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "contextChapterCount": {
+                "type": "number"
+              },
+              "includeExistingEntities": {
+                "type": "boolean"
+              },
+              "filterCompletedPlotLines": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "novelId",
+              "brief"
+            ]
+          },
+          "destructive": false,
+          "order": 14,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "creative_assets.validate_draft",
+      "description": "校验创作资产草稿结构、同名项和明显设定冲突。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftSessionId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "draftSessionId"
+        ],
+        "additionalProperties": true
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 60,
+      "destructive": true,
+      "profiles": {
+        "internal_agent": {
+          "order": 35
+        },
+        "external_mcp": {
+          "description": "校验创意草稿会话。",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "draftSessionId": {
+                "type": "string"
+              },
+              "version": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "draftSessionId"
+            ]
+          },
+          "timeoutSeconds": 90,
+          "destructive": false,
+          "order": 20,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "chapter.create",
+      "description": "创建章节。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "volumeId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "order": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "volumeId"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "destructive": false,
+          "order": 4,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "chapter.save",
+      "description": "保存章节内容。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "chapterId": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "chapterId",
+          "content"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 5,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "worldsetting.create",
+      "description": "创建世界设定（仅新增，不含删除）。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "novelId",
+          "name"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "destructive": false,
+          "order": 10,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "worldsetting.update",
+      "description": "更新世界设定（仅修改，不含删除）。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "sortOrder": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 11,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "outline.generate_draft",
+      "description": "调用软件内置 AI 生成大纲草稿。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "brief": {
+            "type": "string"
+          },
+          "locale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "novelId",
+          "brief"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "timeoutSeconds": 240,
+          "destructive": false,
+          "order": 15,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.list",
+      "description": "列出草稿会话。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "includeInactive": {
+            "type": "boolean"
+          }
+        }
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "external_mcp": {
+          "idempotent": true,
+          "order": 21,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "draft.get_active",
+      "description": "读取当前小说正在编辑的活跃草稿。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "workspace": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "novelId"
+        ]
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "external_mcp": {
+          "idempotent": true,
+          "order": 23,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    },
+    {
+      "name": "draft.update",
+      "description": "更新草稿内容或勾选状态。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftSessionId": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          },
+          "payload": {
+            "type": "object"
+          },
+          "selection": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "draftSessionId",
+          "version"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 24,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "draft.commit",
+      "description": "提交草稿入库。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftSessionId": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "draftSessionId",
+          "version"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 25,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "draft.discard",
+      "description": "丢弃草稿。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "draftSessionId": {
+            "type": "string"
+          },
+          "version": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "draftSessionId",
+          "version"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 26,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "draft_write"
+    },
+    {
+      "name": "outline.write",
+      "description": "将外部生成的大纲直接写入软件。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "plotLines": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "plotPoints": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "novelId"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 27,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "character.create_batch",
+      "description": "将外部生成的角色、物品、技能批量写入软件。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "characters": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        },
+        "required": [
+          "novelId"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "destructive": false,
+          "order": 28,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "story_patch.apply",
+      "description": "将外部生成的结构化剧情补丁写入软件。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "novelId": {
+            "type": "string"
+          },
+          "draft": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "novelId",
+          "draft"
+        ]
+      },
+      "readOnly": false,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": true,
+      "profiles": {
+        "external_mcp": {
+          "order": 29,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "data_write"
+    },
+    {
+      "name": "prompt.preview",
+      "description": "预览软件内置提示词。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "creative_assets",
+              "chapter"
+            ]
+          },
+          "payload": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "kind",
+          "payload"
+        ]
+      },
+      "readOnly": true,
+      "idempotent": false,
+      "timeoutSeconds": 90,
+      "destructive": false,
+      "profiles": {
+        "external_mcp": {
+          "idempotent": true,
+          "order": 30,
+          "outputSchema": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "version": 1,
+      "effect": "read"
+    }
+  ]
+}

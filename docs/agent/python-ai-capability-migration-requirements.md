@@ -1,7 +1,6 @@
 # Agent AI 能力渐进迁移至 Python / LangGraph 需求
 
 状态：v0.2 审阅修订稿，基于已确认 v0.1；待实施
-
 日期：2026-09-10
 适用范围：Python Agent Runtime、LangGraph、Electron AiService、AutomationService、HTTP Provider、MCP CLI Provider、Agent Toolchain、SSE、模型结果持久化与 Agent Renderer。
 

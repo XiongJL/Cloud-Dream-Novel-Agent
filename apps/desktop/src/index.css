@@ -355,79 +355,85 @@
 
 /* --- Flow Mode (心流模式) Styles --- */
 
-@keyframes flow-gradient {
-  0% {
-    background-position: 0% 50%;
-  }
-
-  50% {
-    background-position: 100% 50%;
-  }
-
-  100% {
-    background-position: 0% 50%;
-  }
-}
-
-@keyframes flow-conic {
+@keyframes flow-entry-shimmer {
   from {
-    transform: rotate(0deg);
+    transform: translateX(-120%);
   }
 
   to {
-    transform: rotate(360deg);
+    transform: translateX(120%);
   }
 }
 
 .flow-btn-container {
   position: relative;
-  padding: 2px;
+  padding: 0;
+  min-height: 30px;
   border-radius: 9999px;
   overflow: hidden;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background-color 0.25s, border-color 0.25s, color 0.25s;
   cursor: pointer;
-  border: none;
-  background: transparent;
+  border: 1px solid var(--ui-border-strong);
+  background: var(--ui-surface-raised);
+  color: var(--ui-text-secondary);
 }
 
 .flow-btn-container:hover {
-  transform: scale(1.05);
-  filter: brightness(1.2);
+  background: var(--ui-surface-muted);
 }
 
-.flow-btn-bg {
+.flow-btn-container.is-active {
+  background: #202535;
+  border-color: #777fa5;
+  color: #edf0ff;
+}
+
+.flow-btn-container.is-active:hover {
+  background: #2b3145;
+}
+
+.flow-btn-container::after {
+  content: '';
   position: absolute;
-  inset: -150%;
-  background: conic-gradient(from 180deg at 50% 50%,
-      #ff4500, #ff8c00, #ffd700, #32cd32, #00ced1, #1e90ff, #9370db, #ff4500);
-  animation: flow-conic 3s linear infinite;
-  filter: blur(4px);
-  opacity: 0.8;
+  inset: -30px;
+  background: linear-gradient(110deg, transparent 35%, rgba(192, 201, 255, 0.27) 50%, transparent 65%);
+  transform: translateX(-120%);
   pointer-events: none;
+}
+
+.flow-btn-container.is-active::after {
+  animation: flow-entry-shimmer 0.85s ease-out both;
+}
+
+.flow-btn-container:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 3px;
 }
 
 .flow-btn-content {
   position: relative;
   z-index: 1;
-  background: #0f172a;
-  color: white;
-  padding: 4px 14px;
-  border-radius: 9999px;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.15em;
+  padding: 4px 13px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
   white-space: nowrap;
   display: flex;
   align-items: center;
-  gap: 4px;
-  text-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
+  gap: 6px;
 }
 
-.dark .flow-btn-content {
-  background: #1e1e2e;
+@media (prefers-reduced-motion: reduce) {
+  .flow-btn-container {
+    transition: none;
+  }
+
+  .flow-btn-container.is-active::after {
+    animation: none;
+  }
 }
 
 /* Vignette Effect for Transition */

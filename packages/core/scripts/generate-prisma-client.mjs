@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -61,23 +62,59 @@ const sharedEnv = {
     PRISMA_QUERY_ENGINE_LIBRARY: path.join(prismaEnginesDir, queryEngineLibraryFile),
 };
 
-const generateResult = spawnSync(
-    process.execPath,
-    [prismaCliPath, 'generate'],
-    {
-        cwd: packageRoot,
-        stdio: 'inherit',
-        env: sharedEnv,
-    },
-);
-
-if (generateResult.error) {
-    console.error('[Prisma Generate] Failed to execute prisma generate:', generateResult.error);
-    process.exit(1);
+function schemaTokens(source) {
+    // Prisma formats the generated schema. Ignore alignment while preserving
+    // identifier boundaries, quoted defaults, escapes and documentation.
+    return JSON.stringify(source.match(/"(?:\\.|[^"\\])*"|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|[A-Za-z_][A-Za-z_0-9]*|\d+(?:\.\d+)?|[^\s]/g));
 }
 
-if ((generateResult.status ?? 1) !== 0) {
-    process.exit(generateResult.status ?? 1);
+function sameFileContents(left, right) {
+    if (fs.statSync(left).size !== fs.statSync(right).size) return false;
+    const digest = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    return digest(left) === digest(right);
+}
+
+function canReuseGeneratedClient() {
+    try {
+        const clientPackageJson = resolvePackageJson('@prisma/client');
+        const installed = JSON.parse(fs.readFileSync(clientPackageJson, 'utf8'));
+        const generated = JSON.parse(fs.readFileSync(path.join(generatedClientDir, 'package.json'), 'utf8'));
+        if (installed.version !== generated.version) return false;
+        if (schemaTokens(fs.readFileSync(schemaPath, 'utf8')) !== schemaTokens(
+            fs.readFileSync(path.join(generatedClientDir, 'schema.prisma'), 'utf8'),
+        )) return false;
+        for (const name of ['index.js', 'index.d.ts', 'default.js', 'default.d.ts', 'edge.js', 'index-browser.js', 'runtime/library.js', 'runtime/library.d.ts']) {
+            if (!fs.statSync(path.join(generatedClientDir, name)).size) return false;
+        }
+        if (!fs.readFileSync(path.join(generatedClientDir, 'index.js'), 'utf8').includes(`client: "${installed.version}"`)) return false;
+        // Prisma prepends a generated-file comment to the distributed runtime.
+        // Compare executable contents, including all of the SDK's bundled code.
+        const withoutHeader = source => source.replace(/^(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*(?:\r?\n|$))*/, '');
+        const generatedRuntime = withoutHeader(fs.readFileSync(path.join(generatedClientDir, 'runtime/library.js'), 'utf8'));
+        const installedRuntime = withoutHeader(fs.readFileSync(path.join(path.dirname(clientPackageJson), 'runtime/library.js'), 'utf8'));
+        return generatedRuntime === installedRuntime
+            && sameFileContents(path.join(generatedClientDir, queryEngineLibraryFile), path.join(prismaEnginesDir, queryEngineLibraryFile));
+    } catch {
+        return false;
+    }
+}
+
+if (canReuseGeneratedClient()) {
+    // Loaded native modules cannot be replaced on Windows. A current client is
+    // safe to reuse while another desktop instance is using the same checkout.
+    console.log('[Prisma Generate] Reusing current Prisma client (schema, SDK and engine verified).');
+} else {
+    const generateResult = spawnSync(process.execPath, [prismaCliPath, 'generate'], {
+        cwd: packageRoot, stdio: 'inherit', env: sharedEnv,
+    });
+    if (generateResult.error) {
+        console.error('[Prisma Generate] Failed to execute prisma generate:', generateResult.error);
+        process.exit(1);
+    }
+    if ((generateResult.status ?? 1) !== 0) {
+        console.error('[Prisma Generate] Client regeneration is required. If the engine is locked (EPERM), close desktop processes using this checkout and retry.');
+        process.exit(generateResult.status ?? 1);
+    }
 }
 
 const fallbackGeneratedClientDir = path.join(packageRoot, 'node_modules', '.prisma', 'client');

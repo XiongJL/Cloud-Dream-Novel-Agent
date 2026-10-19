@@ -1,6 +1,16 @@
 # 工具、Automation 与 MCP 分层
 
+## 演进需求与实施进展
+
+外部 MCP 的下一阶段目标见 [MCP 应用能力开放与 stdio 改造需求](./mcp-application-capabilities-requirements.md)。v0.2 将 Node 协议层迁入 Python 独立 stdio 模式，首期优先复用 FastMCP，通过共享工厂和契约开放写作业务与内置 Agent 委托能力；后台 Agent Runtime 仍由桌面管理，会话保存与事件归档整理到公共应用服务。以下段落描述现状与历史阶段边界，不能视为新需求已经实现。
+
+标准 MCP stdio 使用 UTF-8、换行分隔的 JSON-RPC。现有 bridge 的 Content-Length、bare JSON 等额外格式属于自定义兼容处理，不是 MCP 标准 framing；SDK 改造以标准 stdio 和明确的协议兼容矩阵验收。
+
+2026-10-19 首批实现已将外部协议层迁入 `agent_runtime/novel_mcp`，旧 `.mjs` 只保留 Python 启动兼容。共享目录为 `contracts/tools/catalog.json`，内置 manifest 和 Electron 外部路由均从中读取；下文外部 Node 手写协议层和 Python 独立 manifest 的描述作为历史背景保留。详见 [Python stdio 实施记录](./acceptance-mcp-python-stdio-2026-10-19.md)。
+
 ## 当前可复用能力
+
+2026-10-19 后续交付以 Streamable HTTP 作为主要外部入口，stdio 为兼容入口。所有外部设置集中在“设置 → AI → MCP CLI”，提供持久化总开关、实际 HTTP 地址、令牌接入指令和端口调整。关闭时停止 HTTP 并在 Automation 网关拒绝外部 stdio 调用，内置 Agent 通道继续工作。详见 [HTTP 与开关验收](./acceptance-mcp-http-2026-10-19.md)。
 
 现有 RAG、AI 工作台、Automation/MCP 已能支撑 Agent MVP：
 

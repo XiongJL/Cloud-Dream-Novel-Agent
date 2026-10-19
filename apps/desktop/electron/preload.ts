@@ -1,5 +1,38 @@
 import { ipcRenderer, contextBridge } from 'electron'
 import type { BackupAPI } from '../shared/backup'
+import type { NovelExportAPI } from '../shared/novelExport'
+
+const exportFlushHandlers = new Map<string, Set<(novelId: string) => Promise<void>>>();
+ipcRenderer.on('novel-export:flush', (_event, { requestId, novelId }: { requestId: string; novelId: string }) => {
+    const flush = async () => {
+        for (const callback of [...(exportFlushHandlers.get(novelId) || []), ...(exportFlushHandlers.get('*') || [])]) await callback(novelId);
+    };
+    void flush().then(
+        () => ipcRenderer.send('novel-export:flushed', { requestId }),
+        () => ipcRenderer.send('novel-export:flushed', { requestId, error: true }),
+    );
+});
+contextBridge.exposeInMainWorld('novelExport', {
+    start: payload => ipcRenderer.invoke('novel-export:start', payload),
+    describe: novelId => ipcRenderer.invoke('novel-export:describe', novelId),
+    openDirectory: requestId => ipcRenderer.invoke('novel-export:open-directory', requestId),
+    onFlush: (novelId, callback) => {
+        let callbacks = exportFlushHandlers.get(novelId);
+        if (!callbacks) { callbacks = new Set(); exportFlushHandlers.set(novelId, callbacks); }
+        callbacks.add(callback);
+        return () => { callbacks.delete(callback); if (!callbacks.size) exportFlushHandlers.delete(novelId); };
+    },
+    onFreeze: callback => {
+        const listener = (_event: unknown, value: boolean) => callback(value);
+        ipcRenderer.on('novel-export:freeze', listener);
+        return () => { ipcRenderer.removeListener('novel-export:freeze', listener); };
+    },
+    onProgress: callback => {
+        const listener = (_event: unknown, value: Parameters<typeof callback>[0]) => callback(value);
+        ipcRenderer.on('novel-export:progress', listener);
+        return () => { ipcRenderer.removeListener('novel-export:progress', listener); };
+    },
+} satisfies NovelExportAPI);
 
 const backupFlushHandlers = new Set<() => Promise<void>>();
 ipcRenderer.on('backup:flush', (_event, { requestId }: { requestId: string }) => {
@@ -177,6 +210,8 @@ contextBridge.exposeInMainWorld('backup', {
 contextBridge.exposeInMainWorld('ai', {
     getSettings: () => ipcRenderer.invoke('ai:get-settings'),
     getMcpCliSetup: () => ipcRenderer.invoke('ai:get-mcp-cli-setup'),
+    getMcpServerStatus: () => ipcRenderer.invoke('mcp:get-status'),
+    configureMcpServer: (enabled: boolean, port?: number) => ipcRenderer.invoke('mcp:configure', { enabled, port }),
     getMapImageStats: () => ipcRenderer.invoke('ai:get-map-image-stats'),
     updateSettings: (partial: any) => ipcRenderer.invoke('ai:update-settings', partial),
     testConnection: () => ipcRenderer.invoke('ai:test-connection'),

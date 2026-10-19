@@ -14,11 +14,14 @@ const automationServerSource = await readFile(
     new URL('../electron/automation/AutomationServer.ts', import.meta.url),
     'utf8',
 );
-const mcpBridgeSource = await readFile(new URL('./novel-editor-mcp.mjs', import.meta.url), 'utf8');
+const toolCatalog = JSON.parse(await readFile(new URL('../../../contracts/tools/catalog.json', import.meta.url), 'utf8'));
+const externalToolNames = new Set(toolCatalog.tools
+    .filter(tool => Object.hasOwn(tool.profiles, 'external_mcp'))
+    .map(tool => tool.name));
 assert.doesNotMatch(automationServiceSource, /case 'chapter\.generate_draft'/u);
 assert.doesNotMatch(automationServerSource, /^\s*'chapter\.generate_draft',\s*$/mu);
-assert.doesNotMatch(mcpBridgeSource, /name: 'chapter\.generate_draft'/u);
-assert.match(mcpBridgeSource, /name: 'chapter\.draft\.start'/u);
+assert.equal(externalToolNames.has('chapter.generate_draft'), false);
+assert.equal(externalToolNames.has('chapter.draft.start'), true);
 const output = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
 }).outputText;

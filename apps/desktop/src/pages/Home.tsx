@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { BookOpen, ChevronLeft, ChevronRight, Plus, Search, Settings, Trash2, Upload, X } from 'lucide-react';
+import { BookOpen, ChevronLeft, ChevronRight, Download, Plus, Search, Settings, Trash2, Upload, X } from 'lucide-react';
 import { clsx } from 'clsx';
 import { useTranslation } from 'react-i18next';
 import Editor from './Editor';
 import SettingsModal from '../components/SettingsModal';
 import { useEditorPreferences } from '../hooks/useEditorPreferences';
+import { useNovelExport } from '../components/NovelExport/NovelExportProvider';
 
 const ACTIVE_NOVEL_STORAGE_KEY = 'novel_editor_active_novel_id';
 const LAST_SELECTED_NOVEL_STORAGE_KEY = 'novel_editor_last_selected_novel_id';
@@ -158,6 +159,7 @@ function forgetSelectedNovel(novelId: string) {
 export default function Home() {
     const { t } = useTranslation();
     const { preferences } = useEditorPreferences();
+    const novelExport = useNovelExport();
     const isDarkTheme = preferences.theme === 'dark';
     const [viewportSize, setViewportSize] = useState(() => ({
         width: typeof window === 'undefined' ? 1500 : window.innerWidth,
@@ -956,6 +958,19 @@ export default function Home() {
                                         <span className={clsx(layoutPreset.actionCompact ? 'whitespace-nowrap leading-none' : '')}>
                                             {t(layoutPreset.actionCompact ? 'home.editNovelShort' : 'home.editNovel')}
                                         </span>
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => activeNovel && novelExport.open(activeNovel)}
+                                        disabled={!activeNovel || isEditorOpen || isDeletingNovel || isDeleteConfirmOpen || novelExport.busy}
+                                        className={clsx(
+                                            'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3.5 text-sm font-bold transition disabled:opacity-40',
+                                            layoutPreset.actionCompact && 'h-[96px] flex-col px-3',
+                                            isDarkTheme ? 'bg-white/[0.04] text-neutral-100 hover:bg-white/[0.08]' : 'bg-[#f5f5f5] hover:bg-[#ececec]'
+                                        )}
+                                    >
+                                        <Download className="h-4 w-4" />
+                                        <span>{t('novelExport.title')}</span>
                                     </button>
                                     <button
                                         type="button"

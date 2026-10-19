@@ -76,6 +76,7 @@ class AutomationInvokeError(RuntimeError):
 
 
 class AutomationClient:
+    invoke_path = "/invoke"
     def __init__(self, runtime_path: Path, timeout_seconds: float = 90) -> None:
         self.runtime_path = runtime_path
         self.timeout_seconds = timeout_seconds
@@ -113,7 +114,7 @@ class AutomationClient:
         deadline_at: str | None = None,
     ) -> Any:
         runtime = self._read_runtime()
-        url = f"http://127.0.0.1:{runtime['port']}/invoke"
+        url = f"http://127.0.0.1:{runtime['port']}{self.invoke_path}"
         payload = {
             "requestId": request_id or uuid4().hex,
             "method": method,
