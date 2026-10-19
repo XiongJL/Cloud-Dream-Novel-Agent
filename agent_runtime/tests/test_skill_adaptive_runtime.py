@@ -129,19 +129,19 @@ def test_user_skill_runtime_routing_preserves_methods_and_legacy_flow(tmp_path, 
             runtime._publish_artifact = publish
         run = await runtime.execute_plan({"planId": plan.planId, "novelId": "novel_1", "chapterId": "chapter_2",
             "approval": {"approved": True, "approvedStepIds": [step.stepId]}}, {})
-        for _ in range(1000):
-            if run.status in {"completed", "failed", "cancelled"}:
-                break
-            await asyncio.sleep(0.01)
+        # Wait for the actual worker, including asynchronous checkpoint writes.
+        # A short polling window races slow Windows filesystems and CI runners.
+        task = runtime._run_tasks.get(run.runId)
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=60)
         if routing in {"recover", "expert_retry", "publish_retry"}:
             assert run.status == "failed"
             terminal = next(item for item in reversed(run.events) if item.type == "run_failed")
             assert terminal.payload["retryable"] is True
             run = await runtime.retry_run({"failedRunId": run.runId, "expectedFailureRevision": run.failureRevision}, {})
-            for _ in range(1000):
-                if run.status in {"completed", "failed", "cancelled"}:
-                    break
-                await asyncio.sleep(0.01)
+            task = runtime._run_tasks.get(run.runId)
+            if task is not None:
+                await asyncio.wait_for(asyncio.shield(task), timeout=60)
             assert methods.count("agent.plan_skill_execution") == 1
             assert unit_calls == Counter({"chapter_1": 1, "chapter_2": 2 if routing == "recover" else 1, "chapter_3": 1})
         assert run.status == "completed", [(item.type, item.payload) for item in run.events[-10:]]
