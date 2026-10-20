@@ -1,212 +1,63 @@
 # CloudDream Novel Agent（云梦小说智能体）
 
-CloudDream Novel Agent 是一款面向长篇小说创作的桌面应用。它把富文本写作、作品资料管理、本地检索与可审核的 AI Agent 工作流放在同一个项目中：作者可以专注写作，也可以让创作专家读取指定范围、形成计划、执行分析并生成草稿，再由作者决定是否写回。
+面向长篇小说创作的桌面写作工具。将正文、大纲、情节、人物与世界观放在同一部作品中，让 AI 结合故事资料协助创作，并由作者审阅和确认修改。
 
-当前源码版本为 **0.2.0**。Agent 主链、恢复机制和自动化测试已经落地，真实模型长任务与各平台发布包仍需持续验收。稳定安装包的实际功能以对应 Release 说明为准。
+[下载安装](https://github.com/XiongJL/Cloud-Dream-Novel-Agent/releases/latest) · [使用指南](USER_GUIDE.md) · [English Guide](USER_GUIDE_EN.md) · [开发指南](DEVELOPMENT.md)
+
+## 产品演示
+
+以《七夜》为例，约 82 秒了解写作、人物资料、叙事矩阵、Agent 协作，以及从一句话续写到原文审阅和作者确认的创作流程。
+
+https://github.com/user-attachments/assets/32416dc3-ba8c-4fb8-9a71-1e5b34eb52d2
 
 ## 核心能力
 
-### 写作模式
+- **专注写作**：富文本编辑、心流模式、卷章管理，以及小说导入与自动保存。
+- **管理故事资料**：整理角色、关系、物品、世界观、地图和灵感，随时搜索与查阅。
+- **梳理情节**：用故事线、情节点、章节锚点与叙事矩阵查看故事的发展和关联。
+- **一句话交给 Agent**：描述续写、改写或审校任务，指定章节范围，结合大纲、情节与相关资料开展创作；支持作者、编辑、读者等工作视角。
+- **文风与 Skill**：使用文风参考、内置 Skill 和文风包，辅助保持人物行为、叙事与表达风格的一致性。
+- **审阅后再写回**：Agent 生成的正文修改先形成草稿，支持原文对照、差异查看与审核意见，再由作者确认写回。
+- **导出与备份**：支持 TXT、DOCX 导出，可选择整本、章节范围或分批导出；支持加密备份与跨设备恢复。
 
-- Lexical 富文本编辑、心流模式、卷章管理与小说导入。
-- 故事线、情节点、章节锚点和叙事矩阵。
-- 角色、关系、物品、世界观、地图与灵感管理。
-- 章节、资料和创作实体的全局搜索。
-- 本地摘要、AI 摘要、标题生成、章节续写与 AI 创作工坊。
-- 加密备份、自动备份和跨设备恢复。
+## 下载与快速上手
 
-### Agent 模式
+从 [GitHub Releases](https://github.com/XiongJL/Cloud-Dream-Novel-Agent/releases/latest) 下载适合你设备的版本。具体功能、升级说明与已知问题以对应版本的发布说明为准。
 
-- 小说级多会话，支持团队、作者、编辑、读者、世界观和考据六种工作视角。
-- 普通讨论、结构化计划、计划审核、执行进度和用户决策断点保留在同一条会话时间线中。
-- 支持当前章、多选章节、章节区间、当前卷和整本小说范围。
-- 提供章节审校、读者旅程、世界观一致性、项目内事实核对、情节线分析和团队综合审计。
-- 续写、场景改写、创作素材和多章节改写先生成 DraftSession / DraftBatch，不直接覆盖正文。
-- 草稿支持原文对照、差异查看、审核意见、版本冲突保护、失败恢复和事务性写回。
-- Run、事件、审批、报告和会话持久化到本地 SQLite；刷新、SSE 断线或 Runtime 重启后可恢复明确状态。
-- 根据模型上下文窗口组装输入，支持长会话压缩、持久摘要、来源诊断和按引用召回。
-
-### AI 与工具接入
-
-- HTTP Provider 支持 OpenAI-compatible Chat Completions 和 Responses API。
-- MCP CLI Provider 可接入 Codex、Claude Code 等本地 CLI。
-- 本地 MCP bridge 允许外部客户端通过受控 Automation API 操作作品数据，而不是直接访问 SQLite。
-- RAG 支持章节与结构化资料检索；Embedding 不可用时可回退到本地 Hash 索引。
-- AI API Key / Token 只保存在当前设备的 Electron `userData` 中，不写入小说数据库，也不进入备份。
-
-## 数据与安全边界
-
-- 小说数据、Agent 会话和运行状态默认使用本地 SQLite。
-- Electron Main 是数据库、AI 设置、工具权限和草稿写回的唯一业务边界。
-- Python Runtime 负责 Agent 编排，不直接访问 Prisma 小说业务库。
-- 只读探索受工具白名单、范围和预算限制；生成草稿或修改数据必须经过计划与审核流程。
-- 使用云端模型时，筛选后的提示词、正文片段或证据会发送给所配置的 Provider，请根据数据敏感性选择服务。
-
-## 下载
-
-稳定版本统一发布在 [GitHub Releases](https://github.com/XiongJL/Cloud-Dream-Novel-Agent/releases)。新版发布工作流使用以下文件名：
-
-- Windows 安装版：`clouddream-novel-agent-setup-<version>.exe`
-- Windows 便携版：`clouddream-novel-agent-portable-<version>.exe`
-- macOS Intel：`clouddream-novel-agent-mac-x64-<version>.dmg`
-- macOS Apple Silicon：`clouddream-novel-agent-mac-arm64-<version>.dmg`
-
-macOS 构建如果未签名，首次启动可能需要在系统安全设置中手动允许。当前官方桌面包均内置对应平台的 Python Agent Runtime，用户无需另外安装 Python。
-
-## 本地开发
-
-### 环境要求
-
-- Node.js 20+（CI 使用 Node.js 24）
-- pnpm 8.15.9
-- Python 3.11+（开发 Agent 模式或生成桌面安装包需要）
-- JDK 17 与 MariaDB（仅开发可选的云同步后端时需要）
-
-### 初始化 JavaScript 工作区
-
-```bash
-pnpm install
-pnpm run setup
-```
-
-`pnpm run setup` 会生成 Prisma Client、首启建库 SQL，并编译 `packages/core`。
-
-### 初始化 Python Agent Runtime
-
-Windows PowerShell：
-
-```powershell
-cd agent_runtime
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -e ".[dev,build]"
-cd ..
-```
-
-macOS / Linux：
-
-```bash
-cd agent_runtime
-python3 -m venv .venv
-./.venv/bin/python -m pip install -e '.[dev,build]'
-cd ..
-```
-
-开发模式下，Electron 会自动发现 `agent_runtime/.venv` 并启动本地 Runtime，无需单独常驻一个 Python 进程。
-
-### 启动桌面端
-
-```bash
-pnpm dev:desktop
-```
-
-也可以运行 `pnpm dev`，通过 Turbo 启动工作区开发任务。
-
-### 常用命令
-
-| 命令 | 用途 |
+| 平台 | 选择的安装包 |
 | --- | --- |
-| `pnpm run setup` | 首次生成并编译 Core |
-| `pnpm dev:desktop` | 启动 Electron 桌面端 |
-| `pnpm build:core` | 重新生成 Prisma Client 和建库 SQL |
-| `pnpm db:push` | 将 Prisma schema 同步到开发数据库 |
-| `pnpm build:desktop` | 构建桌面端 |
-| `pnpm build:desktop:win` | 构建 Windows 安装版与便携版 |
-| `pnpm build:desktop:mac` | 在 macOS 构建当前机器架构的 DMG |
-| `pnpm mcp:config` | 输出 Codex / Claude / JSON MCP 配置 |
+| Windows x64 | 安装版 `setup-<version>.exe` 或便携版 `portable-<version>.exe` |
+| macOS Intel | `mac-x64-<version>.dmg` |
+| macOS Apple Silicon | `mac-arm64-<version>.dmg` |
 
-### 验证
+以上为文件名后缀，完整名称以下载页为准。官方桌面包已内置所需的 Python 运行时，无需另行安装 Python。macOS 安装包目前未签名，首次启动可能需要在系统安全设置中允许。
 
-```powershell
-# Python Runtime
-.\agent_runtime\.venv\Scripts\python.exe -m pytest -q agent_runtime
+1. 打开应用，新建作品或导入已有小说。
+2. 整理章节、大纲、人物与故事设定，开始写作。
+3. 如需使用 AI，在设置中配置兼容的模型服务，或连接 Codex、Claude Code 等本地 CLI。
+4. 在 Agent 中描述任务，查看生成的草稿与建议，再确认需要写回的修改。
 
-# Desktop Agent 合约与恢复测试
-pnpm --filter novel-editor-desktop run test:agent-recovery
+具体操作见[用户指南](USER_GUIDE.md)。
 
-# TypeScript（应用与 Vite Node 配置）
-pnpm --filter novel-editor-desktop run typecheck
+## AI 接入与数据说明
 
-# Core / Prisma
-pnpm run build:core
-
-# Renderer、Electron Main 与 Preload
-pnpm --dir apps/desktop exec vite build
-```
-
-macOS / Linux 运行 pytest 时，将 Python 路径替换为 `./agent_runtime/.venv/bin/python`。
-
-## 架构
-
-```text
-React Renderer
-  ├─ 写作模式
-  └─ AgentWorkspace
-          │ IPC / SSE
-Electron Main
-  ├─ Prisma + SQLite
-  ├─ AiService / ContextBuilder
-  ├─ AutomationService / DraftSessionStore
-  ├─ PythonRuntimeClient
-  └─ MCP bridge
-          │ FastAPI / FastMCP
-Python Agent Runtime
-  ├─ IntentService / Planner
-  ├─ LangGraph + SQLite Checkpointer
-  ├─ 领域 Toolchains
-  └─ Retry / Recovery / Event Stream
-```
-
-主要目录：
-
-- `apps/desktop`：Electron、React、AI 服务、Agent UI 和 Automation API。
-- `agent_runtime`：Python、FastAPI、LangGraph、IntentService 与领域 Toolchain。
-- `packages/core`：Prisma schema、生成客户端和共享数据层。
-- `apps/backend`：可选的 Spring Boot + MariaDB 云同步服务。
-- `docs/agent`：Agent 产品方向、架构、决策、需求和验收文档。
-
-## CLI / MCP 接入
-
-先启动桌面应用，再生成或查看客户端配置：
-
-```bash
-pnpm mcp:config
-```
-
-外部客户端通过 MCP bridge 调用受控工具。Runtime 端口和临时 Bearer Token 由桌面应用管理，不需要写死在 CLI 配置中。详细步骤见：
-
-- [MCP CLI 接入说明](docs/mcp-cli-setup.md)
-- [MCP CLI Setup (English)](docs/mcp-cli-setup-en.md)
+- 支持 OpenAI-compatible 模型服务的 Chat Completions 与 Responses API，也可通过 MCP CLI Provider 使用本地 CLI。
+- 支持外部 MCP 客户端连接桌面应用；配置步骤见 [MCP 接入说明](docs/mcp-cli-setup.md)。
+- 作品正文、设定与创作记录默认保存在本机。使用云端模型时，相关提示词、正文片段与资料会发送给你配置的模型服务。
+- AI 密钥保存在当前设备，不随小说备份迁移。更换设备或恢复备份后，需要重新配置 AI 服务。
 
 ## 产品截图
-<img width="3454" height="2052" alt="image" src="https://github.com/user-attachments/assets/59b84682-74d5-4c29-b277-a04d07ad9a56" />
 
-<img width="1919" height="1006" alt="be0ec54e253dd0a4629c1f65a2141971" src="https://github.com/user-attachments/assets/4d01fd52-a3c0-4c73-b994-d546873c98c3" />
+<img width="1200" alt="云梦小说智能体界面示例一" src="https://github.com/user-attachments/assets/59b84682-74d5-4c29-b277-a04d07ad9a56" />
 
+<img width="1200" alt="云梦小说智能体界面示例二" src="https://github.com/user-attachments/assets/4d01fd52-a3c0-4c73-b994-d546873c98c3" />
 
+## 文档与反馈
 
-## 发布
-
-1. 确认根 `package.json` 与 `apps/desktop/package.json` 版本一致。
-2. 完成测试和平台构建验证。
-3. 推送版本标签：
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-`.github/workflows/release.yml` 会创建 GitHub Release，构建 Windows 与 macOS 产物并上传附件。
-
-## 文档
-
-- [用户指南](USER_GUIDE.md)
-- [User Guide](USER_GUIDE_EN.md)
-- [开发指南](DEVELOPMENT.md)
-- [Agent 设计文档](docs/agent/README.md)
-- [Agent 路线图](docs/agent/roadmap.md)
-- [手动验收清单](docs/agent/manual-acceptance-checklist.md)
-- [Python Runtime](agent_runtime/README.md)
-- [云同步后端](apps/backend/README.md)
+- [用户指南](USER_GUIDE.md) · [User Guide](USER_GUIDE_EN.md)
+- [MCP 接入说明](docs/mcp-cli-setup.md) · [MCP Setup (English)](docs/mcp-cli-setup-en.md)
+- [开发指南](DEVELOPMENT.md)：环境搭建、架构、测试与打包发布。
+- [问题与建议](https://github.com/XiongJL/Cloud-Dream-Novel-Agent/issues)：反馈时请附上应用版本、操作系统和复现步骤。
 
 ## License
 
