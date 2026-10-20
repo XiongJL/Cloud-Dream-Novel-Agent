@@ -1,6 +1,7 @@
 import React from 'react';
 import { clsx } from 'clsx';
 import { useTranslation } from 'react-i18next';
+import { Feather } from 'lucide-react';
 
 interface FlowModeButtonProps {
     isActive: boolean;
@@ -13,18 +14,20 @@ export const FlowModeButton: React.FC<FlowModeButtonProps> = ({ isActive, onClic
 
     return (
         <button
+            type="button"
             onClick={onClick}
             className={clsx(
-                "flow-btn-container group",
-                isActive && "scale-110",
+                "flow-btn-container",
+                isActive && "is-active",
                 className
             )}
-            title={t('editor.flowMode', 'Flow Mode')}
+            title={isActive ? t('common.exitFlow') : t('editor.flowMode')}
+            aria-pressed={isActive}
         >
-            <div className="flow-btn-bg" />
-            <div className="flow-btn-content">
-                {isActive ? t('editor.inFlow', 'Entering Flow') : t('editor.flowMode')}
-            </div>
+            <span className="flow-btn-content">
+                <Feather size={13} aria-hidden="true" />
+                {isActive ? t('editor.inFlow', 'Immersive Writing') : t('editor.flowMode')}
+            </span>
         </button>
     );
 };

@@ -284,4 +284,15 @@ assert.equal(durableDraftProjection.details.at(-1)?.title, '草稿任务等待�
 assert.equal(durableDraftProjection.details.at(-1)?.status, 'running');
 assert.equal(durableDraftProjection.details.at(-1)?.metadata[0]?.label, '任务编号');
 
+const cause = '文风草稿文件头缺少结束分隔符。';
+projection = projectAgentActivity({ status: 'failed', events: [
+    event(1, 'toolchain_failed', { message: cause }, { stepId: 'same-step' }),
+    event(2, 'error', { message: cause }),
+    event(3, 'step_failed', { message: cause }, { stepId: 'same-step' }),
+    event(4, 'run_failed', { message: cause }),
+    event(5, 'run_failed', { message: cause }),
+    event(6, 'toolchain_failed', { message: '另一个独立错误。' }, { stepId: 'other-step' }),
+] });
+assert.equal(projection.details.filter(d => d.summary === cause).length, 1);
+assert.equal(projection.details.filter(d => d.summary === '另一个独立错误。').length, 1);
 console.log('Agent activity projection tests passed.');

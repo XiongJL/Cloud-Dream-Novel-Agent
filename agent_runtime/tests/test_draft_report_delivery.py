@@ -26,3 +26,19 @@ def test_completed_draft_report_retains_delivery_and_warning_scope():
     assert delivery["editorialReviewCompleted"] is True
     assert delivery["editorialRevisionCompleted"] is True
     assert "do not mean draft generation failed" in delivery["warningScope"]
+
+
+def test_batch_delivery_retains_real_context_and_failed_checks_for_summary():
+    artifact = SimpleNamespace(artifactId='batch', type='chapter_draft_batch', title='新章', status='ready',
+        reference={'draftBatchId': 'b'}, metadata={'generatedDrafts': [
+            {'contextSources': [{'chapterId': 'c1', 'title': '前章', 'contentMode': 'full'}],
+             'warnings': ['状态抽取失败'], 'consistency': {'status': 'not_reviewed'}},
+            {'contextSources': [{'chapterId': 'c1', 'title': '前章', 'contentMode': 'full'}],
+             'warnings': ['状态抽取失败'], 'narrativeStateDelta': {'itemStates': []}},
+        ]})
+    manifest = NovelAgentRuntime._report_artifact_manifest(artifact)
+    delivery = manifest['writingDelivery']
+    assert delivery['contextChapterCount'] == 1
+    assert delivery['warnings'] == ['状态抽取失败']
+    assert delivery['stateVerifiedCount'] == 1
+    assert not delivery['semanticReviewCompleted'] and not delivery['styleReviewCompleted']

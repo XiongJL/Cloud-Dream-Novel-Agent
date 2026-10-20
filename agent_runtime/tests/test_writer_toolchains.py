@@ -235,7 +235,7 @@ def test_writer_revision_plan_publishes_expert_report(tmp_path: Path) -> None:
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "作者多章节修订计划",
@@ -292,7 +292,7 @@ def test_batch_rewrite_uses_explicit_targets_and_original_content(tmp_path: Path
         beats = _beats()
         batch: dict[str, Any] | None = None
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             nonlocal batch
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
@@ -436,7 +436,7 @@ def test_batch_rewrite_regeneration_preserves_prefix_and_snapshot(tmp_path: Path
             "error": {"code": "GENERATION_FAILED", "message": "provider rejected request"},
         }
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             automation.calls.append((method, params, origin))
             if method == "draft.batch.get":
                 return batch

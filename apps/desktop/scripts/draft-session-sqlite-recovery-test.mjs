@@ -153,6 +153,30 @@ try {
     assert.equal(JSON.parse(rows[0].payloadJson).draftSessionId, created.draftSessionId);
     assert.equal((await client.$queryRawUnsafe('SELECT * FROM DraftBatch')).length, 1);
     assert.equal((await client.$queryRawUnsafe('SELECT * FROM DraftBatchChild')).length, 1);
+    const tenBeats = Array.from({length: 10}, (_, childIndex) => ({...batch.outline.beats[0], childIndex, title: `第${childIndex + 1}章`}));
+    let ten = await store.createBatch({novelId: 'novel-1', volumeId: 'volume-1', anchorChapterId: 'chapter-1', mode: 'sequence_continuation', beats: tenBeats});
+    ten = await store.approveBatchOutline(ten.draftBatchId, ten.version, ten.outline.revision, 'test');
+    for (let i = 0; i < 7; i++) {
+        const child = await store.createBatchChildSession(ten.draftBatchId, i, {
+            workspace: 'chapter-editor', type: 'chapter-draft', source: 'internal-ai', origin: 'test', novelId: 'novel-1',
+            chapterId: `ten-${i}`, sourceOperationId: `ten-operation-${i}`, status: 'draft',
+            payload: {...created.payload, chapterId: `ten-${i}`, generatedText: `第${i + 1}章正文`, content: `第${i + 1}章正文`}, previewSummary: `第${i + 1}章`,
+        }, {...tenBeats[i], summary: `第${i + 1}章正文`}, 1);
+        ten = child.batch;
+    }
+    ten = await store.markBatchChildFailed({draftBatchId: ten.draftBatchId, version: ten.version, childIndex: 7, generationRevision: 1,
+        error: {code: 'NETWORK_ERROR', message: '临时网络错误'}});
+    const restarted = new DraftSessionStore(client);
+    const recoveredTen = await restarted.getBatchById(ten.draftBatchId);
+    assert.equal(recoveredTen.children.length, 10);
+    assert.equal(recoveredTen.children[7].status, 'failed');
+    const regenerated = await restarted.prepareBatchRegeneration(ten.draftBatchId, recoveredTen.version, undefined, 'resume-ten');
+    assert.equal(regenerated.fromChildIndex, 7);
+    assert.equal(regenerated.preservedDrafts.length, 7);
+    assert.deepEqual(regenerated.batch.children.slice(0, 7).map(child => child.draftSessionId), ten.children.slice(0, 7).map(child => child.draftSessionId));
+    assert.deepEqual(regenerated.batch.children.slice(7).map(child => child.generationRevision), [2, 2, 2]);
+    await assert.rejects(store.createBatch({novelId: 'novel-1', volumeId: 'volume-1', mode: 'sequence_continuation', beats: [...tenBeats, tenBeats[0]]}));
+    await assert.rejects(store.createBatch({novelId: 'novel-1', volumeId: 'volume-1', mode: 'batch_rewrite', beats: tenBeats.slice(0, 6)}));
     const workspaceRows = await client.$queryRawUnsafe(
         'SELECT name FROM sqlite_master WHERE type = ? AND name = ?',
         'table',

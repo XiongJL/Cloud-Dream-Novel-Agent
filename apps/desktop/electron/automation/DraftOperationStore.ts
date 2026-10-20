@@ -40,6 +40,10 @@ type DraftOperationTransaction = Pick<
     'draftGenerationOperation' | 'draftOperationOutbox' | '$executeRawUnsafe' | '$queryRawUnsafe'
 >;
 
+// Allow a bounded SQLite busy wait plus the small atomic write section, rather
+// than expiring the transaction at the connector's usual five-second wait.
+const STATE_TRANSACTION_OPTIONS = { maxWait: 5000, timeout: 15000 };
+
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 function createOperationError(code: string, message: string, details?: Record<string, unknown>): Error & {
@@ -176,6 +180,7 @@ function assertSameParameters(record: DraftOperationRecord, input: CreateDraftOp
 }
 
 export class DraftOperationStore {
+    private readonly activityWrites = new Map<string, { lastWriteAt: number; inFlight?: Promise<void> }>();
     private schemaReady: Promise<void> | null = null;
 
     constructor(private readonly database: PrismaClientType = db) {}
@@ -378,19 +383,13 @@ export class DraftOperationStore {
         expectedVersion: number,
         event: DraftOperationEvent,
     ): Promise<DraftOperationRecord> {
+        const current = await this.getExpected(operationId, expectedVersion);
         return this.database.$transaction(async (tx) => {
-            const currentRow = await tx.draftGenerationOperation.findUnique({ where: { operationId } });
-            if (!currentRow) throw createOperationError('NOT_FOUND', `Draft operation ${operationId} was not found`);
-            const current = toRecord(currentRow);
-            if (current.version !== expectedVersion) {
-                throw createOperationError('VERSION_CONFLICT', 'Draft operation version conflict', {
-                    operationId,
-                    expectedVersion,
-                    actualVersion: current.version,
-                });
-            }
+            // Acquire the SQLite write lock before any transactional reads.
+            // The version/status CAS also rejects a snapshot changed while waiting.
+            await this.reserveTransition(tx, current);
             return this.applyTransition(tx, current, expectedVersion, event);
-        });
+        }, STATE_TRANSACTION_OPTIONS);
     }
 
     async commitSucceeded(
@@ -401,17 +400,9 @@ export class DraftOperationStore {
             operation: DraftOperationRecord,
         ) => Promise<{ draftSessionId: string; draftBatchId?: string; childIndex?: number; generationRevision: number }>,
     ): Promise<DraftOperationRecord> {
+        const current = await this.getExpected(operationId, expectedVersion);
         return this.database.$transaction(async (tx) => {
-            const currentRow = await tx.draftGenerationOperation.findUnique({ where: { operationId } });
-            if (!currentRow) throw createOperationError('NOT_FOUND', `Draft operation ${operationId} was not found`);
-            const current = toRecord(currentRow);
-            if (current.version !== expectedVersion) {
-                throw createOperationError('VERSION_CONFLICT', 'Draft operation version conflict', {
-                    operationId,
-                    expectedVersion,
-                    actualVersion: current.version,
-                });
-            }
+            await this.reserveTransition(tx, current);
             if (current.status !== 'committing') {
                 throw createOperationError(
                     'INVALID_OPERATION_TRANSITION',
@@ -430,7 +421,30 @@ export class DraftOperationStore {
                 draftSessionId: result.draftSessionId,
                 resultJson: JSON.stringify(result),
             });
+        }, STATE_TRANSACTION_OPTIONS);
+    }
+
+    private async getExpected(operationId: string, expectedVersion: number): Promise<DraftOperationRecord> {
+        const current = await this.get(operationId);
+        if (current.version !== expectedVersion) {
+            throw createOperationError('VERSION_CONFLICT', 'Draft operation version conflict', {
+                operationId, expectedVersion, actualVersion: current.version,
+            });
+        }
+        return current;
+    }
+
+    private async reserveTransition(tx: DraftOperationTransaction, current: DraftOperationRecord): Promise<void> {
+        const reserved = await tx.draftGenerationOperation.updateMany({
+            where: { operationId: current.operationId, version: current.version, status: current.status },
+            // No version bump until the state change and outbox commit together.
+            data: { version: current.version },
         });
+        if (reserved.count !== 1) {
+            throw createOperationError('VERSION_CONFLICT', 'Draft operation changed concurrently', {
+                operationId: current.operationId, expectedVersion: current.version,
+            });
+        }
     }
 
     private async applyTransition(
@@ -543,6 +557,7 @@ export class DraftOperationStore {
                 status: 'running',
             },
         });
+        this.activityWrites.set(`${input.operationId}:${input.attemptNumber}`, { lastWriteAt: -Infinity });
     }
 
     async markAttemptActivity(
@@ -551,10 +566,26 @@ export class DraftOperationStore {
         kind: 'first_byte' | 'chunk',
         at = new Date(),
     ): Promise<void> {
-        await this.database.draftGenerationAttempt.update({
-            where: { operationId_attemptNumber: { operationId, attemptNumber } },
-            data: kind === 'first_byte' ? { firstByteAt: at, lastChunkAt: at } : { lastChunkAt: at },
-        });
+        const key = `${operationId}:${attemptNumber}`;
+        const state = this.activityWrites.get(key);
+        if (!state) return; // Completed attempts must not receive late stream writes.
+        // Streaming can emit hundreds of chunks per second. Never queue a DB
+        // write per chunk behind the operation's critical state transactions.
+        if (state.inFlight) return;
+        if (kind === 'chunk' && at.getTime() - state.lastWriteAt < 2000) return;
+        state.inFlight = (async () => {
+            await this.database.draftGenerationAttempt.updateMany({
+                where: { operationId, attemptNumber, status: 'running',
+                    ...(kind === 'first_byte' ? { firstByteAt: null } : {}) },
+                data: kind === 'first_byte' ? { firstByteAt: at, lastChunkAt: at } : { lastChunkAt: at },
+            });
+            state.lastWriteAt = at.getTime();
+        })();
+        try {
+            await state.inFlight;
+        } finally {
+            state.inFlight = undefined;
+        }
     }
 
     async completeAttempt(input: {
@@ -569,6 +600,10 @@ export class DraftOperationStore {
         errorCode?: string;
         errorJson?: string;
     }): Promise<void> {
+        const key = `${input.operationId}:${input.attemptNumber}`;
+        const activity = this.activityWrites.get(key);
+        this.activityWrites.delete(key);
+        await activity?.inFlight?.catch(() => undefined);
         await this.database.draftGenerationAttempt.update({
             where: {
                 operationId_attemptNumber: {

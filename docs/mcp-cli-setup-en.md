@@ -1,272 +1,49 @@
-# CloudDream Novel Agent MCP CLI Setup
+# MCP connection
 
-This document describes the currently working local MCP setup for `Codex`, `Claude Code`, and compatible MCP clients.
+Streamable HTTP is the primary transport. stdio remains a compatibility option. Both use the same Python FastMCP gateway, tool contracts and desktop business services.
 
-The design is:
+## Connect
 
-- The desktop app remains the only real data source
-- External CLIs do not connect to SQLite directly
-- A local stdio MCP bridge forwards tool calls to the running desktop app
+1. Open **Settings → AI → MCP CLI** in the desktop app.
+2. Turn on **Enable MCP** and wait until Streamable HTTP is ready.
+3. Copy the connection instruction to an Agent on this computer that supports Streamable HTTP. Alternatively copy the HTTP JSON and adapt it to the client's configuration format.
+4. List the tools in the client. Currently 31 tools are exposed; broader writing and high-level Agent delegation remain separate delivery stages.
 
-## How It Works
-
-After the desktop app starts, it writes a local runtime file under `userData`:
-
-- Dev mode:
-  `C:\Users\<you>\AppData\Roaming\@novel-editor\desktop-dev\automation\runtime.json`
-
-That file contains:
-
-- the local automation port
-- a temporary bearer token
-- the current desktop app process id
-
-The MCP bridge reads that runtime file automatically, so you do not need to put the port or token into your CLI config.
-
-## Start Order
-
-1. Start the desktop app first:
-
-```bash
-pnpm dev
-```
-
-or desktop-only:
-
-```bash
-pnpm dev:desktop
-```
-
-2. Confirm the runtime file exists:
-
-```powershell
-Get-Content "$env:APPDATA\@novel-editor\desktop-dev\automation\runtime.json"
-```
-
-3. Then start your MCP client.
-
-## Runtime Notes
-
-- The runtime port and token change every time the desktop app starts.
-- The MCP bridge reads the latest runtime automatically.
-- If you restart the desktop app, restart the CLI client too.
-
-## In-App Settings Behavior (MCP CLI Mode)
-
-In `Settings -> AI -> MCP CLI`, current behavior is:
-
-- Legacy manual fields are removed from UI:
-  - CLI executable path
-  - working directory
-  - startup args template
-  - environment JSON
-- The panel now shows copy-ready snippets only:
-  - Codex `config.toml`
-  - Claude Code registration command
-  - generic `mcpServers` JSON
-- `Test MCP` now validates bridge readiness (launcher + runtime + automation invoke), not the old MCP CLI launch template.
-
-In `HTTP API` mode:
-
-- Preset buttons are only shown in HTTP mode
-- "Advanced / Summary Strategy / Proxy" cards are collapsed by default
-- `Test Connection / Test Proxy / Test Generate` are only shown in HTTP mode
-
-## Codex
-
-From repo root, generate ready-to-paste config first (no manual absolute path typing):
-
-```bash
-pnpm mcp:config
-```
-
-Recommended config for `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.novel_editor]
-command = "cmd"
-args = ["/c", "D:\\aiproject\\novalEditor\\apps\\desktop\\scripts\\novel-editor-mcp.cmd"]
-startup_timeout_sec = 60
-```
-
-Before launching `codex`, set the Node path in the same terminal:
-
-```powershell
-$env:NOVEL_EDITOR_NODE_EXE = "D:\all_install\node.js\node.exe"
-codex
-```
-
-Why the wrapper is recommended:
-
-- Windows MCP clients can be picky about `node + .mjs`
-- the wrapper resolves `node.exe`
-- the wrapper also enables bridge logging automatically
-
-## Claude Code
-
-Recommended setup on Windows:
-
-```powershell
-claude mcp remove novel-editor
-claude mcp add novel-editor --scope local -- cmd /c D:\aiproject\novalEditor\apps\desktop\scripts\novel-editor-mcp.cmd
-```
-
-Or print the exact command dynamically:
-
-```bash
-pnpm mcp:config -- --format claude
-```
-
-You can verify it with:
-
-```bash
-claude mcp list
-claude mcp get novel-editor
-```
-
-## Generic MCP JSON Config
-
-For clients that support `mcpServers` JSON:
+The default URL is `http://127.0.0.1:18765/mcp`. Use the actual URL shown in Settings. Each request needs `Authorization: Bearer <local token>`; the copied instruction includes it. For clients supporting this configuration shape:
 
 ```json
 {
   "mcpServers": {
-    "novel-editor": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "D:\\aiproject\\novalEditor\\apps\\desktop\\scripts\\novel-editor-mcp.cmd"
-      ],
-      "env": {
-        "NOVEL_EDITOR_NODE_EXE": "D:\\all_install\\node.js\\node.exe"
-      }
+    "novel_editor": {
+      "url": "http://127.0.0.1:18765/mcp",
+      "headers": { "Authorization": "Bearer <local token>" }
     }
   }
 }
 ```
 
-You can also print the JSON snippet directly:
+Keep the desktop running. Loopback URLs work only on the same computer. A remote/cloud Agent cannot access this app using its own `127.0.0.1`. An occupied port is reported as an error; retry after releasing it or change the port in advanced settings and update the client URL.
 
-```bash
-pnpm mcp:config -- --format json
-```
+## Enable switch
 
-## OpenClaw
+Changes take effect and save immediately. Disabling stops HTTP and makes existing stdio tool calls return `MCP_DISABLED`. Active external requests receive cancellation signals; already accepted persistent tasks and completed writes are not automatically undone. Internal Agent tools remain available. Switching the AI provider or leaving Settings does not change this switch.
 
-If your OpenClaw build supports standard MCP client config, use the same `mcpServers` structure shown above.
+The switch, port and random local token persist in `userData/mcp/settings.json`. The HTTP token is separate from the internal Automation token. Existing external access remains enabled by default; malformed configuration disables access until explicitly re-enabled.
 
-If your OpenClaw build still expects its older local integration route, keep using that route for now. The MCP bridge does not replace any existing OpenClaw-specific path yet.
+**Test MCP** uses the official Python MCP SDK to initialize the HTTP session, list tools and perform the read-only `novel.list` call. It does not call a model or modify a novel.
 
-## What Works Right Now
+## stdio compatibility
 
-The bridge currently exposes tools for:
+Expand **Port and stdio compatibility** and copy the fallback configuration. The app generates the actual installed launcher path. Windows uses `mcp/novel-editor-mcp.cmd`; macOS/Linux use `mcp/novel-editor-mcp.sh`. Packaged users do not need system Python or Node.
 
-- listing novels, volumes, chapters, plotlines, characters, items, world settings, maps
-- reading chapter content
-- creating and saving chapters
-- creating/updating world settings (MCP delete is intentionally disabled)
-- generating internal AI drafts
-- reading, updating, committing, and discarding draft sessions
-- writing externally generated outline/character/story patch data back into the app
-
-Typical working flow:
-
-1. Start the desktop app
-2. Start Codex or Claude Code with the MCP config above
-3. Ask the CLI to call `novel_list`
-4. Ask it to call `draft_list`
-5. Ask it to call `creative_assets_generate_draft`
-6. Review the returned JSON in the terminal or in the app UI
-7. Then call `draft_commit` or discard it
-
-## Suggested First Manual Checks
-
-After MCP is connected, try these in order:
-
-1. `novel_list`
-2. `draft_list`
-3. `creative_assets_generate_draft`
-
-Example natural-language prompts:
-
-- "List all novels with `novel_list`."
-- "Call `draft_list` for the current novel."
-- "Call `creative_assets_generate_draft` for this novel, generate 3 characters and 1 plotline, but do not commit yet. Show me the JSON."
-
-## Local Diagnostics
-
-### 1. Desktop automation runtime
-
-Check the runtime file:
+For development, run `uv sync --frozen --project agent_runtime --extra dev`. From the repository root:
 
 ```powershell
-Get-Content "$env:APPDATA\@novel-editor\desktop-dev\automation\runtime.json"
+pnpm mcp:config
+& .\apps\desktop\scripts\novel-editor-mcp.cmd --smoke --list-only
+& .\apps\desktop\scripts\novel-editor-mcp.cmd --smoke --tool novel.list
 ```
 
-### 2. MCP bridge smoke test
+The first command prints stdio fallback configurations. Tool discovery does not require a running desktop; actual calls require the app and enabled MCP. stdio discovers `automation/runtime.json` or accepts `NOVEL_EDITOR_RUNTIME_FILE` / `--runtime-file`. That descriptor contains the internal Automation connection, not the public MCP HTTP URL.
 
-Run from the repo root:
-
-```powershell
-D:\all_install\node.js\node.exe apps\desktop\scripts\mcp-smoke.mjs --tool draft.list
-```
-
-If this succeeds, the desktop app and MCP bridge are both working locally.
-
-### 3. MCP bridge log file
-
-The wrapper writes logs to:
-
-```powershell
-$env:TEMP\novel-editor-mcp.log
-```
-
-View the latest lines:
-
-```powershell
-Get-Content "$env:TEMP\novel-editor-mcp.log" -Tail 200
-```
-
-This is useful if a client says MCP startup failed.
-
-## Known Compatibility Notes
-
-- Current `Codex` on Windows sends bare JSON / NDJSON during MCP startup instead of only `Content-Length` framed messages.
-- The local bridge now supports both framed MCP messages and bare JSON startup messages.
-- During startup, some clients probe `resources/list` and `resources/templates/list`. At the moment the bridge advertises tools only; resources are not used by the CloudDream Novel Agent flow.
-
-## Troubleshooting
-
-### `APP_NOT_RUNNING`
-
-- Make sure the desktop app is still running
-- make sure the runtime file exists
-- restart the CLI after restarting the desktop app
-
-### MCP starts but tools return no data
-
-- first call `novel_list`
-- confirm you are looking at the dev database under:
-  `C:\Users\<you>\AppData\Roaming\@novel-editor\desktop-dev\novel_editor.db`
-
-### Codex or Claude Code times out on startup
-
-- use the `.cmd` wrapper, not direct `.mjs`
-- set `NOVEL_EDITOR_NODE_EXE` before launching the client
-- inspect `$env:TEMP\novel-editor-mcp.log`
-
-### `fetch failed` in connection or generate tests
-
-This usually means HTTP provider connection timeout (for example `UND_ERR_CONNECT_TIMEOUT`), commonly caused by:
-
-- the configured `baseUrl` is not reachable from current network
-- proxy mode/values are incorrect
-- DNS resolves but port 443 is blocked/unreachable
-
-Recommended checks:
-
-1. verify `baseUrl` and `apiKey` in `HTTP API` mode
-2. verify proxy mode (`system/off/custom`) matches your environment
-3. test port reachability (for example `Test-NetConnection <host> -Port 443`)
-4. run in-app `Test Connection` again and read the detailed error text
-
+FastMCP 3.4.3 / mcp 1.28.1 have been verified with negotiated protocol 2025-11-25. The desktop remains the sole business data source. The gateway does not access the novel database or create a LangGraph runtime per client. See the [requirements](agent/mcp-application-capabilities-requirements.md) and [HTTP acceptance record](agent/acceptance-mcp-http-2026-10-19.md).

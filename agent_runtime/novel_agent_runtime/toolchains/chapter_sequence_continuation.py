@@ -41,6 +41,7 @@ def beat_generation_params(
         "chapterId": input_data.chapterId,
         "goal": input_data.goal,
         "chapterCount": input_data.chapterCount,
+        "insertionMode": input_data.insertionMode,
         "locale": input_data.locale,
         "context": continuation_context,
     }
@@ -248,7 +249,7 @@ def sequence_child_params(
             {
                 "childIndex": item.get("childIndex"),
                 "title": item.get("title"),
-                "content": str(item.get("generatedText") or "")[-12000:],
+                "content": str(item.get("generatedText") or ""),
             }
             for item in recent_full
         ],
@@ -261,22 +262,16 @@ def sequence_child_params(
             for item in earlier
         ],
         "stateLedger": batch.stateLedger.model_dump(),
+        # New contexts verify every multi-chapter batch. Frozen pre-policy
+        # checkpoints retain their original request hash and completed prose.
+        "requireVerifiedState": len(batch.children) > (1 if continuation_context.get("generationPolicyVersion") == 2 else 5),
     }
-    intent = "\n".join([
-        input_data.goal,
-        f"本章节拍：{beat.title}",
-        f"章节目标：{beat.chapterGoal}",
-        f"核心冲突：{beat.coreConflict}",
-        f"关键事件：{'；'.join(beat.keyEvents)}",
-        f"信息揭示：{'；'.join(beat.reveals)}",
-        f"结尾钩子：{beat.endingHook}",
-    ])
     return {
         "novelId": input_data.novelId,
         "chapterId": input_data.chapterId,
         "currentContent": current_content,
         "mode": "new_chapter",
-        "userIntent": intent,
+        "userIntent": input_data.goal,
         "locale": input_data.locale,
         "presentation": "silent",
         "contextChapterCount": input_data.contextChapterCount,
@@ -340,6 +335,12 @@ def normalize_generated_child(
         "generatedText": generated_text,
         "summary": summary or session.previewSummary,
         "generationRevision": session.generationRevision or 1,
+        "warnings": list(payload.get("warnings") or []),
+        "usedContext": list(payload.get("usedContext") or []),
+        "contextSources": [{key: source.get(key) for key in ("chapterId", "contentMode", "title")}
+                           for source in (payload.get("contextSnapshot") or {}).get("chapterSources", [])
+                           if isinstance(source, dict)],
+        "consistency": payload.get("consistency") or {},
         **({"narrativeStateDelta": state_delta} if state_delta else {}),
     }
 

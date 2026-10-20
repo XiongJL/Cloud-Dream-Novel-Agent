@@ -8,6 +8,7 @@ import httpx
 from langgraph.types import RetryPolicy
 
 from .toolchains.schemas import ToolchainError
+from .system_errors import storage_failure
 
 
 MAX_ATTEMPTS = 4
@@ -123,6 +124,8 @@ def _http_status(error: BaseException) -> int | None:
 
 
 def is_retryable_agent_error(error: BaseException) -> bool:
+    if storage_failure(error):
+        return False
     if isinstance(error, AgentRequestError):
         return error.failure.retryable
     if isinstance(error, ToolchainError):
@@ -148,6 +151,9 @@ def is_retryable_agent_error(error: BaseException) -> bool:
 
 
 def normalize_agent_error(error: BaseException, *, attempts: int = 1) -> AgentRequestFailure:
+    if infrastructure := storage_failure(error):
+        return AgentRequestFailure(code=infrastructure["code"], retryable=False, attempts=attempts,
+            user_message=infrastructure["message"], diagnostic_ref=_error_code(error), details=infrastructure)
     if isinstance(error, AgentRequestError):
         if error.failure.attempts == attempts:
             return error.failure

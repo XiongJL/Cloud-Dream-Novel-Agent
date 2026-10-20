@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, model_serializer
 
 
 ToolchainErrorCode = Literal[
@@ -14,11 +14,13 @@ ToolchainErrorCode = Literal[
     "ROLE_NOT_ALLOWED",
     "TOOL_NOT_ALLOWED",
     "BUDGET_EXCEEDED",
+    "STYLE_QUALITY_INPUT_LIMIT",
     "CONTEXT_INSUFFICIENT",
     "NODE_FAILED",
     "MODEL_OUTPUT_INVALID",
     "MODEL_OUTPUT_TRUNCATED",
     "SIDE_EFFECT_UNKNOWN",
+    "SKILL_STORAGE_UNAVAILABLE",
     "CANCELLED",
 ]
 
@@ -50,10 +52,10 @@ class ToolchainError(RuntimeError):
 
 
 class ToolchainBudget(BaseModel):
-    maxToolCalls: int = Field(default=10, ge=1, le=100)
-    maxModelCalls: int = Field(default=2, ge=0, le=32)
-    maxEstimatedTokens: int = Field(default=24000, ge=1000, le=200000)
-    timeoutSeconds: int = Field(default=180, ge=5, le=1800)
+    maxToolCalls: int = Field(default=10, ge=1, le=4096)
+    maxModelCalls: int = Field(default=2, ge=0, le=4096)
+    maxEstimatedTokens: int = Field(default=24000, ge=1000, le=128000000)
+    timeoutSeconds: int = Field(default=180, ge=5, le=14400)
 
 
 class ToolchainInvocation(BaseModel):
@@ -114,6 +116,7 @@ class ChapterScopeContextInput(BaseModel):
     batchSize: int = Field(default=4, ge=1, le=10)
     maxDetailedChapters: int = Field(default=20, ge=1, le=20)
     maxEstimatedTokens: int | None = Field(default=None, ge=4000, le=200000)
+    representation: Literal["default", "catalog", "verbatim", "expert_context"] = "default"
 
     @model_validator(mode="after")
     def normalize_scope_targets(self) -> "ChapterScopeContextInput":
@@ -146,6 +149,8 @@ class StyleSkillExtractionInput(BaseModel):
     """Input for the style extractor from either project samples or a named work."""
     sourceMode: Literal["project_chapter_scope", "named_work_model_prior"] = "project_chapter_scope"
     sourceWorkTitle: str | None = Field(default=None, max_length=300)
+    publicationScope: Literal['user', 'novel'] | None = None
+    representation: Literal["default", "catalog", "verbatim"] = "default"
     scopeId: str | None = None
     novelId: str | None = None
     kind: ChapterScopeKind = "current_chapter"
@@ -163,6 +168,8 @@ class StyleSkillExtractionInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_source(self) -> "StyleSkillExtractionInput":
+        if self.publicationScope == 'novel' and not (self.novelId or '').strip():
+            raise ValueError('小说专属 Skill 需要归属小说。')
         if self.sourceMode == "named_work_model_prior":
             if not (self.sourceWorkTitle or "").strip():
                 raise ValueError("sourceWorkTitle is required for named_work_model_prior")
@@ -187,6 +194,13 @@ class StyleSkillExtractionInput(BaseModel):
         for field_name, value in scope.model_dump().items():
             setattr(self, field_name, value)
         return self
+
+    @model_serializer(mode='wrap')
+    def preserve_legacy_fingerprint(self, handler):
+        payload = handler(self)
+        if self.publicationScope is None:
+            payload.pop('publicationScope', None)
+        return payload
 
 
 class CreativeAssetDraftInput(BaseModel):
@@ -308,6 +322,7 @@ class StyleSkillMemberAuthoringPlan(BaseModel):
     triggerHints: list[str] = Field(min_length=1, max_length=8)
     antiTriggerHints: list[str] = Field(min_length=1, max_length=8)
     supportedOperations: list[str] = Field(min_length=1, max_length=8)
+    allowedRoles: list[Literal["writer", "editor", "reader", "team", "worldbuilding", "research_rag"]] = Field(default_factory=lambda: ["writer", "editor"], min_length=1, max_length=6)
     constraints: list[str] = Field(min_length=1, max_length=20)
     methodDimensions: list[str] = Field(min_length=3, max_length=12)
     evidenceNotes: list[str] = Field(default_factory=list, max_length=20)
@@ -332,7 +347,7 @@ class StyleSkillPackPreview(BaseModel):
 class StyleSkillPackDraftArtifact(BaseModel):
     summary: str = Field(min_length=1, max_length=2000)
     sourceCoverage: dict[str, Any] = Field(default_factory=dict)
-    skills: list[StyleSkillDraftPreview] = Field(min_length=2, max_length=3)
+    skills: list[StyleSkillDraftPreview] = Field(min_length=1, max_length=3)
     pack: StyleSkillPackPreview
     omittedDimensions: list[str] = Field(default_factory=list, max_length=10)
     warnings: list[str] = Field(default_factory=list, max_length=20)
@@ -342,8 +357,8 @@ class StyleSkillPackDraftArtifact(BaseModel):
         keys = [item.draftKey for item in self.skills]
         if len(keys) != len(set(keys)):
             raise ValueError("Style Skill draft keys must be unique")
-        if "language_style" not in keys or "suspense_release" not in keys:
-            raise ValueError("Style extraction requires language_style and suspense_release drafts")
+        if "language_style" not in keys:
+            raise ValueError("Style extraction requires a language_style draft")
         known = set(keys)
         for binding in self.pack.bindings:
             if binding.primaryDraftKey not in known or (
@@ -358,18 +373,19 @@ class StyleSkillPackAuthoringPlan(BaseModel):
 
     summary: str = Field(min_length=1, max_length=2000)
     sourceCoverage: dict[str, Any] = Field(default_factory=dict)
-    skills: list[StyleSkillMemberAuthoringPlan] = Field(min_length=2, max_length=3)
+    skills: list[StyleSkillMemberAuthoringPlan] = Field(min_length=1, max_length=3)
     pack: StyleSkillPackPreview
     omittedDimensions: list[str] = Field(default_factory=list, max_length=10)
     warnings: list[str] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def validate_dimensions_and_bindings(self) -> "StyleSkillPackAuthoringPlan":
+        from ..intent.operations import INTENT_OPERATION_REGISTRY
         keys = [item.draftKey for item in self.skills]
         if len(keys) != len(set(keys)):
             raise ValueError("Style Skill plan draft keys must be unique")
-        if "language_style" not in keys or "suspense_release" not in keys:
-            raise ValueError("Style extraction requires language_style and suspense_release plans")
+        if "language_style" not in keys:
+            raise ValueError("Style extraction requires a language_style plan")
         known = set(keys)
         if not re.fullmatch(
             r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*",
@@ -377,13 +393,28 @@ class StyleSkillPackAuthoringPlan(BaseModel):
         ):
             raise ValueError("Skill Pack stableIdCandidate is invalid")
         allowed_roles = {"team", "writer", "editor", "reader", "worldbuilding", "research_rag"}
+        members = {item.draftKey: item for item in self.skills}
+        for member in self.skills:
+            if any(not INTENT_OPERATION_REGISTRY.has(operation) for operation in member.supportedOperations):
+                raise ValueError("Style member references an unregistered operation")
+        seen = set()
         for binding in self.pack.bindings:
+            if not INTENT_OPERATION_REGISTRY.has(binding.operationId):
+                raise ValueError("Style Pack binding references an unregistered operation")
             if binding.roleId not in allowed_roles:
                 raise ValueError("Skill Pack plan binding references an unknown role")
             if binding.primaryDraftKey not in known or (
                 binding.auxiliaryDraftKey and binding.auxiliaryDraftKey not in known
             ):
                 raise ValueError("Skill Pack plan binding references an unknown draft key")
+            if (binding.operationId, binding.roleId) in seen or binding.primaryDraftKey == binding.auxiliaryDraftKey:
+                raise ValueError("Style Pack bindings conflict")
+            seen.add((binding.operationId, binding.roleId))
+            for key in (binding.primaryDraftKey, binding.auxiliaryDraftKey):
+                if key and binding.operationId not in members[key].supportedOperations:
+                    raise ValueError("Style Pack operation is not supported by its member")
+                if key and binding.roleId not in members[key].allowedRoles:
+                    raise ValueError("Style Pack role is not supported by its member")
         return self
 
 
@@ -444,7 +475,7 @@ class ChapterScopeContextItem(BaseModel):
     version: int = 1
     updatedAt: str
     contentHash: str
-    contentMode: Literal["full", "truncated", "summary", "excerpt"]
+    contentMode: Literal["full", "truncated", "summary", "excerpt", "catalog"]
     content: str = ""
     summaryId: str | None = None
     summaryFresh: bool = False
@@ -462,6 +493,9 @@ class ChapterScopeCoverage(BaseModel):
     batchSize: int = 4
     batchCount: int = 0
     batches: list[dict[str, Any]] = Field(default_factory=list)
+    analyzedChapterCount: int | None = None
+    expertReviewedChapterCount: int | None = None
+    expertReviewMode: Literal["analysis_evidence", "original_context"] | None = None
 
 
 class NarrativeStateLedger(BaseModel):
@@ -483,13 +517,13 @@ class ChapterBeatInput(BaseModel):
 
 class ChapterBeat(ChapterBeatInput):
     beatId: str = Field(min_length=1)
-    childIndex: int = Field(ge=0, le=4)
+    childIndex: int = Field(ge=0, le=9)
 
 
 class DraftBatchOutline(BaseModel):
     revision: int = Field(ge=1)
     status: Literal["draft", "approved"] = "draft"
-    beats: list[ChapterBeat] = Field(min_length=1, max_length=5)
+    beats: list[ChapterBeat] = Field(min_length=1, max_length=10)
     approvedAt: str | None = None
     approvedBy: str | None = None
 
@@ -501,7 +535,7 @@ class DraftBatchSourceSnapshot(BaseModel):
 
 
 class DraftBatchChildRecord(BaseModel):
-    childIndex: int = Field(ge=0, le=4)
+    childIndex: int = Field(ge=0, le=9)
     title: str = Field(min_length=1)
     status: Literal[
         "pending",
@@ -515,7 +549,7 @@ class DraftBatchChildRecord(BaseModel):
     generationRevision: int = Field(default=1, ge=1)
     draftSessionId: str | None = None
     targetChapterId: str | None = None
-    dependsOnChildIndex: int | None = Field(default=None, ge=0, le=4)
+    dependsOnChildIndex: int | None = Field(default=None, ge=0, le=9)
     sourceSnapshot: DraftBatchSourceSnapshot | None = None
     error: dict[str, Any] | None = None
 
@@ -564,7 +598,7 @@ class NarrativeStateDelta(BaseModel):
 
 
 class NarrativeStateDeltaRecord(NarrativeStateDelta):
-    childIndex: int = Field(ge=0, le=4)
+    childIndex: int = Field(ge=0, le=9)
     generationRevision: int = Field(ge=1)
     draftSessionId: str = Field(min_length=1)
 
@@ -599,7 +633,7 @@ class DraftBatchRecord(BaseModel):
         "failed",
     ]
     outline: DraftBatchOutline
-    children: list[DraftBatchChildRecord] = Field(min_length=1, max_length=5)
+    children: list[DraftBatchChildRecord] = Field(min_length=1, max_length=10)
     stateLedger: DraftBatchNarrativeStateLedger = Field(default_factory=DraftBatchNarrativeStateLedger)
     sourceSnapshot: list[DraftBatchSourceSnapshot] = Field(default_factory=list)
     runId: str | None = None
@@ -610,6 +644,8 @@ class DraftBatchRecord(BaseModel):
 
     @model_validator(mode="after")
     def validate_batch_alignment(self) -> "DraftBatchRecord":
+        if self.mode == "batch_rewrite" and len(self.children) > 5:
+            raise ValueError("Rewrite batches support at most 5 chapters")
         expected = list(range(len(self.outline.beats)))
         beat_indices = [beat.childIndex for beat in self.outline.beats]
         child_indices = [child.childIndex for child in self.children]
@@ -627,8 +663,8 @@ class ChapterSequenceContinuationInput(BaseModel):
     goal: str = Field(min_length=1)
     currentContent: str = ""
     locale: str = "zh-CN"
-    chapterCount: int = Field(default=2, ge=1, le=5)
-    beats: list[ChapterBeatInput] = Field(default_factory=list, max_length=5)
+    chapterCount: int = Field(default=2, ge=1, le=10)
+    beats: list[ChapterBeatInput] = Field(default_factory=list, max_length=10)
     insertionMode: Literal["after_anchor", "volume_end"] = "after_anchor"
     contextChapterCount: int = Field(default=8, ge=1, le=20)
     recentRawChapterCount: int = Field(default=2, ge=1, le=3)
@@ -637,7 +673,7 @@ class ChapterSequenceContinuationInput(BaseModel):
     pace: str = ""
     resumeBatchId: str | None = None
     resumeBatchVersion: int | None = Field(default=None, ge=1)
-    startChildIndex: int | None = Field(default=None, ge=0, le=4)
+    startChildIndex: int | None = Field(default=None, ge=0, le=9)
 
     @model_validator(mode="after")
     def validate_optional_beats(self) -> "ChapterSequenceContinuationInput":
@@ -651,10 +687,15 @@ class ChapterSequenceContinuationInput(BaseModel):
             raise ValueError("resumeBatchVersion requires resumeBatchId")
         if self.startChildIndex is not None and not self.resumeBatchId:
             raise ValueError("startChildIndex requires resumeBatchId")
+        if self.startChildIndex is not None and self.startChildIndex >= self.chapterCount:
+            raise ValueError("startChildIndex must be within chapterCount")
         return self
 
 
 class ChapterBatchRewriteInput(ChapterSequenceContinuationInput):
+    chapterCount: int = Field(default=2, ge=1, le=5)
+    beats: list[ChapterBeatInput] = Field(default_factory=list, max_length=5)
+    startChildIndex: int | None = Field(default=None, ge=0, le=4)
     kind: Literal["current_chapter", "selected_chapters", "chapter_range"] = "selected_chapters"
     chapterIds: list[str] = Field(min_length=1, max_length=5)
     scopeId: str | None = None
@@ -682,9 +723,9 @@ class ChapterDraftBatchResult(BaseModel):
     draftBatchId: str = Field(min_length=1)
     status: str
     outlineRevision: int = Field(ge=1)
-    draftSessionIds: list[str] = Field(default_factory=list, max_length=5)
-    generatedCount: int = Field(ge=0, le=5)
-    totalCount: int = Field(ge=1, le=5)
+    draftSessionIds: list[str] = Field(default_factory=list, max_length=10)
+    generatedCount: int = Field(ge=0, le=10)
+    totalCount: int = Field(ge=1, le=10)
     artifactId: str = Field(min_length=1)
     warnings: list[str] = Field(default_factory=list)
 
@@ -701,6 +742,7 @@ class ChapterScopeBundle(BaseModel):
     sourceSnapshot: list[AgentChapterSnapshot] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     estimatedTokens: int = 0
+    skillAnalysis: dict[str, Any] | None = None
 
 
 class EditorRangeReviewInput(ChapterScopeContextInput):
@@ -1027,7 +1069,7 @@ class CreativeAssetContext(BaseModel):
 class DraftSessionRef(BaseModel):
     draftSessionId: str = Field(min_length=1)
     draftBatchId: str | None = None
-    childIndex: int | None = Field(default=None, ge=0, le=4)
+    childIndex: int | None = Field(default=None, ge=0, le=9)
     generationRevision: int | None = Field(default=None, ge=1)
     type: str = ""
     status: str = "draft"

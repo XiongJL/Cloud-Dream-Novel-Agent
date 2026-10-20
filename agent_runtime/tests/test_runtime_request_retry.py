@@ -18,6 +18,33 @@ from novel_agent_runtime.store import AgentStateStore
 from novel_agent_runtime.toolchains.schemas import ToolchainInvocation
 
 
+@pytest.mark.parametrize('chat', [True, False])
+def test_request_contract_errors_are_not_replayed_with_less_context(tmp_path, chat):
+    async def scenario():
+        received = []
+        class Native:
+            async def invoke(self, method, params, origin, **context):
+                received.append(context)
+                raise TypeError("internal callback got an unexpected keyword argument 'deadline_at'")
+
+        store = AgentStateStore(tmp_path)
+        runtime = NovelAgentRuntime(store, Native(), AgentEventBus(store))
+        deadline = '2030-01-01T00:00:00+00:00'
+        with pytest.raises(TypeError):
+            if chat:
+                await runtime._invoke_chat_automation('agent.generate_chat', {}, call_id='request',
+                    parent_request_id='parent', deadline_at=deadline)
+            else:
+                await runtime._invoke_automation_request('agent.generate_plan', {}, request_id='request',
+                    deadline_at=deadline)
+        expected = {'request_id': 'request', 'deadline_at': deadline}
+        if chat:
+            expected['parent_request_id'] = 'parent'
+        assert received == [expected]
+
+    asyncio.run(scenario())
+
+
 class FlakyInvoker:
     transport_name = "test"
 
@@ -125,9 +152,18 @@ def test_run_model_and_read_only_tool_emit_retry_events(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_run_deadline_guard_finishes_a_stalled_toolchain_with_terminal_events(tmp_path: Path) -> None:
+def test_run_deadline_guard_finishes_a_stalled_toolchain_with_terminal_events(tmp_path: Path, monkeypatch) -> None:
     async def scenario() -> None:
         runtime, _invoker = create_runtime(tmp_path)
+        real_timeout = asyncio.timeout
+        timeout_controls = []
+
+        def timeout_after_tool_entry(delay):
+            guard = real_timeout(None)
+            timeout_controls.append((delay, guard))
+            return guard
+
+        monkeypatch.setattr(asyncio, "timeout", timeout_after_tool_entry)
         step = AgentPlanStep(
             stepId="step-stalled",
             agent="writer",
@@ -175,6 +211,10 @@ def test_run_deadline_guard_finishes_a_stalled_toolchain_with_terminal_events(tm
                         "nodeId": "style_source.read",
                     },
                 )
+                # Start the real cancellation timer only once the tool is in
+                # flight; Windows journal latency must not change this scenario
+                # into a timeout during test setup/event publication.
+                timeout_controls[0][1].reschedule(asyncio.get_running_loop().time() + 0.01)
                 await asyncio.Event().wait()
                 return {"action": "terminal"}
 
@@ -182,6 +222,7 @@ def test_run_deadline_guard_finishes_a_stalled_toolchain_with_terminal_events(tm
         await runtime._run_graph_guarded(run.runId, initial_state={})  # type: ignore[arg-type]
 
         assert run.status == "failed"
+        assert timeout_controls[0][0] >= 0.1
         event_types = [event.type for event in runtime.store.list_events(run.runId)]
         expected = ["tool_call", "tool_result", "toolchain_failed", "step_failed", "run_failed"]
         positions = [event_types.index(event_type) for event_type in expected]
@@ -265,6 +306,7 @@ def test_exhausted_final_report_fails_once_without_artifact_or_raw_error(tmp_pat
             params: dict[str, Any] | None = None,
             origin: str = "desktop-ui",
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "agent.generate_report":
                 invoker.calls[method] = invoker.calls.get(method, 0) + 1
@@ -478,7 +520,7 @@ def test_invalid_model_output_uses_one_saved_result_repair_without_repeating_ori
         runtime, invoker = create_runtime(tmp_path)
         original_invoke = invoker.invoke
 
-        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_scope_audit":
                 invoker.calls[method] = invoker.calls.get(method, 0) + 1
                 raise AutomationInvokeError("MODEL_OUTPUT_INVALID", "bad shape", {
@@ -517,7 +559,7 @@ def test_failed_auto_repair_exposes_manual_button_then_allows_fresh_request_with
     async def scenario() -> None:
         runtime, invoker = create_runtime(tmp_path)
 
-        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None, **_request_context) -> Any:
             del origin, request_id
             invoker.calls[method] = invoker.calls.get(method, 0) + 1
             if method == "agent.repair_structured_output":
@@ -642,7 +684,9 @@ def test_processor_upgrade_creates_linked_run_from_saved_result_without_model_ca
     async def scenario() -> None:
         runtime, invoker = create_runtime(tmp_path)
 
-        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any] | None = None, origin: str = "desktop-ui", request_id: str | None = None, **_request_context) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             del origin, request_id
             invoker.calls[method] = invoker.calls.get(method, 0) + 1
             if method == "agent.reprocess_saved_structured_output":

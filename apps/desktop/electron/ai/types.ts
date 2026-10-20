@@ -1,3 +1,5 @@
+import type { ChapterSourceOptions } from '../../shared/chapterWritingPrompt';
+
 export type AiProviderType = 'http' | 'mcp-cli';
 export type AiProxyMode = 'system' | 'off' | 'custom';
 export type AiHttpApiMode = 'chat-completions' | 'responses';
@@ -99,7 +101,17 @@ export interface AiGenerateResponse {
 }
 
 export interface AiGenerationMetadata {
-    lengthValidation?: import('../../shared/writingPolicy').WritingLengthTarget & { actual: number; withinRange: boolean; repairAttempted: boolean };
+    agentSkills?: Array<NonNullable<NonNullable<import('./AgentSkillPrompt').CompiledAgentSkill['sections']>[number]['skill']>>;
+    lengthValidation?: import('../../shared/writingPolicy').WritingLengthTarget & {
+        actual: number; withinRange: boolean; repairAttempted: boolean;
+        initialActual?: number; repairActual?: number; repairAccepted?: boolean;
+    };
+    // Observed responses per phase; usage on the selected response alone is
+    // not the total task cost (failed/truncated calls may lack usage).
+    responsePhases?: Array<{
+        stage: 'generation' | 'length_repair'; responseId?: string; usage?: Record<string, unknown>;
+        finishReason?: string; requestedMaxTokens?: number; elapsedMs?: number; attemptCount: number;
+    }>;
     taskOutputLimitTokens?: number;
     responseId?: string;
     usage?: Record<string, unknown>;
@@ -144,7 +156,8 @@ export interface TitleCandidate {
     styleTag: string;
 }
 
-export interface ContinueWritingPayload {
+export interface ContinueWritingPayload extends ChapterSourceOptions {
+    agentSkill?: import('./AgentSkillPrompt').CompiledAgentSkill;
     locale?: string;
     mode?: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter';
     novelId: string;
@@ -174,6 +187,7 @@ export interface ChapterBeatGenerationPayload {
     locale?: string;
     context?: Record<string, unknown>;
     taskMode?: 'sequence_continuation' | 'batch_rewrite';
+    insertionMode?: 'after_anchor' | 'volume_end';
     targetChapterIds?: string[];
     revisionInstruction?: string;
     previousBeats?: ChapterBeatGenerationResult['beats'];
@@ -210,10 +224,7 @@ export interface ContinueWritingResult {
     warnings?: string[];
     contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
     contextSnapshot?: import('../../shared/agentChapterScope').ContinuationContextSnapshot;
-    consistency: {
-        ok: boolean;
-        issues: string[];
-    };
+    consistency: import('../../shared/chapterGenerationQuality').ChapterConsistencyResult;
     generation?: AiGenerationMetadata;
 }
 
@@ -305,6 +316,7 @@ export interface AiMapImagePayload {
 }
 
 export interface CreativeAssetsGeneratePayload {
+    agentSkill?: import('./AgentSkillPrompt').CompiledAgentSkill;
     locale?: string;
     brief: string;
     novelId: string;

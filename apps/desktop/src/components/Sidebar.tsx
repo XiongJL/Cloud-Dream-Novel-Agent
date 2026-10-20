@@ -1,4 +1,4 @@
-import { useState, useEffect, memo, useCallback } from 'react';
+import { useState, useEffect, useRef, memo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Book, ChevronRight, ChevronDown, Plus, FileText, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
@@ -19,6 +19,7 @@ interface SidebarProps {
     onDeleteChapter: (id: string) => void;
     theme: 'dark' | 'light';
     lastCreatedVolumeId?: string | null;
+    isVisible?: boolean;
 }
 
 // --- Memoized Chapter Item ---
@@ -63,6 +64,8 @@ const ChapterItem = memo(({
 
     return (
         <div
+            data-chapter-id={chapter.id}
+            aria-current={currentChapterId === chapter.id ? 'page' : undefined}
             onClick={() => onSelect(chapter.id)}
             onDoubleClick={startEdit}
             tabIndex={0}
@@ -129,7 +132,8 @@ const VolumeItem = memo(({
     onRenameVolume,
     onSelectChapter,
     onRenameChapter,
-    onDeleteChapter
+    onDeleteChapter,
+    onRevealCurrentChapter
 }: {
     volume: Volume;
     isExpanded: boolean;
@@ -143,6 +147,7 @@ const VolumeItem = memo(({
     onSelectChapter: (id: string) => void;
     onRenameChapter: (id: string, title: string) => void;
     onDeleteChapter: (chapter: ChapterMetadata) => void;
+    onRevealCurrentChapter: () => void;
 }) => {
     const { t } = useTranslation();
     const [isEditing, setIsEditing] = useState(false);
@@ -167,8 +172,9 @@ const VolumeItem = memo(({
     };
 
     return (
-        <div className="mb-4">
+        <div className="mb-4" data-volume-id={volume.id}>
             <div
+                data-volume-header
                 className={clsx(
                     "relative isolate flex items-center justify-between p-2 rounded cursor-pointer group outline-none focus:ring-1 focus:ring-purple-500 sticky top-0 z-10 border-b",
                     isDark
@@ -230,6 +236,7 @@ const VolumeItem = memo(({
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
+                        onAnimationComplete={onRevealCurrentChapter}
                         className="overflow-hidden ml-4 pl-2 border-l border-white/5"
                         // CSS Optimization for large lists (content-visibility)
                         style={{
@@ -273,11 +280,39 @@ const Sidebar = memo(({
     onRenameChapter,
     onDeleteChapter,
     theme,
-    lastCreatedVolumeId
+    lastCreatedVolumeId,
+    isVisible = true
 }: SidebarProps) => {
     const { t } = useTranslation();
     const [expandedVolumes, setExpandedVolumes] = useState<Record<string, boolean>>({});
     const [pendingDeleteChapter, setPendingDeleteChapter] = useState<ChapterMetadata | null>(null);
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const revealChapterRef = useRef<string | null>(null);
+    const revealFrameRef = useRef<number | null>(null);
+    const currentVolumeId = volumes.find(volume => volume.chapters.some(chapter => chapter.id === currentChapterId))?.id;
+
+    const revealCurrentChapter = useCallback(() => {
+        if (!revealChapterRef.current || revealFrameRef.current !== null) return;
+        revealFrameRef.current = requestAnimationFrame(() => {
+            revealFrameRef.current = null;
+            const container = scrollContainerRef.current;
+            const row = container?.querySelector<HTMLElement>('[aria-current="page"]');
+            if (!container || !row || row.dataset.chapterId !== revealChapterRef.current || !container.clientHeight) return;
+            const bounds = container.getBoundingClientRect();
+            const header = row.closest('[data-volume-id]')?.querySelector<HTMLElement>('[data-volume-header]');
+            const top = bounds.top + container.clientTop + (header?.offsetHeight ?? 0) + 8;
+            const bottom = bounds.top + container.clientTop + container.clientHeight - 8;
+            const target = row.getBoundingClientRect();
+            if (target.top < top) container.scrollTop += target.top - top;
+            else if (target.bottom > bottom) container.scrollTop += target.bottom - bottom;
+            const visible = row.getBoundingClientRect();
+            // Expansion can temporarily clamp scrollTop. Keep the request until
+            // the volume's animation completes, then try against its final size.
+            if (visible.height > 0 && visible.top >= top - 1 && visible.bottom <= bottom + 1) {
+                revealChapterRef.current = null;
+            }
+        });
+    }, []);
 
     const isDark = theme === 'dark';
 
@@ -285,18 +320,20 @@ const Sidebar = memo(({
     const volFormat = formatConfig.volume || '第 {n} 卷';
     const chapFormat = formatConfig.chapter || '第 {n} 章';
 
-    // Auto-expand when currentChapterId changes
+    // Reveal on selection/visibility changes, not on every metadata refresh or
+    // manual scroll. The sidebar remounts when returning from Agent mode.
     useEffect(() => {
-        if (currentChapterId) {
-            const parentVolume = volumes.find(v => v.chapters.some(c => c.id === currentChapterId));
-            if (parentVolume && !expandedVolumes[parentVolume.id]) {
-                setExpandedVolumes(prev => ({
-                    ...prev,
-                    [parentVolume.id]: true
-                }));
-            }
+        revealChapterRef.current = isVisible && currentVolumeId ? currentChapterId : null;
+        if (revealChapterRef.current && currentVolumeId) {
+            setExpandedVolumes(prev => prev[currentVolumeId] ? prev : { ...prev, [currentVolumeId]: true });
+            revealCurrentChapter();
         }
-    }, [currentChapterId, volumes]);
+        return () => {
+            revealChapterRef.current = null;
+            if (revealFrameRef.current !== null) cancelAnimationFrame(revealFrameRef.current);
+            revealFrameRef.current = null;
+        };
+    }, [currentChapterId, currentVolumeId, isVisible, revealCurrentChapter]);
 
     // Auto-expand when lastCreatedVolumeId changes
     useEffect(() => {
@@ -341,7 +378,7 @@ const Sidebar = memo(({
                     </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-2 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+                <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-2 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
                     {volumes.map(volume => (
                         <VolumeItem
                             key={volume.id}
@@ -357,6 +394,7 @@ const Sidebar = memo(({
                             onRenameChapter={onRenameChapter}
                             onDeleteChapter={setPendingDeleteChapter}
                             onSelectChapter={onSelectChapter}
+                            onRevealCurrentChapter={revealCurrentChapter}
                         />
                     ))}
                 </div>

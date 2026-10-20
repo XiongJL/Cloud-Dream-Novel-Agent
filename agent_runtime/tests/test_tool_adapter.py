@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 from fastmcp import Client
 
 from novel_agent_runtime.automation import AutomationClient, AutomationInvokeError, resolve_automation_timeout
@@ -20,6 +21,42 @@ class FailingTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         del request
         raise self.error
+
+
+@pytest.mark.parametrize('adapter_type', [HttpAgentToolAdapter, FastMcpAgentToolAdapter])
+def test_internal_type_error_is_not_replayed_without_request_context(adapter_type):
+    async def scenario():
+        received = []
+        class Native:
+            async def invoke(self, method, params, origin, **context):
+                received.append(context)
+                raise TypeError("internal callback got an unexpected keyword argument 'deadline_at'")
+
+        adapter = adapter_type(Native())
+        with pytest.raises((TypeError, AutomationInvokeError)):
+            await adapter.invoke('chapter.get', {'chapterId': 'chapter'}, request_id='request',
+                                 parent_request_id='parent', deadline_at='2030-01-01T00:00:00+00:00')
+        assert received == [{'request_id': 'request', 'parent_request_id': 'parent',
+                             'deadline_at': '2030-01-01T00:00:00+00:00'}]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("descriptor", [None, "{", "[]", '{"port": 0, "token": "test"}', '{"port": 12345}'])
+def test_automation_runtime_descriptor_failures_are_structured(tmp_path, descriptor) -> None:
+    runtime_path = tmp_path / "runtime.json"
+    if descriptor is not None:
+        runtime_path.write_text(descriptor, encoding="utf-8")
+    expected = "AUTOMATION_RUNTIME_UNAVAILABLE" if descriptor is None else "AUTOMATION_RUNTIME_INVALID"
+
+    async def scenario() -> None:
+        client = AutomationClient(runtime_path)
+        for call in (client.invoke("agent_skill.list"), client.cancel("request-1")):
+            with pytest.raises(AutomationInvokeError) as failure:
+                await call
+            assert failure.value.code == expected
+
+    asyncio.run(scenario())
 
 
 class FakeAutomationInvoker:
@@ -192,8 +229,28 @@ def test_automation_client_preserves_retryable_transport_failures(tmp_path, monk
                 await client.invoke("chapter.get", {"chapterId": "chapter_1"})
             except AutomationInvokeError as error:
                 assert error.code == expected_code
-                assert error.details == {"method": "chapter.get"}
+                assert error.details["method"] == "chapter.get"
+                assert error.details["transportLayer"] == "automation"
+                assert error.details["transportErrorType"] == type(transport_error).__name__
+                assert error.details["requestId"]
             else:
                 raise AssertionError("transport failure was not preserved")
 
+    asyncio.run(scenario())
+
+
+def test_automation_client_preserves_model_error_envelope(tmp_path, monkeypatch):
+    runtime_path = tmp_path / "runtime.json"
+    runtime_path.write_text(json.dumps({"port": 12345, "token": "test-token"}), encoding="utf-8")
+    async_client = httpx.AsyncClient
+    def reply(_):
+        return httpx.Response(500, json={"ok": False, "code": "NETWORK_ERROR", "message": "无法连接模型服务。",
+            "data": {"transportLayer": "model", "retryable": True}})
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: async_client(**kwargs, transport=httpx.MockTransport(reply)))
+    async def scenario():
+        with pytest.raises(AutomationInvokeError) as raised:
+            await AutomationClient(runtime_path).invoke("agent.style_quality", {})
+        assert raised.value.code == "NETWORK_ERROR"
+        assert raised.value.message == "无法连接模型服务。"
+        assert raised.value.details["transportLayer"] == "model"
     asyncio.run(scenario())

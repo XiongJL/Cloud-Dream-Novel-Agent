@@ -14,6 +14,13 @@ assert.match(workspace, /activeConversation\.runs\?\.find\(\(run\) => run\.runId
 assert.match(workspace, /!recovery && !response\.pendingUserInput \? \[\{/);
 assert.match(workspace, /重试失败步骤/);
 assert.match(workspace, /调整并重新规划/);
+assert.match(workspace, /仅用已完成结果收尾/);
+assert.match(workspace, /onFinalizeCompleted=\{\(\) => void retryFailedRun\(timelineRun, 'use_completed_results'\)\}/);
+assert.match(workspace, /run\.recovery\?\.canFinalizeCompleted && interactive/);
+assert.match(workspace, /blockedReason === 'unconfirmed_model_request' \? 'retry_unconfirmed_units' : 'failed_node'/);
+assert.match(workspace, /点击重新请求会先核对已保存返回/);
+assert.match(workspace, /可能重复计费/);
+assert.match(workspace, /mode: recovery\?\.mode \?\? 'failed_node'/);
 assert.match(workspace, /conversationId: activeConversation\.runtimeConversationId/);
 assert.match(workspace, /suggestedGoal: goal/);
 assert.match(workspace, /目标章节解析可恢复/);

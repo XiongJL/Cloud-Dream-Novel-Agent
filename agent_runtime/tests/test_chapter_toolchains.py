@@ -96,7 +96,7 @@ def test_consistency_toolchain_runs_on_both_transports_and_publishes_structured_
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "章节一致性审核",
@@ -156,7 +156,7 @@ def test_context_toolchain_degrades_when_optional_source_fails(tmp_path: Path) -
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "章节上下文",
@@ -207,7 +207,7 @@ def test_read_only_toolchain_cancellation_stops_active_node(tmp_path: Path) -> N
         automation = FakeAutomationClient()
         started = asyncio.Event()
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             automation.calls.append((method, params, origin))
             if request_id:
                 automation.request_ids.append(request_id)

@@ -460,6 +460,7 @@ export class HttpProvider implements AiProvider {
             if (error instanceof ResponsesStreamError) {
                 if (error.kind === 'stream_incomplete') {
                     throw new AiActionError('NETWORK_ERROR', '模型响应流提前结束，未收到生成完成标记。', undefined, {
+                        transportLayer: 'model',
                         retryable: true,
                         partialText: error.partialText,
                         terminationReason: error.terminationReason,
@@ -514,7 +515,7 @@ export class HttpProvider implements AiProvider {
                 'NETWORK_ERROR',
                 '无法连接模型服务。',
                 undefined,
-                { retryable: true },
+                { retryable: true, transportLayer: 'model' },
             );
         } finally {
             clearTimeout(operationTimer);

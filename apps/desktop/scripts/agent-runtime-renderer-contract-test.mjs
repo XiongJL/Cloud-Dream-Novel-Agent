@@ -64,7 +64,7 @@ assert.match(workspace, /function conversationForPersistence\(conversation: Agen
 assert.match(workspace, /const \{ contextSummary: _contextSummary, \.\.\.persistentConversation \} = conversation/);
 assert.match(sendChat, /upsertAgentConversation\(conversationForPersistence\(\{/);
 
-assert.match(main, /new AiService\(\(\) => app\.getPath\('userData'\), agentConversationStore\)/);
+assert.match(main, /new AiService\(\(\) => app\.getPath\('userData'\), agentConversationStore, getDatasetRoot\(\)\)/);
 assert.match(main, /chcp\.com 65001/);
 assert.match(runtimeClient, /PYTHONIOENCODING: 'utf-8'/);
 assert.match(runtimeClient, /PYTHONUTF8: '1'/);
@@ -275,7 +275,7 @@ assert.match(workspace, /onRetry=\{\(\) => \{ if \(timelineRun\) void retryFaile
 assert.match(workspace, /Runtime 响应较慢/);
 assert.match(workspace, /正在恢复 Runtime/);
 assert.match(workspace, /Runtime 不可用/);
-assert.match(workspace, /title="重试 Runtime"/);
+assert.match(workspace, /title="重启执行服务，运行中的任务将停止"/);
 assert.match(workspace, /setInput\(initialGoal\)[\s\S]*?Runtime 不可用，请重试后发送/);
 
 const artifactPanelStart = workspace.indexOf('function ArtifactPanel({');

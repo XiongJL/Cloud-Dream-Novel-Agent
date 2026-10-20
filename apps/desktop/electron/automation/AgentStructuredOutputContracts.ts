@@ -1,3 +1,5 @@
+import { AGENT_OPERATION_IDS } from '../../shared/agentOperationIds';
+
 export type AgentStructuredOutputContract = {
     contractId: string;
     version: string;
@@ -17,6 +19,39 @@ const objectSchema = (
 const stringArray = { type: 'array', items: { type: 'string' } };
 const nullableObject = { type: ['object', 'null'] };
 const nullableString = { type: ['string', 'null'] };
+const skillAnalysisSchema = objectSchema({
+    summary: { type: 'string', minLength: 1, maxLength: 600 },
+    findings: { type: 'array', maxItems: 8, items: objectSchema({
+        dimension: { type: 'string', minLength: 1, maxLength: 80 },
+        observation: { type: 'string', minLength: 1, maxLength: 400 },
+        confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+        evidence: { type: 'array', maxItems: 2, items: { ...objectSchema({
+            sourceId: { type: 'string', minLength: 1 },
+            excerpt: { type: 'string', minLength: 1, maxLength: 200 },
+            evidenceRef: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        }, []), anyOf: [{ required: ['sourceId', 'excerpt'] }, { required: ['evidenceRef'] }] } },
+    }, ['dimension', 'observation', 'confidence', 'evidence']) },
+    warnings: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 200 } },
+}, ['summary', 'findings', 'warnings']);
+const candidateDecisionsSchema = { type: 'array', maxItems: 16, items: objectSchema({
+    findingRef: { type: 'string', minLength: 1 },
+    status: { type: 'string', enum: ['confirmed', 'dismissed', 'unresolved'] },
+    reason: { type: 'string', minLength: 1, maxLength: 300 },
+}, ['findingRef', 'status', 'reason']) };
+
+const qualityChecks = (names: string[]) => ({ type: 'object', properties: Object.fromEntries(names.map(name =>
+    [name, { type: 'string', enum: ['pass', 'fail', 'unverified'] }])), required: names, additionalProperties: false });
+const styleQualitySchema = { oneOf: [
+    objectSchema({ phase: { const: 'evidence' }, decisions: { type: 'array', maxItems: 16, items: objectSchema({
+        findingRef: { type: 'string' }, feature: { type: 'string', enum: ['short_actions', 'long_reasoning', 'paragraphs', 'close_pov', 'dialogue', 'character_voice', 'observable_emotion', 'diction', 'show_then_explain', 'hypothesis', 'clues', 'knowledge_gap', 'chapter_end', 'ensemble', 'other'] },
+        disposition: { enum: ['supported', 'counterexample', 'unresolved'] }, reason: { type: 'string', minLength: 1, maxLength: 300 },
+    }, ['findingRef', 'feature', 'disposition', 'reason']) } }, ['phase', 'decisions']),
+    objectSchema({ phase: { const: 'generate_trial' }, text: { type: 'string', minLength: 200, maxLength: 1200 } }, ['phase', 'text']),
+    ...[['document', ['task_fit', 'rule_calibration', 'evidence_trace', 'counterexamples', 'contamination', 'binding_fit']],
+        ['trial', ['task_completion', 'style_application', 'clarity', 'non_mechanical', 'non_contamination']]].map(([phase, names]) =>
+        objectSchema({ phase: { const: phase }, summary: { type: 'string', minLength: 1, maxLength: 1000 }, checks: qualityChecks(names as string[]),
+            issues: { type: 'array', maxItems: 12, items: objectSchema({ code: { type: 'string' }, severity: { enum: ['blocking', 'advisory'] }, message: { type: 'string', minLength: 1 } }, ['message']) } }, ['phase', 'summary', 'checks', 'issues'])),
+] };
 
 const styleSkillMemberPlanSchema = objectSchema({
     draftKey: { type: 'string', enum: ['language_style', 'suspense_release', 'ensemble_progression'] },
@@ -27,7 +62,8 @@ const styleSkillMemberPlanSchema = objectSchema({
     confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
     triggerHints: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
     antiTriggerHints: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
-    supportedOperations: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 8 },
+    supportedOperations: { type: 'array', items: { type: 'string', enum: [...AGENT_OPERATION_IDS] }, minItems: 1, maxItems: 8 },
+    allowedRoles: { type: 'array', items: { type: 'string', enum: ['writer', 'editor', 'reader', 'team', 'worldbuilding', 'research_rag'] }, minItems: 1, maxItems: 6 },
     constraints: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
     methodDimensions: { type: 'array', items: { type: 'string' }, minItems: 3, maxItems: 12 },
     evidenceNotes: { type: 'array', items: { type: 'string' }, maxItems: 20 },
@@ -40,7 +76,7 @@ const styleSkillMemberPlanSchema = objectSchema({
 ]);
 
 const styleSkillPackPlanBindingSchema = objectSchema({
-    operationId: { type: 'string', pattern: '^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$', maxLength: 120 },
+    operationId: { type: 'string', enum: [...AGENT_OPERATION_IDS] },
     roleId: { type: 'string', enum: ['team', 'writer', 'editor', 'reader', 'worldbuilding', 'research_rag'] },
     primaryDraftKey: { type: 'string', enum: ['language_style', 'suspense_release', 'ensemble_progression'] },
     auxiliaryDraftKey: {
@@ -461,12 +497,27 @@ const CONTRACTS: Record<string, AgentStructuredOutputContract> = {
             warnings: { type: 'array', items: { type: 'string' }, maxItems: 20 },
         }, ['titleCandidates', 'genrePromise', 'readerPromise', 'corePremise', 'centralQuestion', 'narrativeShape', 'characters', 'conflictEscalation', 'suspenseStrategy', 'openingBeats', 'volumePlan', 'chapterPlan', 'writingModeRecommendation', 'targetChapterCount', 'targetWordsPerChapter', 'validationChecklist', 'userDecisionSummary']),
     },
+    'agent.analyze_skill_work_unit': {
+        contractId: 'agent.skill_work_unit.response', version: '2.0.0', schema: skillAnalysisSchema,
+    },
+    'agent.plan_skill_execution': {
+        contractId: 'agent.skill_execution_plan.response', version: '1.0.0',
+        schema: objectSchema({
+            executionMode: { type: 'string', enum: ['single', 'partitioned', 'delegated'] },
+            dependency: { type: 'string', enum: ['none', 'ordered', 'global'] },
+            reason: { type: 'string', minLength: 1, maxLength: 500 },
+        }, ['executionMode', 'dependency', 'reason']),
+    },
+    'agent.merge_skill_analysis': {
+        contractId: 'agent.skill_analysis_merge.response', version: '2.0.0', schema: skillAnalysisSchema,
+    },
+    'agent.style_quality': { contractId: 'agent.style_quality.response', version: '1.0.0', schema: styleQualitySchema },
     'agent.plan_style_skill_pack': {
         contractId: 'agent.style_skill_pack_plan.response', version: '1.0.0',
         schema: objectSchema({
             summary: { type: 'string', minLength: 1, maxLength: 2000 },
             sourceCoverage: { type: 'object' },
-            skills: { type: 'array', items: styleSkillMemberPlanSchema, minItems: 2, maxItems: 3 },
+            skills: { type: 'array', items: styleSkillMemberPlanSchema, minItems: 1, maxItems: 3 },
             pack: styleSkillPackPlanSchema,
             omittedDimensions: { type: 'array', items: { type: 'string' }, maxItems: 10 },
             warnings: { type: 'array', items: { type: 'string' }, maxItems: 20 },
@@ -479,6 +530,7 @@ const CONTRACTS: Record<string, AgentStructuredOutputContract> = {
             summary: { type: 'string', minLength: 1 },
             dimensions: { type: 'array', items: reviewDimensionSchema },
             findings: { type: 'array', items: editorRangeFindingSchema },
+            candidateDecisions: candidateDecisionsSchema,
             recommendations: stringArray,
             warnings: stringArray,
         }, ['summary', 'dimensions', 'findings']),
@@ -490,6 +542,7 @@ const CONTRACTS: Record<string, AgentStructuredOutputContract> = {
             summary: { type: 'string', minLength: 1 },
             dimensions: { type: 'array', items: reviewDimensionSchema },
             findings: { type: 'array', items: editorRangeFindingSchema },
+            candidateDecisions: candidateDecisionsSchema,
             rewriteOrder: stringArray,
             continuationReadiness: { type: 'string' },
             recommendations: stringArray,
@@ -528,6 +581,7 @@ const CONTRACTS: Record<string, AgentStructuredOutputContract> = {
             summary: { type: 'string', minLength: 1 },
             dimensions: { type: 'array', items: reviewDimensionSchema },
             findings: { type: 'array', items: worldbuildingFindingSchema },
+            candidateDecisions: candidateDecisionsSchema,
             entityAssessments: { type: 'array', items: worldbuildingEntitySchema },
             recommendations: stringArray,
             warnings: stringArray,
@@ -588,7 +642,7 @@ const CONTRACTS: Record<string, AgentStructuredOutputContract> = {
     },
     'agent.generate_chapter_beats': {
         contractId: 'agent.chapter_beats.response', version: '1.0.0',
-        schema: objectSchema({ beats: { type: 'array', items: chapterBeatSchema, minItems: 1, maxItems: 5 } }, ['beats']),
+        schema: objectSchema({ beats: { type: 'array', items: chapterBeatSchema, minItems: 1, maxItems: 10 } }, ['beats']),
     },
 };
 
@@ -639,6 +693,20 @@ export function validateAgentStructuredOutput(
     const visit = (candidate: unknown, rawSchema: unknown, path: string): void => {
         if (issues.length >= 20 || !rawSchema || typeof rawSchema !== 'object' || Array.isArray(rawSchema)) return;
         const schema = rawSchema as Record<string, unknown>;
+        for (const keyword of ['oneOf', 'anyOf'] as const) {
+            if (Array.isArray(schema[keyword])) {
+                const matched = schema[keyword].filter(branch => validateAgentStructuredOutput(candidate,
+                    { contractId: contract.contractId, version: contract.version, schema: branch as Record<string, unknown> }).length === 0).length;
+                if (matched === 0 || (keyword === 'oneOf' && matched !== 1)) {
+                    issues.push({ path, message: `Expected ${keyword === 'oneOf' ? 'exactly one' : 'at least one'} schema branch` });
+                    return;
+                }
+            }
+        }
+        if ('const' in schema && !Object.is(schema.const, candidate)) {
+            issues.push({ path, message: `Expected constant ${String(schema.const)}` });
+            return;
+        }
         const expectedTypes = typeof schema.type === 'string'
             ? [schema.type]
             : Array.isArray(schema.type)
@@ -705,7 +773,7 @@ export function validateAgentStructuredOutput(
             issues.push({ path, message: `Expected number less than or equal to ${schema.maximum}` });
             return;
         }
-        if (actualType === 'object' && expectedTypes.includes('object')) {
+        if (actualType === 'object' && (expectedTypes.includes('object') || Array.isArray(schema.required))) {
             const objectValue = candidate as Record<string, unknown>;
             const required = Array.isArray(schema.required)
                 ? schema.required.filter((item): item is string => typeof item === 'string')
@@ -718,6 +786,9 @@ export function validateAgentStructuredOutput(
                 : {};
             for (const [key, childSchema] of Object.entries(properties)) {
                 if (key in objectValue) visit(objectValue[key], childSchema, `${path}.${key}`);
+            }
+            if (schema.additionalProperties === false) {
+                for (const key of Object.keys(objectValue)) if (!(key in properties)) issues.push({ path: `${path}.${key}`, message: 'Unexpected property' });
             }
             return;
         }

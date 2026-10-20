@@ -487,7 +487,19 @@ function coalesceActivityDetails(events: ActivityEvent[]): ActivityDetail[] {
         }
         details.push(detail);
     }
-    return details;
+    const sourceEvents = new Map(events.map(event => [event.eventId, event]));
+    const propagated = new Set(['step_started', 'step_failed', 'toolchain_started', 'toolchain_failed', 'error', 'run_failed']);
+    const causes = new Map<string, Set<string>>();
+    return details.filter(detail => {
+        const event = sourceEvents.get(detail.eventId);
+        if (!event || detail.kind !== 'error' || detail.status !== 'failed' || !detail.summary || !propagated.has(event.type)) return true;
+        const scopes = causes.get(detail.summary);
+        const scope = event.stepId || '';
+        if (scopes && (!scope || scopes.has(scope) || scopes.has(''))) return false;
+        if (scopes) scopes.add(scope);
+        else causes.set(detail.summary, new Set([scope]));
+        return true;
+    });
 }
 
 function elapsedBetween(events: ActivityEvent[]): number | null {
@@ -508,7 +520,11 @@ function formatElapsed(milliseconds: number | null): string {
 
 export function projectAgentActivity(run: { status: ActivityRunStatus; events: ActivityEvent[] }): AgentActivityProjection {
     const events = [...(run.events || [])].sort((left, right) => left.sequence - right.sequence);
-    const details = coalesceActivityDetails(events);
+    const details = coalesceActivityDetails(events).map((detail) => {
+        if (!['failed', 'cancelled'].includes(run.status) || !['running', 'waiting'].includes(detail.status)) return detail;
+        return { ...detail, status: run.status as 'failed' | 'cancelled',
+            summary: run.status === 'cancelled' ? '任务已取消，此操作未完成。' : '任务已停止，此操作未完成。' };
+    });
     const toolCount = events.filter((event) => event.type === 'tool_result' && event.status !== 'skipped').length;
     const draftCount = events.filter((event) => event.type === 'draft_created').length;
     const elapsedMs = elapsedBetween(events);

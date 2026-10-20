@@ -1,288 +1,140 @@
-import fs from 'fs';
-import path from 'path';
-import AdmZip from 'adm-zip';
-import crypto from 'crypto';
-import { db } from '@novel-editor/core';
+import fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
 import { app, dialog } from 'electron';
-
-interface BackupManifest {
-    version: number;
-    appVersion: string;
-    createdAt: string;
-    platform: string;
-    encrypted: boolean;
-    encryption?: {
-        algo: string;
-        salt: string;
-        iv: string;
-        authTag: string;
-    };
-}
-
-export interface AutoBackupInfo {
-    filename: string;
-    createdAt: number;
-    size: number;
-}
+import { db, PrismaClient } from '@novel-editor/core';
+import type { BackupAutoInfo, BackupInspection, BackupMode, BackupOperation, BackupPolicy, BackupProgress, BackupReport } from '../../shared/backup';
+import { BackupEngine } from '../backup/BackupEngine';
+import { DatasetManager, durableJson } from '../backup/DatasetManager';
+import { backupError } from '../backup/BackupRegistry';
+import { exclusiveData, dataIdleMilliseconds } from '../backup/MaintenanceGate';
+import { fileHash } from '../backup/BackupArchive';
+import { retentionPlan } from '../backup/BackupRetention';
 
 export class BackupService {
-    private getBackupDir(): string {
-        return path.join(app.getPath('userData'), 'backups');
-    }
-
-    private getAutoBackupDir(): string {
-        return path.join(this.getBackupDir(), 'auto');
-    }
-
-    private ensureBackupDirs(): void {
-        const backupDir = this.getBackupDir();
-        const autoBackupDir = this.getAutoBackupDir();
-
-        if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
-        if (!fs.existsSync(autoBackupDir)) fs.mkdirSync(autoBackupDir, { recursive: true });
-    }
-
-    // --- Encryption Helpers ---
-
-    private deriveKey(password: string, salt: Buffer): Buffer {
-        return crypto.pbkdf2Sync(password, salt as any, 100000, 32, 'sha256');
-    }
-
-    private encryptData(data: Buffer, password: string): { encryptedData: Buffer; salt: string; iv: string; authTag: string } {
-        const salt = crypto.randomBytes(16);
-        const iv = crypto.randomBytes(12);
-        const key = this.deriveKey(password, salt);
-
-        // Cast to any to bypass strict Buffer/Uint8Array type mismatch in Electron environment
-        const cipher = crypto.createCipheriv('aes-256-gcm', key as any, iv as any);
-        const encrypted = Buffer.concat([cipher.update(data as any), cipher.final()] as any);
-        const authTag = cipher.getAuthTag();
-
-        return {
-            encryptedData: encrypted,
-            salt: salt.toString('hex'),
-            iv: iv.toString('hex'),
-            authTag: authTag.toString('hex')
-        };
-    }
-
-    private decryptData(encryptedData: Buffer, password: string, encryption: NonNullable<BackupManifest['encryption']>): Buffer {
-        const salt = Buffer.from(encryption.salt, 'hex');
-        const iv = Buffer.from(encryption.iv, 'hex');
-        const authTag = Buffer.from(encryption.authTag, 'hex');
-        const key = this.deriveKey(password, salt);
-
-        // Cast to any to bypass strict Buffer/Uint8Array type mismatch
-        const decipher = crypto.createDecipheriv('aes-256-gcm', key as any, iv as any);
-        decipher.setAuthTag(authTag as any);
-
-        return Buffer.concat([decipher.update(encryptedData as any), decipher.final()] as any);
-    }
-
-    // --- Core Logic ---
-
-    // 1. Export Data
-    async exportData(targetPath?: string, password?: string): Promise<string> {
-        // Fetch all data
-        // Order doesn't matter for JSON export, but maintaining a structure helps
-        const [novels, volumes, chapters, characters, ideas, tags, agentConversations, agentMessages, agentAttachments] = await Promise.all([
-            db.novel.findMany(),
-            db.volume.findMany(),
-            db.chapter.findMany(),
-            db.character.findMany(),
-            db.idea.findMany(),
-            db.tag.findMany(),
-            db.agentConversation.findMany(),
-            db.agentMessage.findMany(),
-            db.agentAttachment.findMany(),
-        ]);
-
-        const fullData = {
-            novels,
-            volumes,
-            chapters,
-            characters,
-            ideas,
-            tags,
-            agentConversations,
-            agentMessages,
-            agentAttachments,
-        };
-        const dataBuffer = Buffer.from(JSON.stringify(fullData));
-
-        const zip = new AdmZip();
-
-        // Manifest
-        const manifest: BackupManifest = {
-            version: 1,
-            appVersion: app.getVersion(),
-            createdAt: new Date().toISOString(),
-            platform: process.platform,
-            encrypted: !!password
-        };
-
-        if (password) {
-            const { encryptedData, salt, iv, authTag } = this.encryptData(dataBuffer, password);
-            manifest.encryption = { algo: 'aes-256-gcm', salt, iv, authTag };
-            zip.addFile('data.bin', encryptedData);
-        } else {
-            zip.addFile('data.json', dataBuffer);
-        }
-
-        zip.addFile('manifest.json', Buffer.from(JSON.stringify(manifest, null, 2)));
-
-        if (!targetPath) {
-            const { filePath } = await dialog.showSaveDialog({
-                title: 'Export Backup',
-                defaultPath: `NovelData_${new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_')}.nebak`,
-                filters: [{ name: 'CloudDream Novel Agent Backup', extensions: ['nebak'] }]
-            });
-            if (!filePath) throw new Error('Export cancelled');
-            targetPath = filePath;
-        }
-
-        zip.writeZip(targetPath);
-        return targetPath;
-    }
-
-    // 2. Import Data (Restore)
-    async importData(filePath: string, password?: string): Promise<void> {
-        const zip = new AdmZip(filePath);
-        const manifestEntry = zip.getEntry('manifest.json');
-
-        if (!manifestEntry) throw new Error('Invalid backup file: manifest.json missing');
-        const manifest: BackupManifest = JSON.parse(manifestEntry.getData().toString('utf8'));
-
-        let dataJson: any;
-
-        if (manifest.encrypted) {
-            if (!password) throw new Error('PASSWORD_REQUIRED'); // Specific error code for frontend
-
-            const dataEntry = zip.getEntry('data.bin');
-            if (!dataEntry) throw new Error('Invalid backup file: data.bin missing');
-            if (!manifest.encryption) throw new Error('Invalid backup file: encryption metadata missing');
-
+    private engine?: BackupEngine;
+    private barrier: <T>(operation: () => Promise<T>) => Promise<T> = exclusiveData;
+    private timer?: ReturnType<typeof setInterval>;
+    private busy = false;
+    private lastFingerprint = '';
+    private policy: BackupPolicy = { enabled: true, lastSuccess: null, lastError: null, intervalMinutes: 15 };
+    private pinNames = new Set<string>();
+    private waitingSince = Date.now();
+    private nextAttemptAt = 0;
+    configure(dataset: DatasetManager, schemaVersion: number, barrier: <T>(operation: () => Promise<T>) => Promise<T>, progress: (value: BackupProgress) => void): void {
+        this.barrier = barrier;
+        this.engine = new BackupEngine({ dataset, database: db as any, createDatabase: file => new PrismaClient({ datasources: { db: { url: `file:${file}` } } }) as any, appVersion: app.getVersion(), schemaVersion, progress });
+        void this.engine.cleanupAbandoned().catch(() => undefined);
+        const policy = path.join(dataset.userRoot, 'backups', 'policy.json');
+        if (fs.existsSync(policy)) {
             try {
-                const decrypted = this.decryptData(dataEntry.getData(), password, manifest.encryption);
-                dataJson = JSON.parse(decrypted.toString('utf8'));
-            } catch (e) {
-                throw new Error('PASSWORD_INVALID');
+                const saved = JSON.parse(fs.readFileSync(policy, 'utf8'));
+                this.policy = { ...this.policy, enabled: saved.enabled !== false, lastSuccess: saved.lastSuccess || null, lastError: saved.lastError || null };
+                this.pinNames = new Set(Array.isArray(saved.pinned) ? saved.pinned.filter((value: unknown) => typeof value === 'string' && /^auto_backup_[\w-]+\.nebak$/.test(value)) : []);
+                this.lastFingerprint = typeof saved.lastFingerprint === 'string' ? saved.lastFingerprint : '';
+            } catch { this.policy.lastError = '自动备份配置损坏，已使用默认保护策略；现有备份保留。'; }
+        }
+        this.timer = setInterval(() => { void this.tick().catch(() => undefined); }, 30000);
+        this.timer.unref?.();
+    }
+    private required(): BackupEngine { if (!this.engine) throw backupError('BUSY', '备份服务尚未准备好。'); return this.engine; }
+    private get directory(): string { return path.join(this.required().options.dataset.userRoot, 'backups', 'auto'); }
+    private async run<T>(operation: () => Promise<T>, kind: BackupOperation): Promise<T> {
+        if (this.busy) throw backupError('BUSY', '另一个备份任务正在进行。');
+        this.busy = true;
+        this.required().begin(kind);
+        try { return await this.barrier(operation); }
+        catch (error: any) { if (error?.name === 'AbortError' || error?.code === 'ABORT_ERR') throw backupError('CANCELLED', '操作已取消，原资料保留。'); throw error; }
+        finally { this.busy = false; this.required().end(); }
+    }
+    cancel(): boolean { return this.busy && this.required().cancel(); }
+    async exportData(targetPath?: string, password?: string): Promise<string | null> {
+        if (!targetPath) {
+            const result = await dialog.showSaveDialog({ title: '创建完整作品备份', defaultPath: `NovelData_${new Date().toISOString().replace(/[:.]/g, '-')}.nebak`, filters: [{ name: '作品资料备份', extensions: ['nebak'] }] });
+            if (result.canceled || !result.filePath) return null;
+            targetPath = result.filePath;
+        }
+        const target = targetPath;
+        await this.run(async () => { await this.required().assertIdle(); await this.required().export(target, password); }, 'export');
+        return target;
+    }
+    async inspectData(filePath: string, password?: string): Promise<BackupInspection> {
+        return this.run(async () => this.required().inspect(filePath, password), 'inspect');
+    }
+    async restoreData(inspectionId: string, mode: BackupMode): Promise<void> {
+        await this.run(async () => { await this.required().assertIdle(); await this.required().restore(inspectionId, mode); }, 'restore');
+    }
+    async createAutoBackup(): Promise<string> {
+        await fsp.mkdir(this.directory, { recursive: true });
+        const target = path.join(this.directory, `auto_backup_${Date.now()}.nebak`);
+        await this.exportData(target);
+        const stat = await fsp.stat(target);
+        await durableJson(`${target}.verified.json`, { size: stat.size, mtimeMs: stat.mtimeMs, sha256: await fileHash(target) });
+        this.policy.lastSuccess = new Date().toISOString(); this.policy.lastError = null;
+        await this.savePolicy();
+        await this.rotate();
+        return target;
+    }
+    private async rotate(): Promise<void> {
+        const plan = retentionPlan(await this.getAutoBackups());
+        for (const filename of plan.remove) {
+            await fsp.unlink(this.autoPath(filename));
+            await fsp.rm(`${this.autoPath(filename)}.verified.json`, { force: true });
+        }
+        this.policy.warning = plan.overBudget ? '自动备份超过 2 GiB；已优先保留最新三份与固定包，请整理备份目录。' : null;
+        await this.savePolicy();
+    }
+    private autoPath(filename: string): string {
+        if (!/^auto_backup_[\w-]+\.nebak$/.test(filename)) throw backupError('REFERENCE_INVALID', '备份文件标识无效。');
+        return path.join(this.directory, filename);
+    }
+    async getAutoBackups(): Promise<BackupAutoInfo[]> {
+        await fsp.mkdir(this.directory, { recursive: true });
+        const result: BackupAutoInfo[] = [];
+        for (const filename of await fsp.readdir(this.directory)) {
+            if (!/^auto_backup_[\w-]+\.nebak$/.test(filename)) continue;
+            const stat = await fsp.lstat(this.autoPath(filename));
+            if (stat.isFile() && !stat.isSymbolicLink()) result.push({ filename, createdAt: stat.mtimeMs, size: stat.size, valid: false, pinned: this.pinNames.has(filename) });
+        }
+        // Files created by this service receive a validation receipt after the
+        // archive has been read back. A receipt is invalidated by any file change.
+        for (const item of result) {
+            const receipt = `${this.autoPath(item.filename)}.verified.json`;
+            if (fs.existsSync(receipt)) {
+                try { const value = JSON.parse(await fsp.readFile(receipt, 'utf8')); item.valid = value.size === item.size && value.mtimeMs === item.createdAt && value.sha256 === await fileHash(this.autoPath(item.filename)); }
+                catch { item.valid = false; }
             }
-        } else {
-            const dataEntry = zip.getEntry('data.json');
-            if (!dataEntry) throw new Error('Invalid backup file: data.json missing');
-            dataJson = JSON.parse(dataEntry.getData().toString('utf8'));
         }
-
-        // --- Perform Restore ---
-        await this.performRestore(dataJson);
+        return result.sort((a, b) => b.createdAt - a.createdAt);
     }
-
-    // Helper: Perform Restore (Transactional)
-    private async performRestore(data: any): Promise<void> {
-        // 1. Create Auto-Backup of current state before nuking
-        await this.createAutoBackup();
-
-        // 2. Transactional Restore
-        // Note: $transaction is interactive, ensuring atomicity
-        await db.$transaction(async (tx) => {
-            // Delete all existing data
-            // Order matters for FK constraints: Tag/Idea -> Chapter -> Volume -> Novel
-            // But Prisma usually handles basic deletions? To be safe, delete from child to parent
-            // Actually, with onDelete: Cascade, deleting Novel might clear everything, 
-            // but we also have standalone tags or cross-relations.
-            // Safest: Delete all explicitly.
-            await tx.agentAttachment.deleteMany();
-            await tx.agentMessage.deleteMany();
-            await tx.agentConversation.deleteMany();
-            await tx.tag.deleteMany();
-            await tx.idea.deleteMany();
-            await tx.character.deleteMany();
-            await tx.chapter.deleteMany();
-            await tx.volume.deleteMany();
-            await tx.novel.deleteMany();
-
-            // Insert new data
-            // SQLite does not support createMany, use loop instead
-            if (data.novels?.length) for (const item of data.novels) await tx.novel.create({ data: item });
-            if (data.volumes?.length) for (const item of data.volumes) await tx.volume.create({ data: item });
-            if (data.chapters?.length) for (const item of data.chapters) await tx.chapter.create({ data: item });
-            if (data.characters?.length) for (const item of data.characters) await tx.character.create({ data: item });
-            if (data.ideas?.length) for (const item of data.ideas) await tx.idea.create({ data: item });
-            if (data.tags?.length) for (const item of data.tags) await tx.tag.create({ data: item });
-            if (data.agentConversations?.length) for (const item of data.agentConversations) await tx.agentConversation.create({ data: item });
-            if (data.agentMessages?.length) for (const item of data.agentMessages) await tx.agentMessage.create({ data: item });
-            if (data.agentAttachments?.length) for (const item of data.agentAttachments) await tx.agentAttachment.create({ data: item });
-        }, {
-            maxWait: 10000,
-            timeout: 20000
-        });
+    async inspectAuto(filename: string, password?: string): Promise<BackupInspection> { return this.inspectData(this.autoPath(filename), password); }
+    getPolicy(): BackupPolicy { return { ...this.policy }; }
+    async getLastReport(): Promise<BackupReport | null> {
+        const file = path.join(this.required().options.dataset.current().root, 'restore-report.json');
+        if (!fs.existsSync(file)) return null;
+        const value = JSON.parse(await fsp.readFile(file, 'utf8'));
+        return { backupId: value.backupId, mode: value.mode, createdAt: value.createdAt, records: value.records, resources: value.resources, warnings: value.warnings, indexesRebuiltAt: value.indexesRebuiltAt, indexMode: value.indexMode };
     }
-
-    // 3. Auto Backup Logic
-    async createAutoBackup() {
+    async updatePolicy(enabled: boolean): Promise<BackupPolicy> { if (typeof enabled !== 'boolean') throw backupError('REFERENCE_INVALID', '自动保护设置无效。'); this.policy.enabled = enabled; await this.savePolicy(); return this.getPolicy(); }
+    async pin(filename: string, pinned: boolean): Promise<void> { await fsp.access(this.autoPath(filename)); if (pinned) this.pinNames.add(filename); else this.pinNames.delete(filename); await this.savePolicy(); }
+    private savePolicy(): Promise<void> { return durableJson(path.join(this.required().options.dataset.userRoot, 'backups', 'policy.json'), { ...this.policy, lastFingerprint: this.lastFingerprint, pinned: [...this.pinNames] }); }
+    private async tick(): Promise<void> {
+        if (!this.busy) await this.required().cleanExpired();
+        if (!this.policy.enabled || this.busy || Date.now() < this.nextAttemptAt || Date.now() - new Date(this.policy.lastSuccess || 0).getTime() < this.policy.intervalMinutes * 60000) return;
         try {
-            this.ensureBackupDirs();
-            const timestamp = Date.now();
-            const filename = `auto_backup_${timestamp}.nebak`;
-            const filePath = path.join(this.getAutoBackupDir(), filename);
-
-            // Re-use exportData logic but to specific path without password
-            await this.exportData(filePath);
-            console.log('[BackupService] Auto-backup created:', filename);
-
-            // Rotate
-            await this.rotateAutoBackups();
-        } catch (e) {
-            console.error('[BackupService] Failed to create auto-backup:', e);
+            if (Date.now() - this.waitingSince > 60 * 60000) this.policy.warning = '尚未形成新备份：正在等待连续空闲与 Agent 任务结束。';
+            if (dataIdleMilliseconds() < 30000) return;
+            await this.required().assertIdle();
+            const fingerprint = await this.required().fingerprint();
+            if (fingerprint === this.lastFingerprint) return;
+            await this.createAutoBackup();
+            this.lastFingerprint = fingerprint;
+            this.waitingSince = Date.now();
+            await this.savePolicy();
+        } catch (error: any) {
+            if (error.code !== 'BUSY') { this.nextAttemptAt = Date.now() + (error.code === 'CANCELLED' ? 15 : 5) * 60000; this.policy.lastError = error.message || '自动备份失败'; await this.savePolicy(); }
         }
     }
-
-    private async rotateAutoBackups() {
-        this.ensureBackupDirs();
-        const autoBackupDir = this.getAutoBackupDir();
-        const files = fs.readdirSync(autoBackupDir)
-            .filter(f => f.endsWith('.nebak'))
-            .map(f => ({
-                name: f,
-                time: fs.statSync(path.join(autoBackupDir, f)).mtime.getTime()
-            }))
-            .sort((a, b) => b.time - a.time); // Newest first
-
-        // Keep 3
-        const toDelete = files.slice(3);
-        for (const file of toDelete) {
-            fs.unlinkSync(path.join(autoBackupDir, file.name));
-            console.log('[BackupService] Rotated auto-backup:', file.name);
-        }
-    }
-
-    // 4. List Auto Backups
-    async getAutoBackups(): Promise<AutoBackupInfo[]> {
-        this.ensureBackupDirs();
-        const autoBackupDir = this.getAutoBackupDir();
-        return fs.readdirSync(autoBackupDir)
-            .filter(f => f.endsWith('.nebak'))
-            .map(f => {
-                const stats = fs.statSync(path.join(autoBackupDir, f));
-                return {
-                    filename: f,
-                    createdAt: stats.mtime.getTime(),
-                    size: stats.size
-                };
-            })
-            .sort((a, b) => b.createdAt - a.createdAt);
-    }
-
-    // 5. Restore from Auto Backup
-    async restoreAutoBackup(filename: string): Promise<void> {
-        this.ensureBackupDirs();
-        const filePath = path.join(this.getAutoBackupDir(), filename);
-        if (!fs.existsSync(filePath)) throw new Error('Backup file not found');
-
-        // Use standard importData logic (no password for auto backups)
-        await this.importData(filePath);
-    }
+    stop(): void { if (this.timer) clearInterval(this.timer); void this.engine?.dispose().catch(() => undefined); }
 }
-
 export const backupService = new BackupService();

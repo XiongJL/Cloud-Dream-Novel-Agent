@@ -21,6 +21,11 @@ AUTOMATION_METHOD_TIMEOUT_SECONDS: dict[str, float] = {
     "agent.generate_skill_document": 270,
     "agent.generate_novel_bootstrap": 270,
     "agent.plan_style_skill_pack": 270,
+    "agent.style_quality": 270,
+    "agent.analyze_skill_work_unit": 270,
+    "agent.merge_skill_analysis": 270,
+    "agent.get_skill_execution_policy": 30,
+    "agent.plan_skill_execution": 270,
     "agent.generate_editor_range_review": 270,
     "agent.generate_writer_range_revision_plan": 270,
     "agent.generate_reader_chapter_evaluation": 270,
@@ -49,6 +54,7 @@ AUTOMATION_METHOD_TIMEOUT_SECONDS: dict[str, float] = {
     "agent_skill.workspace.set_pack": 45,
     "agent_skill.workspace.validate": 45,
     "agent_skill.workspace.compile": 45,
+    "agent_skill.workspace.prepare": 45,
     "agent_skill.workspace.diff": 30,
 }
 
@@ -70,12 +76,33 @@ class AutomationInvokeError(RuntimeError):
 
 
 class AutomationClient:
+    invoke_path = "/invoke"
     def __init__(self, runtime_path: Path, timeout_seconds: float = 90) -> None:
         self.runtime_path = runtime_path
         self.timeout_seconds = timeout_seconds
 
     def _read_runtime(self) -> dict[str, Any]:
-        return json.loads(self.runtime_path.read_text(encoding="utf-8"))
+        try:
+            runtime = json.loads(self.runtime_path.read_text(encoding="utf-8"))
+        except OSError as error:
+            raise AutomationInvokeError(
+                "AUTOMATION_RUNTIME_UNAVAILABLE", "Desktop automation connection is not available",
+            ) from error
+        except (ValueError, UnicodeError) as error:
+            raise AutomationInvokeError(
+                "AUTOMATION_RUNTIME_INVALID", "Desktop automation connection descriptor is invalid",
+            ) from error
+        if (
+            not isinstance(runtime, dict)
+            or type(runtime.get("port")) is not int
+            or not 1 <= runtime["port"] <= 65535
+            or not isinstance(runtime.get("token"), str)
+            or not runtime["token"].strip()
+        ):
+            raise AutomationInvokeError(
+                "AUTOMATION_RUNTIME_INVALID", "Desktop automation connection descriptor is invalid",
+            )
+        return runtime
 
     async def invoke(
         self,
@@ -87,7 +114,7 @@ class AutomationClient:
         deadline_at: str | None = None,
     ) -> Any:
         runtime = self._read_runtime()
-        url = f"http://127.0.0.1:{runtime['port']}/invoke"
+        url = f"http://127.0.0.1:{runtime['port']}{self.invoke_path}"
         payload = {
             "requestId": request_id or uuid4().hex,
             "method": method,
@@ -114,14 +141,14 @@ class AutomationClient:
         except httpx.TimeoutException as error:
             raise AutomationInvokeError(
                 "UPSTREAM_TIMEOUT",
-                "Automation service timed out",
-                {"method": method},
+                "应用执行服务响应超时，原请求结果尚未确认。",
+                {"method": method, "transportLayer": "automation", "transportErrorType": type(error).__name__, "requestId": payload["requestId"]},
             ) from error
         except httpx.TransportError as error:
             raise AutomationInvokeError(
                 "NETWORK_ERROR",
-                "Automation service connection failed",
-                {"method": method},
+                "应用执行服务连接中断，原请求结果尚未确认。",
+                {"method": method, "transportLayer": "automation", "transportErrorType": type(error).__name__, "requestId": payload["requestId"]},
             ) from error
 
         try:

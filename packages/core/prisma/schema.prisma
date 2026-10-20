@@ -39,6 +39,7 @@ model Novel {
   agentSkillBindings AgentSkillBinding[]
   agentSkillDrafts   AgentSkillDraft[]
   agentSkillPacks    AgentSkillPack[]
+  agentSkillPackPreferences AgentSkillPackPreference[]
 }
 
 model Volume {
@@ -445,6 +446,7 @@ model AgentSkill {
   stableId          String
   scope             String
   ownerNovelId      String?
+  visibilityVersion Int @default(1)
   title             String
   description       String
   skillType         String    @default("prompt_method")
@@ -513,6 +515,9 @@ model AgentSkillDraft {
   committedRevisionId       String?
   committedPackRevisionId   String?
   version                   Int      @default(1)
+  publicationScope          String?
+  publicationOwnerNovelId   String?
+  publicationVersion        Int @default(1)
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
 
@@ -528,6 +533,7 @@ model AgentSkillPack {
   stableId          String
   scope             String
   ownerNovelId      String?
+  visibilityVersion Int @default(1)
   title             String
   description       String
   enabled           Boolean   @default(true)
@@ -538,6 +544,7 @@ model AgentSkillPack {
 
   ownerNovel Novel?                   @relation(fields: [ownerNovelId], references: [id], onDelete: Cascade)
   revisions  AgentSkillPackRevision[]
+  preferences AgentSkillPackPreference[]
 
   @@unique([scope, ownerNovelId, stableId], map: "uq_agent_skill_pack_scope_owner_stable")
   @@index([scope, ownerNovelId, enabled, updatedAt], map: "idx_agent_skill_pack_visible")
@@ -552,9 +559,24 @@ model AgentSkillPackRevision {
   createdAt    DateTime @default(now())
 
   pack AgentSkillPack @relation(fields: [packId], references: [id], onDelete: Restrict)
+  preferences AgentSkillPackPreference[]
 
   @@unique([packId, version], map: "uq_agent_skill_pack_revision_version")
   @@index([packId, createdAt], map: "idx_agent_skill_pack_revision_created")
+}
+
+model AgentSkillPackPreference {
+  id String @id
+  novelId String @unique
+  packId String
+  packRevisionId String
+  version Int @default(1)
+  enabled Boolean @default(true)
+  source String @default("explicit")
+  updatedAt DateTime @updatedAt
+  novel Novel @relation(fields: [novelId], references: [id], onDelete: Cascade)
+  pack AgentSkillPack @relation(fields: [packId], references: [id], onDelete: Cascade)
+  revision AgentSkillPackRevision @relation(fields: [packRevisionId], references: [id], onDelete: Cascade)
 }
 
 model SyncState {

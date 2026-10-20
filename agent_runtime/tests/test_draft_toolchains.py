@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -221,6 +222,50 @@ def test_empty_existing_tail_chapter_uses_new_chapter_generation_mode() -> None:
     assert params["preparedContext"]["policy"]["version"] == "continuation-context-v1"
 
 
+@pytest.mark.parametrize("prose", ["", "  \n", "已有正文，继续写。"])
+def test_lexical_chapter_prose_decides_generation_mode_without_replacing_source(prose: str) -> None:
+    source = json.dumps({"root": {"type": "root", "children": [
+        {"type": "paragraph", "children": [{"type": "text", "text": prose}]}
+    ]}}, ensure_ascii=False)
+    input_data = ChapterContinuationInput(
+        novelId="novel_1", chapterId="chapter_501", goal="完成本章内容。请按以下流程续写本章：",
+    )
+    context = ContextBundle(
+        chapter={"id": "chapter_501", "content": source},
+        adjacentChapters=[{"chapterId": "chapter_500", "content": "前章正文。"}],
+    )
+    params = chapter_draft_params(input_data, context, input_data.goal,
+                                  resolved_target={"chapterId": "chapter_501"})
+    assert params["chapterId"] == "chapter_501"
+    assert params["currentContent"] == source  # Keep the exact source for hash/version checks.
+    assert params["mode"] == ("continue_chapter" if prose.strip() else "new_chapter")
+
+
+def test_explicit_blank_chapter_correction_with_empty_lexical_can_start_first_draft() -> None:
+    source = '{"root":{"type":"root","children":[{"type":"paragraph","children":[]}]}}'
+    input_data = ChapterContinuationInput(
+        novelId="novel_1", chapterId="chapter_501",
+        goal="这不是续写啊，本章内容是空的，是新写整章！",
+    )
+    context = ContextBundle(chapter={"id": "chapter_501", "content": source})
+    params = chapter_draft_params(input_data, context, input_data.goal,
+                                  resolved_target={"chapterId": "chapter_501"})
+    assert params["mode"] == "new_chapter"
+    assert params["currentContent"] == source
+    with pytest.raises(ToolchainError):
+        chapter_draft_params(input_data, context, input_data.goal,
+                             resolved_target={"chapterId": "other"})
+
+
+@pytest.mark.parametrize("source", ['{"root":{"message":"角色的正文"}}', '{"root":invalid', '普通正文'])
+def test_non_lexical_content_is_not_mistaken_for_empty_document(source: str) -> None:
+    input_data = ChapterContinuationInput(novelId="novel_1", chapterId="chapter_501", goal="继续写")
+    params = chapter_draft_params(input_data, ContextBundle(chapter={"id": "chapter_501", "content": source}),
+                                  input_data.goal, resolved_target={"chapterId": "chapter_501"})
+    assert params["mode"] == "continue_chapter"
+    assert params["currentContent"] == source
+
+
 def test_empty_chapter_without_authoritative_target_or_prior_context_is_rejected() -> None:
     input_data = ChapterContinuationInput(
         novelId="novel_1",
@@ -305,6 +350,7 @@ def test_chapter_continuation_routes_to_one_chain_and_waits_for_direction_approv
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             automation.calls.append((method, params, origin))
             if request_id:
@@ -522,7 +568,7 @@ def test_last_chapter_request_ignores_editor_chapter_and_builds_one_continuation
         store = AgentStateStore(tmp_path)
         automation = FakeAutomationClient()
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             automation.calls.append((method, params, origin))
             if request_id:
                 automation.request_ids.append(request_id)
@@ -685,6 +731,7 @@ def test_creative_asset_chain_reads_validates_and_publishes_same_draft_session(t
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             automation.calls.append((method, params, origin))
             if request_id:
@@ -785,6 +832,7 @@ def test_chapter_continuation_durable_failure_is_definitive_without_sync_replay(
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
@@ -836,20 +884,23 @@ def test_chapter_continuation_durable_failure_is_definitive_without_sync_replay(
     asyncio.run(scenario())
 
 
-def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize("chapter_count, fail_state", [(3, False), (10, False), (10, True)])
+def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_order(tmp_path: Path, chapter_count: int, fail_state: bool) -> None:
     async def scenario() -> None:
         store = AgentStateStore(tmp_path)
         automation = FakeAutomationClient()
-        beats = _sequence_beats()
+        beats = _sequence_beats(chapter_count)
         batch: dict[str, Any] | None = None
+        state_failed = False
 
         async def invoke(
             method: str,
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
-            nonlocal batch
+            nonlocal batch, state_failed
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
                 return {
@@ -862,12 +913,12 @@ def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_
                         "toolchain": {
                             "id": "chapter.sequence_continuation",
                             "version": "1.0.0",
-                            "input": {"chapterCount": 3},
+                            "input": {"chapterCount": chapter_count},
                         },
                     }],
                 }
             if method == "agent.generate_chapter_beats":
-                assert params["chapterCount"] == 3
+                assert params["chapterCount"] == chapter_count
                 return {"beats": beats}
             if method == "draft.batch.create":
                 batch = _sequence_batch(params, beats)
@@ -882,16 +933,21 @@ def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_
             if method == "chapter.generate_draft":
                 assert batch is not None
                 index = params["childIndex"]
+                if fail_state and index == 7 and not state_failed:
+                    from novel_agent_runtime.automation import AutomationInvokeError
+                    state_failed = True
+                    raise AutomationInvokeError('NARRATIVE_STATE_EXTRACTION_FAILED', '正文已保存，状态核对失败。')
                 assert index == sum(1 for child in batch["children"] if child["status"] == "draft")
                 assert params["draftBatchId"] == batch["draftBatchId"]
                 assert params["generationRevision"] == batch["children"][index]["generationRevision"]
                 assert params["batchContext"]["currentBeat"]["childIndex"] == index
+                assert params["userIntent"] == f"从当前章后连续新写{chapter_count}章"
                 assert len(params["batchContext"]["stateLedger"]["timeline"]) == index
                 if index > 0:
                     assert params["batchContext"]["stateLedger"]["characterLocations"]["顾野"] == f"地点-{index - 1}"
                     assert params["batchContext"]["stateLedger"]["itemStates"]["铜钥匙"] == f"状态-{index - 1}"
                     assert len(params["batchContext"]["stateLedger"]["stateDeltas"]) == index
-                if index == 2:
+                if index >= 2:
                     assert len(params["batchContext"]["recentFullDrafts"]) == 2
                 session_id = f"draft_sequence_{index}"
                 batch["children"][index] = {
@@ -899,7 +955,7 @@ def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_
                     "status": "draft",
                     "draftSessionId": session_id,
                 }
-                batch["status"] = "ready_for_review" if index == 2 else "generating"
+                batch["status"] = "ready_for_review" if index == chapter_count - 1 else "generating"
                 batch["version"] += 1
                 return {
                     "draftSessionId": session_id,
@@ -941,14 +997,37 @@ def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_
                 }
             if method == "draft.batch.get":
                 return batch
+            if method == "draft.batch.mark_failed":
+                index = params['childIndex']
+                batch['children'][index] = {**batch['children'][index], 'status': 'failed', 'error': params['error']}
+                batch['status'] = 'partially_failed'
+                batch['version'] += 1
+                return batch
             if method in {"agent.generate_report", "agent.generate_chat", "agent.revise_plan"}:
                 return await FakeAutomationClient.invoke(automation, method, params, origin, request_id=request_id)
             return _read_result(method, params)
 
         automation.invoke = invoke  # type: ignore[method-assign]
         durable = install_durable_draft_protocol(automation, pending_status_observations=2)
+        durable_invoke = automation.invoke
+        async def state_retry_invoke(method, params, origin, request_id=None, **kwargs):
+            if method == 'chapter.draft.retry':
+                automation.calls.append((method, params, origin))
+                operation = durable['operations'][params['operationId']]
+                assert operation['version'] == params['expectedVersion']
+                saved_params = next(p['payload'] for m, p, _ in automation.calls
+                    if m == 'chapter.draft.start' and p['operationKey'] == operation['operationKey'])
+                operation['result'] = await invoke('chapter.generate_draft', saved_params, origin)
+                operation['status'] = 'succeeded'
+                operation['version'] += 1
+                return {k: v for k, v in operation.items() if k != 'task'}
+            result = await durable_invoke(method, params, origin, request_id=request_id, **kwargs)
+            if method == 'chapter.draft.get_status' and result.get('error', {}).get('code') == 'NARRATIVE_STATE_EXTRACTION_FAILED':
+                result['error']['details'] = {'textPersisted': True, 'generationCheckpointRef': 'saved-prose-ref'}
+            return result
+        automation.invoke = state_retry_invoke
         runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
-        plan = await runtime.plan({"goal": "从当前章后连续续写三章", "role": "writer"}, {"chapterId": "chapter_2"})
+        plan = await runtime.plan({"goal": f"从当前章后连续新写{chapter_count}章", "role": "writer"}, {"chapterId": "chapter_2"})
         assert plan.deliverable == "chapter_draft_batch"
         assert plan.steps[0].toolchain is not None
         assert plan.steps[0].toolchain.id == "chapter.sequence_continuation"
@@ -992,21 +1071,33 @@ def test_chapter_sequence_continuation_approves_beats_and_generates_children_in_
         await _wait_terminal(runtime, run.runId)
         completed = runtime.state.runs[run.runId]
 
-        assert completed.status == "completed"
+        if fail_state:
+            assert completed.status == 'failed'
+            assert completed.failure['code'] == 'NARRATIVE_STATE_EXTRACTION_FAILED'
+            assert completed.recovery.canRecover
+            assert [p['childIndex'] for m, p, _ in automation.calls if m == 'chapter.generate_draft'] == list(range(8))
+            runtime = NovelAgentRuntime(store, automation, AgentEventBus(store))
+            run = await runtime.retry_run({'failedRunId': completed.runId, 'expectedFailureRevision': completed.failureRevision,
+                'strategy': 'retry_request', 'mode': 'failed_node'}, {})
+            await _wait_terminal(runtime, run.runId)
+            completed = runtime.state.runs[run.runId]
+
+        assert completed.status == "completed", str(completed.failure)
         assert completed.draftBatchId == "batch_sequence_1"
         generation_calls = [params for method, params, _ in automation.calls if method == "chapter.generate_draft"]
-        assert [params["childIndex"] for params in generation_calls] == [0, 1, 2]
-        assert generation_calls[-1]["batchContext"]["stateLedger"]["knowledgeState"]["顾野"] == ["事实-0", "事实-1"]
+        assert [params["childIndex"] for params in generation_calls] == (list(range(8)) + list(range(7, chapter_count)) if fail_state else list(range(chapter_count)))
+        assert generation_calls[-1]["batchContext"]["stateLedger"]["knowledgeState"]["顾野"] == [f"事实-{i}" for i in range(chapter_count - 1)]
         artifact = next(item for item in completed.artifacts if item.type == "chapter_draft_batch")
         assert artifact.reference["draftBatchId"] == "batch_sequence_1"
-        assert artifact.reference["draftSessionIds"] == ["draft_sequence_0", "draft_sequence_1", "draft_sequence_2"]
+        assert artifact.reference["draftSessionIds"] == [f"draft_sequence_{i}" for i in range(chapter_count)]
+        if fail_state:
+            assert [m for m, _, _ in automation.calls].count('chapter.draft.retry') == 1
+            assert [m for m, _, _ in automation.calls].count('chapter.draft.start') == chapter_count
+            return
         assert [record.method for record in store.list_invocations(run.runId)] == [
             "draft.batch.create",
             "draft.batch.approve_outline",
-            "chapter.generate_draft",
-            "chapter.generate_draft",
-            "chapter.generate_draft",
-        ]
+        ] + ["chapter.generate_draft"] * chapter_count
 
     asyncio.run(scenario())
 
@@ -1023,7 +1114,7 @@ def test_chapter_sequence_continuation_appends_revised_beat_checkpoint(tmp_path:
         batch: dict[str, Any] | None = None
         beat_call_count = 0
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             nonlocal batch, beat_call_count
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
@@ -1152,7 +1243,7 @@ def test_chapter_sequence_continuation_keeps_current_checkpoint_when_beat_revisi
         batch: dict[str, Any] | None = None
         beat_call_count = 0
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             nonlocal batch, beat_call_count
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
@@ -1240,7 +1331,7 @@ def test_chapter_sequence_continuation_stops_after_first_failed_child(tmp_path: 
         beats = _sequence_beats()
         batch: dict[str, Any] | None = None
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             nonlocal batch
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
@@ -1340,11 +1431,12 @@ def test_chapter_sequence_continuation_stops_after_first_failed_child(tmp_path: 
     asyncio.run(scenario())
 
 
-def test_regenerate_batch_resumes_from_first_failed_child(tmp_path: Path) -> None:
+@pytest.mark.parametrize("chapter_count, failed_index", [(3, 1), (10, 7)])
+def test_regenerate_batch_resumes_from_first_failed_child(tmp_path: Path, chapter_count: int, failed_index: int) -> None:
     async def scenario() -> None:
         store = AgentStateStore(tmp_path)
         automation = FakeAutomationClient()
-        beats = _sequence_beats()
+        beats = _sequence_beats(chapter_count)
         batch = _sequence_batch({
             "novelId": "novel_1",
             "volumeId": "volume_1",
@@ -1354,27 +1446,24 @@ def test_regenerate_batch_resumes_from_first_failed_child(tmp_path: Path) -> Non
         batch["outline"] = {**batch["outline"], "status": "approved", "approvedAt": "now"}
         batch["status"] = "partially_failed"
         batch["version"] = 5
-        batch["children"][0] = {
-            **batch["children"][0],
-            "status": "draft",
-            "draftSessionId": "draft_sequence_0",
-        }
-        batch["children"][1] = {
-            **batch["children"][1],
+        for i in range(failed_index):
+            batch["children"][i] = {**batch["children"][i], "status": "draft", "draftSessionId": f"draft_sequence_{i}"}
+        batch["children"][failed_index] = {
+            **batch["children"][failed_index],
             "status": "failed",
             "error": {"code": "GENERATION_FAILED", "message": "provider rejected request"},
         }
-        batch["stateLedger"]["timeline"] = [{"childIndex": 0, "summary": "第一章草稿摘要"}]
+        batch["stateLedger"]["timeline"] = [{"childIndex": i, "summary": f"第{i + 1}章草稿摘要"} for i in range(failed_index)]
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             automation.calls.append((method, params, origin))
             if method == "draft.batch.get":
                 return batch
             if method == "draft.batch.prepare_regeneration":
                 assert params["draftBatchId"] == batch["draftBatchId"]
                 assert params["version"] == 5
-                assert params["fromChildIndex"] == 1
-                for index in (1, 2):
+                assert params["fromChildIndex"] == failed_index
+                for index in range(failed_index, chapter_count):
                     batch["children"][index] = {
                         **batch["children"][index],
                         "status": "pending",
@@ -1387,36 +1476,36 @@ def test_regenerate_batch_resumes_from_first_failed_child(tmp_path: Path) -> Non
                 batch["linkedRunIds"].append(params["runId"])
                 return {
                     "batch": batch,
-                    "fromChildIndex": 1,
+                    "fromChildIndex": failed_index,
                     "preservedDrafts": [{
-                        "draftSessionId": "draft_sequence_0",
+                        "draftSessionId": f"draft_sequence_{i}",
                         "draftBatchId": batch["draftBatchId"],
-                        "childIndex": 0,
+                        "childIndex": i,
                         "generationRevision": 1,
                         "type": "chapter-draft",
                         "status": "draft",
                         "version": 1,
                         "previewSummary": "第一章草稿",
                         "payload": {
-                            "chapterId": "temporary-0",
-                            "generatedText": "第一章正文",
-                            "content": "第一章正文",
+                            "chapterId": f"temporary-{i}",
+                            "generatedText": f"第{i + 1}章正文",
+                            "content": f"第{i + 1}章正文",
                         },
-                    }],
+                    } for i in range(failed_index)],
                 }
             if method == "chapter.generate_draft":
                 index = params["childIndex"]
-                assert index in {1, 2}
+                assert index in range(failed_index, chapter_count)
                 assert params["generationRevision"] == 2
-                if index == 1:
-                    assert params["batchContext"]["recentFullDrafts"][0]["childIndex"] == 0
+                if index == failed_index:
+                    assert params["batchContext"]["recentFullDrafts"][-1]["childIndex"] == failed_index - 1
                 session_id = f"draft_regenerated_{index}"
                 batch["children"][index] = {
                     **batch["children"][index],
                     "status": "draft",
                     "draftSessionId": session_id,
                 }
-                batch["status"] = "ready_for_review" if index == 2 else "generating"
+                batch["status"] = "ready_for_review" if index == chapter_count - 1 else "generating"
                 batch["version"] += 1
                 return {
                     "draftSessionId": session_id,
@@ -1451,15 +1540,11 @@ def test_regenerate_batch_resumes_from_first_failed_child(tmp_path: Path) -> Non
         assert completed.status == "completed"
         assert completed.draftBatchId == batch["draftBatchId"]
         generation_calls = [params for method, params, _ in automation.calls if method == "chapter.generate_draft"]
-        assert [params["childIndex"] for params in generation_calls] == [1, 2]
+        assert [params["childIndex"] for params in generation_calls] == list(range(failed_index, chapter_count))
         assert all(params["generationRevision"] == 2 for params in generation_calls)
         assert not any(method == "draft.batch.approve_outline" for method, _, _ in automation.calls)
         assert batch["linkedRunIds"][-1] == run.runId
         artifact = next(item for item in completed.artifacts if item.type == "chapter_draft_batch")
-        assert artifact.reference["draftSessionIds"] == [
-            "draft_sequence_0",
-            "draft_regenerated_1",
-            "draft_regenerated_2",
-        ]
+        assert artifact.reference["draftSessionIds"] == [f"draft_sequence_{i}" for i in range(failed_index)] + [f"draft_regenerated_{i}" for i in range(failed_index, chapter_count)]
 
     asyncio.run(scenario())

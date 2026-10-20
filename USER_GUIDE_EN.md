@@ -17,6 +17,14 @@ Use the left Activity Bar to switch major views:
 - Auto-save: chapter content is saved automatically while editing
 - Formatting: toolbar supports style, alignment, font size, and auto-format
 
+### Export a novel
+
+Click **Export book** in the selected book's home-page actions or beside Settings in the editor header. Choose TXT or DOCX, then select the entire book, a chapter range, or multiple files with a fixed number of chapters each.
+
+For example, export positions 1–500 as one file, or choose 500 chapters per file to split the entire book automatically. Positions start at 1 across all volumes in directory order, independently of displayed chapter numbers. Split exports are saved in a new folder only after every file succeeds; each file contains its own book details and chapter structure.
+
+The file contains the title, author, synopsis and all volumes and chapters in order. Empty author and synopsis fields are omitted. Edits are saved before export; a save failure stops the export. You can continue writing after the snapshot is read. DOCX includes heading levels and clickable contents; update the contents in Word/WPS to add page numbers. After export, use **Show in folder** to locate the file.
+
 ## 3. AI Features
 
 ### 3.1 Title Generation

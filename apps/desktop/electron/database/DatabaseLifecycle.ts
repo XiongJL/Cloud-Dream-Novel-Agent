@@ -6,7 +6,7 @@ import type { PrismaClientType } from '@novel-editor/core';
 // Version 0 was used by the pre-migration development builds. Those databases
 // are archived and recreated once. Every later version must have a registered
 // migration and is upgraded in place.
-export const DATABASE_SCHEMA_VERSION = 2;
+export const DATABASE_SCHEMA_VERSION = 3;
 
 type ProbeClient = Pick<PrismaClientType, '$queryRawUnsafe' | '$executeRawUnsafe' | '$disconnect'>;
 

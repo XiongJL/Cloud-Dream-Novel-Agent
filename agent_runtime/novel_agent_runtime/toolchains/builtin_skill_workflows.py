@@ -87,7 +87,7 @@ def novel_project_initialization_brief(draft: NovelBootstrapDraft) -> str:
     ])
 
 
-def style_skill_pack_markdown(draft: StyleSkillPackDraftArtifact) -> str:
+def style_skill_pack_markdown(draft: StyleSkillPackDraftArtifact, quality_review: dict[str, Any] | None = None) -> str:
     lines = [
         "# 文风 Skill Pack 草稿",
         "",
@@ -143,6 +143,13 @@ def style_skill_pack_markdown(draft: StyleSkillPackDraftArtifact) -> str:
         lines.extend(["", "## 未生成维度", *[f"- {item}" for item in draft.omittedDimensions]])
     if draft.warnings:
         lines.extend(["", "## 风险提示", *[f"- {item}" for item in draft.warnings]])
+    if quality_review:
+        lines.extend(["", "## 内容审核与原创场景试写", "", quality_review.get("limitation", ""),
+            "", "- 成员内容审核：通过", "- 基线、单成员及 Pack 试写正文均已保存，以下为真实输出。"])
+        for key, text in quality_review.get("trials", {}).items():
+            lines.extend(["", f"### {key}", "", text])
+        for key, review in quality_review.get("trialReviews", {}).items():
+            lines.extend(["", f"- {key} 对照审核：{review.get('summary', '')}"])
     return "\n".join(lines).strip()
 
 

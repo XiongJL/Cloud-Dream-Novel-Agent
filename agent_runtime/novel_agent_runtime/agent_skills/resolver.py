@@ -43,6 +43,9 @@ class AgentSkillResolver:
         warnings: list[str] = []
         seen: set[str] = set()
         for selection, source, required in candidates:
+            # Preserve the old automatic-default limit, but never truncate explicit selections.
+            if not required and len(refs) >= 2:
+                break
             registration = self.registry.get(selection.skillId)
             if not registration:
                 if required:
@@ -92,8 +95,6 @@ class AgentSkillResolver:
                     position="primary" if not refs else "auxiliary",
                 )
             )
-            if len(refs) == 2:
-                break
 
         reason_codes: list[str] = []
         if refs:
@@ -107,6 +108,7 @@ class AgentSkillResolver:
         return ResolvedSkillSet(
             primary=refs[0] if refs else None,
             auxiliary=refs[1] if len(refs) > 1 else None,
+            additional=refs[2:],
             reasonCodes=reason_codes,
             warnings=warnings,
         )

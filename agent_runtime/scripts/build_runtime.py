@@ -8,6 +8,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import secrets
+import socket
+import time
+import urllib.request
 
 import PyInstaller.__main__
 
@@ -47,10 +51,54 @@ def extractor_binary(directory: Path) -> Path:
     return directory / f"document-extractor{suffix}"
 
 
+def smoke_http_gateway(binary: Path) -> None:
+    """Exercise the primary packaged transport without desktop data or models."""
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+    token = secrets.token_hex(32)
+    env = dict(os.environ, NOVEL_MCP_HTTP_TOKEN=token)
+    with tempfile.TemporaryFile() as log:
+        child = subprocess.Popen(
+            [str(binary), "--mode", "mcp-http", "--port", str(port), "--parent-stdio"],
+            stdin=subprocess.PIPE, stdout=log, stderr=log, env=env,
+        )
+        try:
+            for _ in range(450):
+                if child.poll() is not None:
+                    log.seek(0)
+                    raise RuntimeError(f"Packaged MCP HTTP exited: {log.read().decode('utf-8', errors='replace')}")
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{port}/health", headers={"Authorization": f"Bearer {token}"},
+                    )
+                    with urllib.request.urlopen(request, timeout=.5) as response:
+                        if json.load(response).get("service") == "novel-editor-mcp":
+                            break
+                except (OSError, ValueError):
+                    pass
+                time.sleep(.1)
+            else:
+                raise RuntimeError("Packaged MCP HTTP startup timed out")
+            result = subprocess.run(
+                [str(binary), "--mode", "mcp-stdio", "--smoke", "--url", f"http://127.0.0.1:{port}/mcp", "--list-only"],
+                capture_output=True, check=True, timeout=60, env=env,
+            )
+            if json.loads(result.stdout.decode("utf-8")).get("toolCount") != 31:
+                raise RuntimeError("Packaged MCP HTTP did not expose the expected tools")
+        finally:
+            child.stdin.close()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the bundled CloudDream Agent runtime")
     parser.add_argument("--output", help="Output directory inside the repository")
-    parser.add_argument("--skip-smoke", action="store_true", help="Skip the packaged --help smoke test")
+    parser.add_argument("--skip-smoke", action="store_true", help="Skip packaged MCP, runtime and document extractor smoke tests")
     args = parser.parse_args()
 
     output = resolve_output(args.output)
@@ -84,11 +132,23 @@ def main() -> None:
     )
 
     built_bundle = dist_root / "novel-agent-runtime"
+    PyInstaller.__main__.run(
+        [
+            str(RUNTIME_ROOT / "document-exporter.spec"),
+            "--noconfirm", "--clean", "--distpath", str(dist_root),
+            "--workpath", str(work_root / "document-exporter"),
+        ]
+    )
+    built_exporter_bundle = dist_root / "document-exporter"
+    exporter_name = "document-exporter.exe" if os.name == "nt" else "document-exporter"
+    if not (built_exporter_bundle / exporter_name).is_file():
+        raise FileNotFoundError("PyInstaller document exporter binary was not created")
     binary = runtime_binary(built_bundle)
     if not binary.is_file():
         raise FileNotFoundError(f"PyInstaller runtime binary was not created: {binary}")
 
     shutil.copytree(built_bundle, output)
+    shutil.copytree(built_exporter_bundle, output / "document-exporter")
     packaged_binary = runtime_binary(output)
     built_extractor_bundle = dist_root / "document-extractor"
     built_extractor = extractor_binary(built_extractor_bundle)
@@ -98,6 +158,14 @@ def main() -> None:
     shutil.copytree(built_extractor_bundle, packaged_extractor_bundle)
     packaged_extractor = extractor_binary(packaged_extractor_bundle)
     if not args.skip_smoke:
+        smoke_http_gateway(packaged_binary)
+        mcp_smoke = subprocess.run(
+            [str(packaged_binary), "--mode", "mcp-stdio", "--smoke", "--list-only"],
+            capture_output=True, check=True, timeout=90,
+        )
+        mcp_report = json.loads(mcp_smoke.stdout.decode("utf-8"))
+        if mcp_report.get("toolCount") != 31:
+            raise RuntimeError("Packaged MCP gateway did not expose the expected tools")
         subprocess.run(
             [str(packaged_binary), "--help"],
             check=True,
@@ -124,9 +192,25 @@ def main() -> None:
             response = json.loads(result.stdout.decode("utf-8"))
             if response.get("ok") is not True or response.get("document", {}).get("plainText") != source.read_text(encoding="utf-8"):
                 raise RuntimeError("Packaged document extractor smoke test returned an invalid response")
+        with tempfile.TemporaryDirectory(prefix="cloud-dream-exporter-smoke-") as temp_dir:
+            directory = Path(temp_dir)
+            snapshot = {"title": "导出测试😀", "author": "作者", "description": "简介", "volumes": [
+                {"id": "v", "title": "第一卷", "chapters": [{"id": "c", "title": "第一章", "paragraphs": ["正文😀"]}]}
+            ]}
+            (directory / "snapshot.json").write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+            for format in ("txt", "docx"):
+                result = subprocess.run(
+                    [str(output / "document-exporter" / exporter_name)],
+                    input=json.dumps({"protocolVersion": "document-exporter-v1", "jobId": "smoke", "directory": str(directory), "format": format}).encode("utf-8"),
+                    capture_output=True, check=True, timeout=90,
+                )
+                response = json.loads(result.stdout.decode("utf-8").splitlines()[-1])
+                if response.get("ok") is not True or response.get("chapters") != 1 or not (directory / f"output.{format}").is_file():
+                    raise RuntimeError("Packaged document exporter smoke test failed")
 
     print(f"[agent-runtime] built {packaged_binary}")
     print(f"[document-extractor] built {packaged_extractor}")
+    print(f"[document-exporter] built {output / 'document-exporter' / exporter_name}")
 
 
 if __name__ == "__main__":

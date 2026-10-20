@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { dataOperation } from '../../backup/MaintenanceGate';
 import { app } from 'electron';
 import { db } from '@novel-editor/core';
 import { HttpProvider } from '../providers/HttpProvider';
 import type { AiSettings, AiSummarySettings } from '../types';
+import { chapterMemoryExcerpt } from '../../../shared/chapterGenerationQuality';
 
 const LOG_PREFIX = '[Summary]';
 
@@ -136,28 +138,10 @@ function extractPlainTextFromLexical(content: string): string {
     }
 }
 
-function buildKeyFacts(plainText: string): string[] {
-    if (!plainText) return [];
-    const sentences = plainText
-        .split(/[。！？!?]/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-    return sentences.slice(0, 5).map((item, index) => `fact_${index + 1}: ${item.slice(0, 80)}`);
-}
-
-function buildOpenQuestions(plainText: string): string[] {
-    if (!plainText) return [];
-    return plainText
-        .split(/[。！？!?]/)
-        .map((item) => item.trim())
-        .filter((item) => item.includes('？') || item.includes('?'))
-        .slice(0, 5);
-}
-
-function buildCompressedMemory(title: string, chapterOrder: number | null, summaryText: string, keyFacts: string[]): string {
+function buildCompressedMemory(title: string, chapterOrder: number | null, summaryText: string, keyFacts: string[], local = false): string {
     const orderPart = Number.isFinite(chapterOrder) ? `第${chapterOrder}章` : '章节';
-    const factPart = keyFacts.length > 0 ? keyFacts.join(' | ') : '无明显关键事实';
-    return `${orderPart}《${title || '未命名章节'}》摘要：${summaryText}\n关键事实：${factPart}`;
+    const factPart = keyFacts.length > 0 ? keyFacts.join(' | ') : '未进行语义事实抽取';
+    return `${orderPart}《${title || '未命名章节'}》${local ? '原文摘录（非情节摘要）' : '摘要'}：${summaryText}\n关键事实：${factPart}`;
 }
 
 function safeParseJsonArray(value: unknown): string[] {
@@ -210,15 +194,15 @@ function loadAiSettings(): AiSettings {
 }
 
 async function buildLocalSummary(plainText: string, chapterOrder: number | null): Promise<SummaryResult> {
-    const summaryText = plainText.slice(0, 220) || '章节内容为空，暂无可提炼摘要。';
+    const summaryText = chapterMemoryExcerpt(plainText, 1200) || '章节内容为空，暂无原文摘录。';
     return {
         summaryText,
-        keyFacts: buildKeyFacts(plainText),
-        openQuestions: buildOpenQuestions(plainText),
+        keyFacts: [],
+        openQuestions: [],
         timelineHints: [`chapter_order:${chapterOrder ?? 'unknown'}`],
         provider: 'local',
-        model: 'heuristic-v1',
-        promptVersion: 'chapter-summary-v1',
+        model: 'extractive-v2',
+        promptVersion: 'chapter-excerpt-v2',
         temperature: 0,
         maxTokens: 0,
         inputTokens: 0,
@@ -481,12 +465,22 @@ function scheduleNarrativeSummaryRebuild(novelId: string, volumeId: string): voi
     }
     const timer = setTimeout(() => {
         narrativeTimers.delete(key);
-        void rebuildNarrativeSummaries(novelId, volumeId);
+        void dataOperation(() => rebuildNarrativeSummaries(novelId, volumeId)).catch((error: any) => {
+            if (error?.code === 'BUSY') scheduleNarrativeSummaryRebuild(novelId, volumeId);
+            else console.warn(`${LOG_PREFIX} narrative rebuild deferred`, error);
+        });
     }, 15000);
     narrativeTimers.set(key, timer);
 }
 
 export async function rebuildChapterSummary(chapterId: string, options?: { force?: boolean; reason?: 'save' | 'manual' | 'finalized' }): Promise<void> {
+    return dataOperation(() => rebuildChapterSummaryForBackup(chapterId, options)).catch((error: any) => {
+        if (error?.code === 'BUSY') { scheduleChapterSummaryRebuild(chapterId, options?.reason === 'manual' ? 'manual' : 'save'); return; }
+        throw error;
+    });
+}
+
+async function rebuildChapterSummaryForBackup(chapterId: string, options?: { force?: boolean; reason?: 'save' | 'manual' | 'finalized' }): Promise<void> {
     const settings = loadAiSettings();
     const force = Boolean(options?.force);
     const reason = options?.reason || 'save';
@@ -597,7 +591,7 @@ export async function rebuildChapterSummary(chapterId: string, options?: { force
             chapterId: chapter.id,
             summaryType: 'standard',
             summaryText: summary.summaryText,
-            compressedMemory: buildCompressedMemory(chapter.title || '', chapter.order ?? null, summary.summaryText, summary.keyFacts),
+            compressedMemory: buildCompressedMemory(chapter.title || '', chapter.order ?? null, summary.summaryText, summary.keyFacts, summary.provider === 'local'),
             keyFacts: JSON.stringify(summary.keyFacts),
             entitiesSnapshot: JSON.stringify({}),
             timelineHints: JSON.stringify(summary.timelineHints),

@@ -1,4 +1,46 @@
 import { ipcRenderer, contextBridge } from 'electron'
+import type { BackupAPI } from '../shared/backup'
+import type { NovelExportAPI } from '../shared/novelExport'
+
+const exportFlushHandlers = new Map<string, Set<(novelId: string) => Promise<void>>>();
+ipcRenderer.on('novel-export:flush', (_event, { requestId, novelId }: { requestId: string; novelId: string }) => {
+    const flush = async () => {
+        for (const callback of [...(exportFlushHandlers.get(novelId) || []), ...(exportFlushHandlers.get('*') || [])]) await callback(novelId);
+    };
+    void flush().then(
+        () => ipcRenderer.send('novel-export:flushed', { requestId }),
+        () => ipcRenderer.send('novel-export:flushed', { requestId, error: true }),
+    );
+});
+contextBridge.exposeInMainWorld('novelExport', {
+    start: payload => ipcRenderer.invoke('novel-export:start', payload),
+    describe: novelId => ipcRenderer.invoke('novel-export:describe', novelId),
+    openDirectory: requestId => ipcRenderer.invoke('novel-export:open-directory', requestId),
+    onFlush: (novelId, callback) => {
+        let callbacks = exportFlushHandlers.get(novelId);
+        if (!callbacks) { callbacks = new Set(); exportFlushHandlers.set(novelId, callbacks); }
+        callbacks.add(callback);
+        return () => { callbacks.delete(callback); if (!callbacks.size) exportFlushHandlers.delete(novelId); };
+    },
+    onFreeze: callback => {
+        const listener = (_event: unknown, value: boolean) => callback(value);
+        ipcRenderer.on('novel-export:freeze', listener);
+        return () => { ipcRenderer.removeListener('novel-export:freeze', listener); };
+    },
+    onProgress: callback => {
+        const listener = (_event: unknown, value: Parameters<typeof callback>[0]) => callback(value);
+        ipcRenderer.on('novel-export:progress', listener);
+        return () => { ipcRenderer.removeListener('novel-export:progress', listener); };
+    },
+} satisfies NovelExportAPI);
+
+const backupFlushHandlers = new Set<() => Promise<void>>();
+ipcRenderer.on('backup:flush', (_event, { requestId }: { requestId: string }) => {
+    void Promise.all([...backupFlushHandlers].map(callback => callback())).then(
+        () => ipcRenderer.send('backup:flushed', { requestId }),
+        () => ipcRenderer.send('backup:flushed', { requestId, error: 'FLUSH_FAILED' }),
+    );
+});
 
 async function invokeAgentWithStructuredError(
     method: string,
@@ -151,14 +193,25 @@ contextBridge.exposeInMainWorld('sync', {
 
 contextBridge.exposeInMainWorld('backup', {
     export: (password?: string) => ipcRenderer.invoke('backup:export', password),
-    import: (filePath?: string, password?: string) => ipcRenderer.invoke('backup:import', { filePath, password }),
+    cancel: () => ipcRenderer.invoke('backup:cancel'),
+    inspect: (password?: string, filename?: string) => ipcRenderer.invoke('backup:inspect', { password, filename }),
+    restore: (inspectionId, mode) => ipcRenderer.invoke('backup:restore', { inspectionId, mode }),
     getAutoBackups: () => ipcRenderer.invoke('backup:get-auto'),
-    restoreAutoBackup: (filename: string) => ipcRenderer.invoke('backup:restore-auto', filename),
-})
+    getPolicy: () => ipcRenderer.invoke('backup:get-policy'),
+    getLastReport: () => ipcRenderer.invoke('backup:get-last-report'),
+    openDirectory: () => ipcRenderer.invoke('backup:open-directory'),
+    updatePolicy: enabled => ipcRenderer.invoke('backup:update-policy', enabled),
+    pin: (filename, pinned) => ipcRenderer.invoke('backup:pin', { filename, pinned }),
+    onProgress: callback => { const handler = (_event: Electron.IpcRendererEvent, progress: any) => callback(progress); ipcRenderer.on('backup:progress', handler); return () => { ipcRenderer.removeListener('backup:progress', handler); }; },
+    onMaintenance: callback => { const handler = (_event: Electron.IpcRendererEvent, busy: boolean) => callback(busy); ipcRenderer.on('backup:maintenance', handler); return () => { ipcRenderer.removeListener('backup:maintenance', handler); }; },
+    onFlush: callback => { backupFlushHandlers.add(callback); return () => { backupFlushHandlers.delete(callback); }; },
+  } satisfies BackupAPI)
 
 contextBridge.exposeInMainWorld('ai', {
     getSettings: () => ipcRenderer.invoke('ai:get-settings'),
     getMcpCliSetup: () => ipcRenderer.invoke('ai:get-mcp-cli-setup'),
+    getMcpServerStatus: () => ipcRenderer.invoke('mcp:get-status'),
+    configureMcpServer: (enabled: boolean, port?: number) => ipcRenderer.invoke('mcp:configure', { enabled, port }),
     getMapImageStats: () => ipcRenderer.invoke('ai:get-map-image-stats'),
     updateSettings: (partial: any) => ipcRenderer.invoke('ai:update-settings', partial),
     testConnection: () => ipcRenderer.invoke('ai:test-connection'),
@@ -203,9 +256,18 @@ contextBridge.exposeInMainWorld('agent', {
     restart: () => ipcRenderer.invoke('agent:restart'),
     roles: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.roles', params: payload ?? {}, context: payload?.context }),
     skills: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skills', params: payload ?? {}, context: payload?.context }),
+    skillPacks: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.packs', params: payload ?? {}, context: payload?.context }),
+    skillPack: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.pack', params: payload, context: payload?.context }),
+    previewSkillPack: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.pack.preview', params: payload, context: payload?.context }),
+    skillPackDefault: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.pack.default.get', params: payload, context: payload?.context }),
+    setSkillPackDefault: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.pack.default.set', params: payload, context: payload?.context }),
+    skillVisibility: (payload: any) => invokeAgentWithStructuredError('agent.skill.visibility.preview', payload),
+    setSkillVisibility: (payload: any) => invokeAgentWithStructuredError('agent.skill.visibility.set', payload),
+    setSkillDraftPublication: (payload: any) => invokeAgentWithStructuredError('agent.skill.draft.publication.set', payload),
     resolveSkill: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.resolve', params: payload ?? {}, context: payload?.context }),
     previewSkill: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.preview', params: payload ?? {}, context: payload?.context }),
     authorSkill: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.author', params: payload ?? {}, context: payload?.context }),
+    reviseSkill: (payload: any) => invokeAgentWithStructuredError('agent.skill.revise', payload),
     skillDrafts: (payload?: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.drafts', params: payload ?? {}, context: payload?.context }),
     skillDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.draft', params: payload ?? {}, context: payload?.context }),
     commitSkillDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.skill.commit', params: payload ?? {}, context: payload?.context }),
@@ -223,14 +285,15 @@ contextBridge.exposeInMainWorld('agent', {
     plan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.plan', params: payload, context: payload?.context }),
     registerPlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.register_plan', params: payload, context: payload?.context }),
     revisePlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.revise_plan', params: payload, context: payload?.context }),
-    executePlan: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.execute_plan', params: payload, context: payload?.context }),
+    executePlan: (payload: any) => invokeAgentWithStructuredError('agent.execute_plan', payload),
     retryRun: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.retry_run', params: payload, context: payload?.context }),
     reviseDraft: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.revise_draft', params: payload, context: payload?.context }),
     regenerateBatch: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.regenerate_batch', params: payload, context: payload?.context }),
     inspectSideEffect: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.inspect_side_effect', params: payload, context: payload?.context }),
     reconcileSideEffect: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.reconcile_side_effect', params: payload, context: payload?.context }),
-    runStatus: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.run_status', params: payload, context: payload?.context }),
-    cancel: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.cancel', params: payload, context: payload?.context }),
+    runStatus: (payload: any) => invokeAgentWithStructuredError('agent.run_status', payload),
+    reportSystemFailure: (payload: any) => invokeAgentWithStructuredError('agent.report_system_failure', payload),
+    cancel: (payload: any) => invokeAgentWithStructuredError('agent.cancel', payload),
     submitApproval: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.submit_approval', params: payload, context: payload?.context }),
     submitUserInput: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.submit_user_input', params: payload, context: payload?.context }),
     dismissUserInput: (payload: any) => ipcRenderer.invoke('agent:invoke', { method: 'agent.dismiss_user_input', params: payload, context: payload?.context }),

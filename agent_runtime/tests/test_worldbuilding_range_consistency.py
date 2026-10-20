@@ -174,7 +174,7 @@ def test_worldbuilding_range_toolchain_publishes_read_only_expert_report(tmp_pat
         automation = FakeAutomationClient()
         original_invoke = automation.invoke
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "世界观多章节一致性审核",

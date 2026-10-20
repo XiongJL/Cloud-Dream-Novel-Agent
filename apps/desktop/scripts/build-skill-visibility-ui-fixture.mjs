@@ -1,0 +1,12 @@
+import {createRequire} from 'node:module';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+const require=createRequire(import.meta.url);
+const {build}=createRequire(require.resolve('vite/package.json'))('esbuild');
+const root=path.resolve('../../tmp/skill-visibility-ui');
+await fs.mkdir(root,{recursive:true});
+await build({entryPoints:['scripts/agent-skill-visibility-ui-fixture.tsx'],bundle:true,platform:'browser',format:'iife',jsx:'automatic',outfile:path.join(root,'fixture.js')});
+const css=(await fs.readdir('dist/assets')).find(x=>x.endsWith('.css'));
+if(css)await fs.copyFile(path.join('dist/assets',css),path.join(root,'app.css'));
+await fs.writeFile(path.join(root,'index.html'),'<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Skill visibility isolated UI test</title><link rel="stylesheet" href="app.css"><style>body{background:#fff;color:#222;font-family:system-ui}dialog{width:min(560px,calc(100vw - 32px));padding:20px;border:1px solid #ddd;border-radius:12px}dialog::backdrop{background:#0005}input,select,button{font:inherit}select{border:1px solid #ddd;padding:6px}h1{font-size:22px}</style><div id="root"></div><script src="fixture.js"></script></html>');
+console.log(root);

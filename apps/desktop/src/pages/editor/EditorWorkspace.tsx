@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, Bot, CircleAlert, CircleHelp, ClipboardCheck, FileCheck2, PanelLeftClose, PanelLeftOpen, Settings, ChevronRight, LayoutGrid, FileText, Sparkles, ScrollText, Loader2 } from 'lucide-react';
+import { ArrowLeft, Bot, CircleAlert, CircleHelp, ClipboardCheck, Download, FileCheck2, PanelLeftClose, PanelLeftOpen, Settings, ChevronRight, LayoutGrid, FileText, Sparkles, ScrollText, Loader2 } from 'lucide-react';
 import NarrativeMatrix from '../../components/StoryWorkbench/NarrativeMatrix';
 import Sidebar from '../../components/Sidebar';
 import ActivityBar, { ActivityTab } from '../../components/ActivityBar';
@@ -40,6 +40,7 @@ import { useContinueWriting } from './hooks/useContinueWriting';
 import { useEditorKeyboard } from './hooks/useEditorKeyboard';
 import { useIdeaInteractions } from './hooks/useIdeaInteractions';
 import { usePlotInteractions } from './hooks/usePlotInteractions';
+import { useNovelExport } from '../../components/NovelExport/NovelExportProvider';
 
 
 import { ContinueWritingModal } from '../../components/Editor/ContinueWritingModal';
@@ -100,11 +101,23 @@ export default function Editor({ novelId, onBack }: EditorProps) {
     const { t, i18n } = useTranslation();
     const { preferences, updatePreference } = useEditorPreferences();
     const { shortcuts, isMatch } = useShortcuts();
+    const novelExport = useNovelExport();
 
     const [viewMode, setViewMode] = useState<'editor' | 'matrix' | 'map'>('editor');
     const [activeMapId, setActiveMapId] = useState<string | null>(null);
     const [mapCharacters, setMapCharacters] = useState<import('../../types').Character[]>([]);
     const editorRef = useRef<LexicalEditor | null>(null);
+    const getLatestContent = useCallback(async () => {
+        const editor = editorRef.current;
+        if (!editor) return undefined;
+        const deadline = Date.now() + 10_000;
+        while (editor.isComposing()) {
+            if (Date.now() > deadline) throw new Error('请完成输入法输入后重试。');
+            await new Promise(resolve => setTimeout(resolve, 30));
+        }
+        editor.update(() => {}, { discrete: true });
+        return JSON.stringify(editor.getEditorState().toJSON());
+    }, []);
     const agentModeStorageKey = `novel_editor_last_mode:${novelId}`;
 
     // --- 1. Core Data State ---
@@ -140,6 +153,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
     } = useChapterLifecycle({
         novelId,
         t,
+        getLatestContent,
         onActiveChapterMetadataChange: setActiveChapterMeta,
         onBeforeSelectChapter: () => {
             if (viewMode === 'map') {
@@ -679,6 +693,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                         {/* Explorer (Keep Alive) */}
                         <div className={clsx("flex-1 h-full flex flex-col min-h-0", activeTab !== 'explorer' && "hidden")}>
                             <Sidebar
+                                isVisible={activeTab === 'explorer'}
                                 volumes={volumes}
                                 currentChapterId={currentChapter?.id || null}
                                 formatting={novel?.formatting}
@@ -964,6 +979,13 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                             />
                         </div>
                         <button
+                            onClick={() => novel && novelExport.open(novel)}
+                            disabled={!novel || novelExport.busy}
+                            className={clsx('shrink-0 inline-flex items-center gap-1.5 rounded-full p-2 text-xs transition-colors disabled:opacity-40', preferences.theme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/5')}
+                            title={t('novelExport.title')}
+                            aria-label={t('novelExport.title')}
+                        ><Download className="h-5 w-5" /><span className="hidden lg:inline">{t('novelExport.title')}</span></button>
+                        <button
                             onClick={() => {
                                 setSettingsInitialTab('general');
                                 setIsSettingsOpen(true);
@@ -1056,9 +1078,8 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                     toolbarActions={
                                         <>
                                             <button
-                                                onClick={() => sendCurrentChapterToAgent(`请基于当前章节《${currentChapter.title}》生成执行计划。`)}
-                                                disabled={!currentChapter}
-                                                title="发送当前章给 Agent"
+                                                onClick={openAgentMode}
+                                                title={t('editor.openAgentWorkspace')}
                                                 className={clsx(
                                                     "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
                                                     preferences.theme === 'dark'
@@ -1067,7 +1088,7 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                                 )}
                                             >
                                                 <Bot className="w-4 h-4" />
-                                                <span>发送给 Agent</span>
+                                                <span>{t('editor.goToAgent')}</span>
                                             </button>
                                             <button
                                                 onClick={() => sendCurrentChapterToAgent(`请质检当前章节《${currentChapter.title}》，重点检查节奏、人物一致性和追更欲望。`)}
@@ -1082,20 +1103,6 @@ export default function Editor({ novelId, onBack }: EditorProps) {
                                             >
                                                 <FileText className="w-4 h-4" />
                                                 <span>质检章节</span>
-                                            </button>
-                                            <button
-                                                onClick={() => sendCurrentChapterToAgent(`请为当前章节《${currentChapter.title}》生成下一段续写草稿。`)}
-                                                disabled={!currentChapter}
-                                                title="生成下一段"
-                                                className={clsx(
-                                                    "shrink-0 px-2.5 py-2 rounded-lg border transition-colors inline-flex items-center gap-1.5 text-xs",
-                                                    preferences.theme === 'dark'
-                                                        ? "border-white/10 text-neutral-300 hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed"
-                                                        : "border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
-                                                )}
-                                            >
-                                                <Sparkles className="w-4 h-4" />
-                                                <span>下一段</span>
                                             </button>
                                             <button
                                                 onClick={() => setIsContinueModalOpen(true)}

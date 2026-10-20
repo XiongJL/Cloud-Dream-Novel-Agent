@@ -8,3 +8,4 @@ export function resolveModelOutputCapability(model: string): { maximumTokens?: n
 }
 
 export const PRODUCT_OUTPUT_SAFETY_LIMIT = 32768;
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32768;

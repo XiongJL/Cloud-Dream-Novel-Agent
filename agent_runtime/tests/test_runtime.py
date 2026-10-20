@@ -35,6 +35,7 @@ class FakeAutomationClient:
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
         self.calls.append((method, params, origin))
         if request_id:
@@ -279,7 +280,9 @@ def test_retry_chat_summary_uses_only_persisted_evidence(tmp_path: Path) -> None
         )
         runtime.state.evidenceSnapshots[snapshot.evidenceSnapshotId] = snapshot
 
-        async def retry_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def retry_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.generate_chat"
             assert params["availableReadTools"] == []
@@ -313,6 +316,8 @@ def test_recover_chat_reprocesses_saved_payload_without_generating_again(tmp_pat
             request_id: str | None = None,
             **_: Any,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.reprocess_saved_structured_output"
             assert params == {
@@ -415,6 +420,8 @@ def test_recover_chat_repairs_json_once_when_local_reprocess_is_still_invalid(tm
             request_id: str | None = None,
             **_: Any,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             if method == "agent.reprocess_saved_structured_output":
                 raise AutomationInvokeError(
@@ -472,7 +479,9 @@ def test_explicit_scope_summary_timeout_preserves_evidence_for_manual_retry(tmp_
     async def scenario() -> None:
         runtime, automation = create_runtime(tmp_path)
 
-        async def timeout_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def timeout_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             if method == "chapter.scope_context.build":
                 assert params["chapterIds"] == ["chapter-1", "chapter-2"]
@@ -547,7 +556,9 @@ def test_scope_conflict_stops_before_model_and_tools(tmp_path: Path) -> None:
 def test_chat_response_contains_paired_tool_lifecycle_events(tmp_path: Path) -> None:
     runtime, automation = create_runtime(tmp_path)
 
-    async def activity_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+    async def activity_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
+        if method == 'agent_skill.pack.default.get':
+            return {'packId': None, 'version': 0}
         automation.calls.append((method, params, origin))
         if method == "agent.generate_chat":
             if not params["toolObservations"]:
@@ -751,7 +762,10 @@ def test_chat_request_exposes_progress_and_can_be_cancelled(tmp_path: Path) -> N
         params: dict[str, Any],
         origin: str,
         request_id: str | None = None,
+        **_request_context,
     ) -> Any:
+        if method == 'agent_skill.pack.default.get':
+            return {'packId': None, 'version': 0}
         if method != "agent.generate_chat":
             raise AssertionError(method)
         started.set()
@@ -922,6 +936,7 @@ def test_executor_graph_interrupt_persists_and_resumes_once(tmp_path: Path) -> N
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "agent.generate_plan":
                 return {
@@ -941,11 +956,9 @@ def test_executor_graph_interrupt_persists_and_resumes_once(tmp_path: Path) -> N
             {"novelId": "novel_1", "chapterId": "chapter_3", "locale": "zh-CN"},
         )
 
-        for _ in range(100):
-            task = runtime._run_tasks.get(run.runId)  # noqa: SLF001 - verifies interrupt releases the worker task.
-            if runtime.state.runs[run.runId].status == "waiting_user_input" and (task is None or task.done()):
-                break
-            await asyncio.sleep(0.01)
+        task = runtime._run_tasks.get(run.runId)  # noqa: SLF001 - wait for the persisted graph interrupt.
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
         waiting = runtime.state.runs[run.runId]
         assert waiting.status == "waiting_user_input"
@@ -965,10 +978,9 @@ def test_executor_graph_interrupt_persists_and_resumes_once(tmp_path: Path) -> N
                 "selectedOptionIds": ["current_chapter"],
             }
         )
-        for _ in range(200):
-            if runtime.state.runs[run.runId].status in {"completed", "failed"}:
-                break
-            await asyncio.sleep(0.01)
+        resumed_task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
+        if resumed_task is not None:
+            await asyncio.wait_for(asyncio.shield(resumed_task), timeout=30)
 
         assert runtime.state.runs[run.runId].status == "completed"
         assert [method for method, _, _ in automation.calls].count("rag.ask") == 1
@@ -988,6 +1000,7 @@ def test_executor_graph_user_input_close_cancels_run_idempotently(tmp_path: Path
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "agent.generate_plan":
                 return {
@@ -1006,11 +1019,9 @@ def test_executor_graph_user_input_close_cancels_run_idempotently(tmp_path: Path
             },
             {"novelId": "novel_1", "chapterId": "chapter_3"},
         )
-        for _ in range(100):
-            task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
-            if runtime.state.runs[run.runId].status == "waiting_user_input" and (task is None or task.done()):
-                break
-            await asyncio.sleep(0.01)
+        task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
         pending_request = runtime.state.runs[run.runId].pendingUserInput
         assert pending_request is not None
@@ -1038,6 +1049,7 @@ def test_executor_graph_resumes_waiting_approval_after_runtime_restart(tmp_path:
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "agent.generate_plan":
                 return {
@@ -1056,11 +1068,9 @@ def test_executor_graph_resumes_waiting_approval_after_runtime_restart(tmp_path:
             },
             {"novelId": "novel_1", "chapterId": "chapter_3"},
         )
-        for _ in range(100):
-            task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
-            if runtime.state.runs[run.runId].status == "waiting_user_input" and (task is None or task.done()):
-                break
-            await asyncio.sleep(0.01)
+        task = runtime._run_tasks.get(run.runId)  # noqa: SLF001
+        if task is not None:
+            await asyncio.wait_for(asyncio.shield(task), timeout=30)
 
         pending = runtime.state.runs[run.runId].pendingApproval
         assert pending is not None
@@ -1085,10 +1095,9 @@ def test_executor_graph_resumes_waiting_approval_after_runtime_restart(tmp_path:
                 "selectedOptionIds": ["current_chapter"],
             }
         )
-        for _ in range(200):
-            if restarted.state.runs[run.runId].status in {"completed", "failed"}:
-                break
-            await asyncio.sleep(0.01)
+        resumed_task = restarted._run_tasks.get(run.runId)  # noqa: SLF001
+        if resumed_task is not None:
+            await asyncio.wait_for(asyncio.shield(resumed_task), timeout=30)
 
         assert restarted.state.runs[run.runId].status == "completed"
         assert [method for method, _, _ in automation.calls].count("rag.ask") == 1
@@ -1101,7 +1110,7 @@ def test_reader_plan_maps_current_volume_to_chapter_list(tmp_path: Path) -> None
         runtime, automation = create_runtime(tmp_path)
         original_invoke = automation.invoke
 
-        async def reader_plan_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def reader_plan_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 automation.calls.append((method, params, origin))
                 return {
@@ -1218,8 +1227,13 @@ def test_read_only_plans_run_without_approval_regardless_of_scope_or_planner(tmp
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
+            if method in {"agent_skill.list", "agent_skill.binding.list"}:
+                return []
             if method == "agent.generate_plan":
                 raise AssertionError("Stable Toolchain must skip the model Planner")
             if method != "agent.generate_chat":
@@ -1266,7 +1280,7 @@ def test_read_only_plans_run_without_approval_regardless_of_scope_or_planner(tmp
             },
             {},
         )
-        assert [method for method, _, _ in automation.calls] == ["agent.generate_chat"]
+        assert [method for method, _, _ in automation.calls] == ["agent.generate_chat", "agent_skill.list", "agent_skill.binding.list"]
         assert plan.steps[0].toolchain and plan.steps[0].toolchain.id == "reader.journey_review"
         return runtime, automation, plan
 
@@ -1281,8 +1295,12 @@ def test_read_only_plans_run_without_approval_regardless_of_scope_or_planner(tmp
 
         dynamic_runtime, dynamic_automation = create_runtime(tmp_path / "dynamic-planner")
 
-        async def dynamic_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def dynamic_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             dynamic_automation.calls.append((method, params, origin))
+            if method in {"agent_skill.list", "agent_skill.binding.list"}:
+                return []
             assert method == "agent.generate_plan"
             return {
                 "title": "动态读者计划",
@@ -1358,7 +1376,10 @@ def test_automatic_mode_does_not_pause_for_scope_evidence_or_direction(tmp_path:
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             if method == "agent.generate_plan":
                 automation.calls.append((method, params, origin))
                 return {
@@ -1430,8 +1451,13 @@ def test_role_scope_plans_share_semantic_first_policy(
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
+            if method in {"agent_skill.list", "agent_skill.binding.list"}:
+                return []
             assert method == "agent.generate_chat"
             assert params["toolObservations"] == []
             assert "currentContent" not in params["selectionContext"]
@@ -1474,7 +1500,7 @@ def test_role_scope_plans_share_semantic_first_policy(
             {},
         )
         assert plan.requiresApproval is expected_approval
-        assert [method for method, _, _ in automation.calls] == ["agent.generate_chat"]
+        assert [method for method, _, _ in automation.calls] == ["agent.generate_chat", "agent_skill.list", "agent_skill.binding.list"]
 
     asyncio.run(scenario())
 
@@ -1483,8 +1509,12 @@ def test_stable_read_only_composite_skips_planner_and_plan_approval(tmp_path: Pa
     async def scenario() -> None:
         runtime, automation = create_runtime(tmp_path)
 
-        async def semantic_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def semantic_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
+            if method in {"agent_skill.list", "agent_skill.binding.list"}:
+                return []
             assert method == "agent.generate_chat"
             return {
                 "content": "我会先做作者评估，再做编辑审核。",
@@ -1529,7 +1559,7 @@ def test_stable_read_only_composite_skips_planner_and_plan_approval(tmp_path: Pa
             "editor.range_review",
         ]
         assert plan.requiresApproval is False
-        assert [method for method, _, _ in automation.calls] == ["agent.generate_chat"]
+        assert [method for method, _, _ in automation.calls] == ["agent.generate_chat", "agent_skill.list", "agent_skill.binding.list"]
 
     asyncio.run(scenario())
 
@@ -1576,7 +1606,10 @@ def test_chat_langgraph_reads_project_context_on_demand_before_answering(tmp_pat
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             nonlocal model_calls
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
@@ -1637,7 +1670,10 @@ def test_chat_langgraph_can_execute_project_reads_through_fastmcp(tmp_path: Path
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             nonlocal model_calls
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
@@ -1701,7 +1737,10 @@ def test_chat_attachment_reads_are_scoped_to_active_conversation(tmp_path: Path)
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             nonlocal model_calls
             if method == "agent.generate_chat":
                 model_calls += 1
@@ -1799,7 +1838,10 @@ def test_attachment_read_and_get_offset_aliases_are_normalized(tmp_path: Path) -
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             assert origin == "desktop-ui"
             assert request_id == "chat-request-1"
             if method == "attachment.get":
@@ -1863,7 +1905,10 @@ def test_chat_selected_chapter_context_redirects_redundant_discovery(tmp_path: P
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             nonlocal model_calls
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
@@ -1936,7 +1981,10 @@ def test_chat_explicit_cross_chapter_scope_keeps_discovery_tool(tmp_path: Path) 
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
                 if not params["toolObservations"]:
@@ -1992,7 +2040,10 @@ def test_chat_context_scope_is_seed_and_model_can_read_prior_chapters(tmp_path: 
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
                 observations = params["toolObservations"]
@@ -2097,7 +2148,10 @@ def test_chat_explicit_read_policy_can_lock_selected_context_scope(tmp_path: Pat
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.generate_chat"
             assert "chapter.scope_context.build" in params["availableReadTools"]
@@ -2143,7 +2197,10 @@ def test_chat_langgraph_rejects_non_read_only_tool_calls(tmp_path: Path) -> None
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.generate_chat"
             return {
@@ -2177,6 +2234,7 @@ def test_chat_waits_for_clarification_before_suggesting_plan(tmp_path: Path) -> 
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
@@ -2255,7 +2313,10 @@ def test_chat_accepts_one_to_three_blocking_questions(tmp_path: Path, question_c
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.generate_chat"
             questions = []
@@ -2307,8 +2368,13 @@ def test_preplan_multi_question_reads_all_selected_chapters_and_submits_atomical
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
+            if method in {"agent_skill.list", "agent_skill.binding.list"}:
+                return []
             if method == "chapter.scope_context.build":
                 assert params["chapterIds"] == ["chapter_1", "chapter_2"]
                 assert params["currentContent"] == "编辑器未保存正文"
@@ -2446,8 +2512,13 @@ def test_preplan_user_input_can_follow_up_once_and_skip_uses_recommended_fallbac
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
+            if method in {"agent_skill.list", "agent_skill.binding.list"}:
+                return []
             if method == "agent.generate_chat":
                 return {
                     "content": "需要先确认背叛动机。",
@@ -2554,7 +2625,10 @@ def test_preplan_user_input_dismiss_is_idempotent_and_returns_to_chat(tmp_path: 
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             if method == "agent.generate_chat":
                 return {
@@ -2602,7 +2676,10 @@ def test_chat_keeps_history_and_summary_out_of_main_request(tmp_path: Path) -> N
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.generate_chat"
             assert "history" not in params
@@ -2682,6 +2759,7 @@ def test_worldbuilding_creation_plan_guarantees_creative_draft(tmp_path: Path) -
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "agent.generate_plan":
                 automation.calls.append((method, params, origin))
@@ -2732,7 +2810,7 @@ def test_planner_rejects_tools_outside_allowlist(tmp_path: Path) -> None:
     async def scenario() -> None:
         runtime, automation = create_runtime(tmp_path)
 
-        async def invalid_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invalid_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 return {
                     "title": "危险计划",
@@ -2816,7 +2894,7 @@ def test_explicit_chapter_scope_overrides_model_and_survives_revision(tmp_path: 
     async def scenario() -> None:
         runtime, automation = create_runtime(tmp_path)
 
-        async def scoped_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def scoped_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             automation.calls.append((method, params, origin))
             if method == "agent.generate_plan":
                 return {
@@ -2967,7 +3045,10 @@ def test_resolved_operation_target_survives_revision_and_changes_only_when_expli
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             automation.calls.append((method, params, origin))
             assert method == "agent.revise_plan"
             first_step = params["currentPlan"]["steps"][0]
@@ -3194,7 +3275,7 @@ def test_full_run_resumes_from_approval_and_creates_draft(tmp_path: Path) -> Non
         runtime, automation = create_runtime(tmp_path)
         original_invoke = automation.invoke
 
-        async def quality_plan_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def quality_plan_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 automation.calls.append((method, params, origin))
                 return {
@@ -3281,7 +3362,7 @@ def test_low_confidence_checkpoint_can_skip_draft_generation(tmp_path: Path) -> 
         runtime, automation = create_runtime(tmp_path)
         original_invoke = automation.invoke
 
-        async def low_confidence_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def low_confidence_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.generate_plan":
                 automation.calls.append((method, params, origin))
                 return {
@@ -3374,7 +3455,7 @@ def test_creative_direction_choice_is_injected_into_draft_intent(tmp_path: Path)
         runtime, automation = create_runtime(tmp_path)
         original_invoke = automation.invoke
 
-        async def direction_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def direction_invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
             if method == "agent.detect_creative_direction":
                 automation.calls.append((method, params, origin))
                 return {
@@ -3481,6 +3562,7 @@ def test_cancel_requests_durable_operation_stop_without_creating_draft(tmp_path:
             params: dict[str, Any],
             origin: str,
             request_id: str | None = None,
+            **_request_context,
         ) -> Any:
             if method == "chapter.generate_draft":
                 automation.calls.append((method, params, origin))
@@ -3564,7 +3646,7 @@ def test_execute_plan_only_runs_approved_steps(tmp_path: Path) -> None:
         assert runtime.state.runs[run.runId].status == "completed"
         assert approved_step.status == "completed"
         assert skipped_step.status == "skipped"
-        execution_methods = [method for method, _, _ in automation.calls if not method.startswith("agent.generate_")]
+        execution_methods = [method for method, _, _ in automation.calls if not method.startswith("agent.generate_") and method not in {"agent_skill.list", "agent_skill.binding.list", "agent_skill.pack.default.get"}]
         assert execution_methods == ["chapter.get"]
 
     asyncio.run(scenario())

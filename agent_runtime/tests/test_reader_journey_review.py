@@ -213,7 +213,9 @@ def test_reader_journey_is_sequential_and_never_leaks_future_or_backstage_contex
         original_invoke = automation.invoke
         reader_requests: list[dict[str, Any]] = []
 
-        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None) -> Any:
+        async def invoke(method: str, params: dict[str, Any], origin: str, request_id: str | None = None, **_request_context) -> Any:
+            if method == 'agent_skill.pack.default.get':
+                return {'packId': None, 'version': 0}
             if method == "agent.generate_plan":
                 return {
                     "title": "读者多章节顺序盲测",

@@ -482,6 +482,8 @@ interface AIAPI {
     }>
     getSettings: () => Promise<AISettings>
     getMcpCliSetup: () => Promise<McpCliSetupPayload>
+    getMcpServerStatus: () => Promise<import('../shared/mcpServer').McpServerStatus>
+    configureMcpServer: (enabled: boolean, port?: number) => Promise<import('../shared/mcpServer').McpServerStatus>
     getMapImageStats: () => Promise<{
         totalCalls: number
         successCalls: number
@@ -638,15 +640,13 @@ interface CreativeDraftSelection {
 
 interface ChapterDraftPayload {
     chapterId: string
+    writeMode?: 'append' | 'replace'
     baseContent: string
     generatedText: string
     content: string
     presentation?: 'silent' | 'toast' | 'modal'
     usedContext: string[]
-    consistency: {
-        ok: boolean
-        issues: string[]
-    }
+    consistency: import('../shared/chapterGenerationQuality').ChapterConsistencyResult
     warnings?: string[]
     narrativeStateDelta?: import('../shared/draftBatch').NarrativeStateDelta
     contextPolicy?: import('../shared/agentChapterScope').ContinuationContextPolicy
@@ -663,6 +663,7 @@ interface AgentAttachmentsAPI {
 }
 
 interface DraftSessionRecord {
+    agentSkill?: import('../electron/ai/AgentSkillPrompt').CompiledAgentSkill
     draftSessionId: string
     workspace: 'ai-workbench' | 'chapter-editor'
     type: 'creative-assets' | 'chapter-draft' | 'outline-draft'
@@ -895,6 +896,7 @@ interface AgentConversationRecord {
 }
 
 interface AgentPlanStep {
+    skillPackSelection?: {title: string; version: string; source: string; applicable: boolean; auxiliaryMode: string}
     stepId: string
     agent: AgentName
     title: string
@@ -960,6 +962,7 @@ interface AgentSkillRef {
 interface AgentSkillResolveResult {
     primary?: AgentSkillRef | null
     auxiliary?: AgentSkillResolveResult['primary']
+    additional?: AgentSkillRef[]
     reasonCodes: string[]
     warnings: string[]
 }
@@ -1134,19 +1137,21 @@ interface AgentUserInputResolution {
 }
 
 interface AgentRecoveryDescriptor {
-    failureKind: 'transport' | 'model_output_truncated' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown'
+    failureKind: 'transport' | 'model_output_truncated' | 'model_output_invalid' | 'local_transform_failed' | 'artifact_publish_failed' | 'persistence_failed' | 'side_effect_unknown' | 'execution_incomplete'
     failedAtPhase: 'model_pending' | 'model_received' | 'normalizing' | 'publishing'
     retryStrategy: 'retry_request' | 'repair_model_output' | 'reprocess_saved_result' | 'resume_publish' | 'reconcile_side_effect' | 'none'
     canRecover: boolean
+    canFinalizeCompleted?: boolean
     recoveryRevision: number
     actionLabel?: string
-    blockedReason?: 'processor_update_required' | 'stale_dependency' | 'unsafe_side_effect' | 'repair_exhausted'
+    blockedReason?: 'processor_update_required' | 'stale_dependency' | 'unsafe_side_effect' | 'repair_exhausted' | 'unconfirmed_model_request'
     completedArtifactIds: string[]
     affectedArtifactIds: string[]
     diagnosticRef: string
 }
 
 interface AgentRun {
+    failure?: { code?: string; message?: string; retryable?: boolean; persistenceFailed?: boolean } | null
     runId: string
     threadId: string
     planId: string
@@ -1184,6 +1189,7 @@ interface AgentRun {
 }
 
 interface AgentRunStatusResult {
+    failure?: { code?: string; message?: string; retryable?: boolean; persistenceFailed?: boolean } | null
     runId: string
     planId: string
     threadId: string
@@ -1276,7 +1282,7 @@ interface AgentIntentDecision {
     recovery?: {
         failedRunId: string
         expectedFailureRevision: number
-        mode: 'failed_node'
+        mode: 'failed_node' | 'use_completed_results' | 'retry_unconfirmed_units'
     }
 }
 
@@ -1494,6 +1500,14 @@ interface AgentHealthResult {
 }
 
 interface AgentAPI {
+    skillPacks: (payload?: Record<string, unknown>) => Promise<import('../shared/agentSkillComposer').AgentSkillMenuPack[]>
+    skillPack: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+    previewSkillPack: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+    skillPackDefault: (payload: Record<string, unknown>) => Promise<{packId: string | null; packRevisionId?: string; version: number; enabled?: boolean; legacyBindings?: boolean}>
+    setSkillPackDefault: (payload: Record<string, unknown>) => Promise<{packId: string | null; version: number}>
+    skillVisibility: (payload: Record<string, unknown>) => Promise<Record<string, any>>
+    setSkillVisibility: (payload: Record<string, unknown>) => Promise<Record<string, any>>
+    setSkillDraftPublication: (payload: Record<string, unknown>) => Promise<Record<string, any>>
     health: () => Promise<AgentHealthResult>
     ensureReady: () => Promise<AgentHealthResult>
     restart: () => Promise<AgentHealthResult>
@@ -1502,6 +1516,7 @@ interface AgentAPI {
     resolveSkill: (payload: Record<string, unknown>) => Promise<AgentSkillResolveResult>
     previewSkill: (payload: Record<string, unknown>) => Promise<AgentSkillPreviewResult>
     authorSkill: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+    reviseSkill: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
     skillDrafts: (payload?: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>
     skillDraft: (payload: Record<string, unknown>) => Promise<Record<string, unknown> | null>
     commitSkillDraft: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>
@@ -1538,6 +1553,7 @@ interface AgentAPI {
     inspectSideEffect: (payload: Record<string, unknown>) => Promise<AgentSideEffectInspection>
     reconcileSideEffect: (payload: Record<string, unknown>) => Promise<AgentSideEffectReconciliationResult>
     runStatus: (payload: Record<string, unknown>) => Promise<AgentRunStatusResult>
+    reportSystemFailure: (payload: { code?: string; message: string }) => Promise<{ affectedRunIds: string[] }>
     cancel: (payload: Record<string, unknown>) => Promise<AgentRun>
     submitApproval: (payload: Record<string, unknown>) => Promise<AgentRun>
     submitUserInput: (payload: Record<string, unknown>) => Promise<AgentUserInputResolution>
@@ -1580,6 +1596,7 @@ interface AgentSideEffectReconciliationResult {
 }
 
 interface Window {
+    novelExport: import('../shared/novelExport').NovelExportAPI
     ipcRenderer: import('electron').IpcRenderer
     db: DBAPI
     electron: {
@@ -1596,12 +1613,7 @@ interface Window {
         onFullScreenChange: (callback: (isFullScreen: boolean) => void) => () => void
     }
     sync: SyncAPI
-    backup: {
-        export: (password?: string) => Promise<string>;
-        import: (filePath?: string, password?: string) => Promise<{ success: boolean; code?: string; message?: string; filePath?: string }>;
-        getAutoBackups: () => Promise<Array<{ filename: string; createdAt: number; size: number }>>;
-        restoreAutoBackup: (filename: string) => Promise<void>;
-    }
+    backup: import('../shared/backup').BackupAPI
     ai: AIAPI
     automation: AutomationAPI
     agent: AgentAPI

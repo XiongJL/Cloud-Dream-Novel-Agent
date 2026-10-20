@@ -7,11 +7,21 @@ export type AgentSkillMenuSkill = {
   version: string;
   revisionId: string;
   enabled: boolean;
+  supportedOperations?: string[];
+  allowedRoles?: string[];
+};
+
+export type AgentSkillMenuPack = AgentSkillMenuSkill & {
+  ownerNovelId?: string;
+  schemaVersion?: number;
+  entryType: 'pack'; available: boolean; unavailableReason?: string;
+  members: Array<{memberKey: string; title: string; slot: string}>;
 };
 
 export type AgentSkillComposerMode =
-  | { kind: 'skill.use'; skill: AgentSkillMenuSkill }
-  | { kind: 'skill.author' }
+  | { kind: 'skill.use'; skill: AgentSkillMenuSkill; additionalSkills?: AgentSkillMenuSkill[]; publicationScope?: 'novel' | 'user' }
+  | { kind: 'skill.pack.use'; pack: AgentSkillMenuPack; auxiliaryMode: 'default' | 'none' | 'member'; auxiliaryMemberKey?: string }
+  | { kind: 'skill.author'; publicationScope?: 'novel' | 'user' }
   | { kind: 'skill.none' };
 
 export type AgentSkillSlashQuery = {
@@ -22,6 +32,7 @@ export type AgentSkillSlashQuery = {
 
 export type AgentSkillMenuItem =
   | { kind: 'skill'; skill: AgentSkillMenuSkill }
+  | { kind: 'pack'; pack: AgentSkillMenuPack }
   | { kind: 'author'; id: 'skill.author' }
   | { kind: 'none'; id: 'skill.none' };
 
@@ -71,26 +82,59 @@ export function filterAgentSkillEntries<T extends AgentSkillMenuSkill>(skills: T
     });
 }
 
-export function buildAgentSkillMenuItems<T extends AgentSkillMenuSkill>(skills: T[], query: string): AgentSkillMenuItem[] {
+export function buildAgentSkillMenuItems<T extends AgentSkillMenuSkill>(skills: T[], query: string, packs: AgentSkillMenuPack[] = []): AgentSkillMenuItem[] {
   return [
     { kind: 'author', id: 'skill.author' },
     { kind: 'none', id: 'skill.none' },
-    ...filterAgentSkillEntries(skills, query).map((skill) => ({ kind: 'skill' as const, skill })),
+    ...(['builtin', 'novel', 'user'] as const).flatMap(scope => [
+      ...filterAgentSkillEntries(packs, query).filter(pack => pack.available && pack.scope === scope).map(pack => ({ kind: 'pack' as const, pack })),
+      ...filterAgentSkillEntries(skills, query).filter(skill => skill.scope === scope).map(skill => ({ kind: 'skill' as const, skill })),
+    ]),
   ];
 }
 
-export function agentSkillEntryHint(mode: AgentSkillComposerMode | undefined): Record<string, string> | undefined {
+export function selectedAgentSkills(mode: AgentSkillComposerMode | undefined): AgentSkillMenuSkill[] {
+  return mode?.kind === 'skill.use' ? [mode.skill, ...(mode.additionalSkills || [])] : [];
+}
+
+export function removeSelectedAgentSkill(mode: AgentSkillComposerMode | undefined, skillId: string): AgentSkillComposerMode | undefined {
+  if (mode?.kind !== 'skill.use') return mode;
+  const remaining = selectedAgentSkills(mode).filter(skill => skill.id !== skillId);
+  return remaining.length ? {...mode, skill: remaining[0], additionalSkills: remaining.slice(1)} : undefined;
+}
+
+export function selectAgentSkillMode(mode: AgentSkillComposerMode | undefined, item: AgentSkillMenuItem): AgentSkillComposerMode | undefined {
+  if (item.kind === 'none') return {kind: 'skill.none'};
+  if (item.kind === 'author') return {kind: 'skill.author'};
+  if (item.kind === 'pack') return {kind: 'skill.pack.use', pack: item.pack, auxiliaryMode: 'default'};
+  if (selectedAgentSkills(mode).some(skill => skill.id === item.skill.id)) return removeSelectedAgentSkill(mode, item.skill.id);
+  const selected = [...selectedAgentSkills(mode), item.skill];
+  const publicationScope = mode?.kind === 'skill.use' ? mode.publicationScope : undefined;
+  return {kind: 'skill.use', skill: selected[0], additionalSkills: selected.slice(1),
+    ...(publicationScope ? {publicationScope} : item.skill.id === 'builtin.style-skill-extractor' ? {publicationScope: 'novel'} : {})};
+}
+
+export function agentSkillEntryHint(mode: AgentSkillComposerMode | undefined): Record<string, unknown> | undefined {
   if (!mode) return undefined;
+  if (mode.kind === 'skill.pack.use') return { actionId: 'skill.pack.use', kind: 'skill.pack.use', packId: mode.pack.id,
+    requestedPackRevisionId: mode.pack.revisionId, auxiliaryMode: mode.auxiliaryMode,
+    ...(mode.auxiliaryMemberKey ? { auxiliaryMemberKey: mode.auxiliaryMemberKey } : {}) };
   if (mode.kind === 'skill.author') {
-    return { actionId: 'skill.author', kind: 'skill.author' };
+    return { actionId: 'skill.author', kind: 'skill.author', ...(mode.publicationScope ? {publicationScope: mode.publicationScope} : {}) };
   }
   if (mode.kind === 'skill.none') {
     return { actionId: 'skill.none', kind: 'skill.none' };
   }
+  if (selectedAgentSkills(mode).length > 1) return {
+    actionId: 'skill.use', kind: 'skill.use',
+    skills: selectedAgentSkills(mode).map(skill => ({skillId: skill.id, requestedRevisionId: skill.revisionId})),
+    ...(mode.publicationScope ? {publicationScope: mode.publicationScope} : {}),
+  };
   return {
     actionId: 'skill.use',
     kind: 'skill.use',
     skillId: mode.skill.id,
     requestedRevisionId: mode.skill.revisionId,
+    ...(mode.publicationScope ? {publicationScope: mode.publicationScope} : {}),
   };
 }

@@ -75,15 +75,13 @@ export interface CreativeDraftSelection {
 
 export interface ChapterDraftPayload {
     chapterId: string;
+    writeMode?: 'append' | 'replace';
     baseContent: string;
     generatedText: string;
     content: string;
     presentation?: 'silent' | 'toast' | 'modal';
     usedContext: string[];
-    consistency: {
-        ok: boolean;
-        issues: string[];
-    };
+    consistency: import('../../shared/chapterGenerationQuality').ChapterConsistencyResult;
     warnings?: string[];
     narrativeStateDelta?: import('../../shared/draftBatch').NarrativeStateDelta;
     contextPolicy?: import('../../shared/agentChapterScope').ContinuationContextPolicy;
@@ -93,6 +91,7 @@ export interface ChapterDraftPayload {
 }
 
 export interface DraftSessionRecord {
+    agentSkill?: import('../ai/AgentSkillPrompt').CompiledAgentSkill;
     draftSessionId: string;
     workspace: AutomationWorkspace;
     type: AutomationDraftType;

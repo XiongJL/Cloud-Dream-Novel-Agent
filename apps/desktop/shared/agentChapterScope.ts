@@ -24,6 +24,7 @@ export interface AgentChapterScopeBuildPayload {
     batchSize?: number;
     maxDetailedChapters?: number;
     maxEstimatedTokens?: number;
+    representation?: 'default' | 'catalog' | 'verbatim' | 'expert_context';
 }
 
 export interface AgentChapterSnapshot {
@@ -54,7 +55,7 @@ export interface ChapterScopeContextItem {
     version: number;
     updatedAt: string;
     contentHash: string;
-    contentMode: 'full' | 'truncated' | 'summary' | 'excerpt';
+    contentMode: 'full' | 'truncated' | 'summary' | 'excerpt' | 'catalog';
     content: string;
     summaryId?: string;
     summaryContent?: string;
@@ -64,6 +65,7 @@ export interface ChapterScopeContextItem {
 
 export interface ContinuationContextPolicy {
     version: 'continuation-context-v1';
+    sourcePolicy?: 'existing_chapters' | 'outline_only';
     summaryChapterCount: number;
     fullTextChapterCount: number;
     maxFullTextChars: number;
@@ -102,6 +104,9 @@ export interface ChapterScopeEvidence {
 }
 
 export interface ChapterScopeCoverage {
+    analyzedChapterCount?: number | null;
+    expertReviewedChapterCount?: number | null;
+    expertReviewMode?: 'analysis_evidence' | 'original_context' | null;
     totalChapterCount: number;
     contextChapterCount: number;
     readonlyChapterCount: number;
@@ -125,6 +130,15 @@ export interface NarrativeStateLedger {
 }
 
 export interface ChapterScopeBundle {
+    skillAnalysis?: {
+        version: 2;
+        analysisRef: string;
+        summary: string;
+        candidates: Array<Record<string, unknown>>;
+        pageIndex: number;
+        pageCount: number;
+        [key: string]: unknown;
+    } | null;
     scope: AgentChapterScope;
     chapters: ChapterScopeContextItem[];
     narrativeSummaries: Array<{

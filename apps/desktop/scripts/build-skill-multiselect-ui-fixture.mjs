@@ -1,0 +1,10 @@
+import {createRequire} from 'node:module';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+const require = createRequire(import.meta.url);
+const {build} = createRequire(require.resolve('vite/package.json'))('esbuild');
+const root = path.resolve('../../tmp/skill-multiselect-ui');
+await fs.mkdir(root, {recursive:true});
+await build({entryPoints:['scripts/agent-skill-multiselect-ui-fixture.tsx'], bundle:true, platform:'browser', format:'iife', jsx:'automatic', outfile:path.join(root,'fixture.js')});
+await fs.writeFile(path.join(root,'index.html'), '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Skill multi-selection test</title><link rel="stylesheet" href="app.css"><style>body{font-family:system-ui}button,textarea{font:inherit}h1{font-size:22px}</style><div id="root"></div><script src="fixture.js"></script></html>');
+console.log(root);

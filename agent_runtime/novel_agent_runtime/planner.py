@@ -321,7 +321,7 @@ def build_plan_from_intent(
                 id=definition.id,
                 version=definition.version,
                 input=(
-                    {"chapterCount": requested_created_chapter_count(normalized_goal) or 1}
+                    {"chapterCount": 1 if operation.target.selector == "new_chapter_ordinal" else requested_created_chapter_count(normalized_goal) or 1}
                     if operation.type == "chapter.create"
                     else _sequence_toolchain_input(normalized_goal)
                     if definition.id == "chapter.sequence_continuation"
@@ -400,7 +400,7 @@ def route_plan_from_intent(plan: AgentPlan, decision: IntentDecision | dict[str,
                     id=definition.id,
                     version=definition.version,
                     input=(
-                        {"chapterCount": requested_created_chapter_count(plan.goal) or 1}
+                        {"chapterCount": 1 if operation.target.selector == "new_chapter_ordinal" else requested_created_chapter_count(plan.goal) or 1}
                         if operation.type == "chapter.create"
                         else _sequence_toolchain_input(plan.goal)
                         if definition.id == "chapter.sequence_continuation"

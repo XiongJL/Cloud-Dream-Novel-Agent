@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { AutomationService } from './AutomationService';
 import type { AutomationEnvelope, AutomationErrorShape } from './types';
 import { devLog, devLogError, redactForLog } from '../debug/devLogger';
+import { validateExternalMcpCall } from './mcpToolContracts';
 
 type RuntimeDescriptor = {
     version: 1;
@@ -21,6 +22,15 @@ export class AutomationServer {
     private server: http.Server | null = null;
     private runtime: RuntimeDescriptor | null = null;
     private readonly activeRequests = new Map<string, AbortController>();
+    private externalMcpEnabled = true;
+    private readonly externalRequests = new Set<AbortController>();
+
+    setExternalMcpEnabled(enabled: boolean): void {
+        this.externalMcpEnabled = enabled;
+        if (!enabled) {
+            for (const controller of this.externalRequests) controller.abort(new Error('MCP disabled'));
+        }
+    }
 
     constructor(
         automationService: AutomationService,
@@ -66,6 +76,7 @@ export class AutomationServer {
             'draft.batch.discard',
             'artifact.review.submit',
             'revision_task.create_plan',
+            'agent_skill.delete',
         ]);
         if (dataChangingMethods.has(method)) {
             this.onDataChanged?.(method);
@@ -83,14 +94,35 @@ export class AutomationServer {
     private async writeRuntime(): Promise<void> {
         if (!this.runtime) return;
         await fs.mkdir(this.getAutomationDir(), { recursive: true });
-        await fs.writeFile(this.getRuntimePath(), JSON.stringify(this.runtime, null, 2), 'utf8');
+        const temporary = path.join(this.getAutomationDir(), `.runtime-${process.pid}-${randomUUID()}.tmp`);
+        try {
+            await fs.writeFile(temporary, JSON.stringify(this.runtime, null, 2), 'utf8');
+            await fs.rename(temporary, this.getRuntimePath());
+        } finally {
+            await fs.rm(temporary, { force: true });
+        }
+    }
+
+    async ensureRuntimeDescriptor(): Promise<void> {
+        if (!this.server?.listening || !this.runtime) return;
+        try {
+            JSON.parse(await fs.readFile(this.getRuntimePath(), 'utf8'));
+        } catch (error: any) {
+            if (error?.code === 'ENOENT' || error instanceof SyntaxError) await this.writeRuntime();
+            else throw error;
+        }
     }
 
     private async removeRuntime(): Promise<void> {
+        if (!this.runtime) return;
         try {
-            await fs.unlink(this.getRuntimePath());
+            const descriptor = JSON.parse(await fs.readFile(this.getRuntimePath(), 'utf8'));
+            // A retiring development process must not delete its successor's connection.
+            if (descriptor.pid === this.runtime.pid && descriptor.port === this.runtime.port && descriptor.token === this.runtime.token) {
+                await fs.unlink(this.getRuntimePath());
+            }
         } catch (error: any) {
-            if (error?.code !== 'ENOENT') {
+            if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) {
                 throw error;
             }
         }
@@ -150,8 +182,24 @@ export class AutomationServer {
                     return;
                 }
 
-                if (req.method === 'POST' && req.url === '/invoke') {
+                if (req.method === 'POST' && (req.url === '/invoke' || req.url === '/mcp/invoke')) {
+                    const externalMcp = req.url === '/mcp/invoke';
+                    if (externalMcp && !this.externalMcpEnabled) {
+                        this.sendJson(res, 403, { ok: false, code: 'MCP_DISABLED', message: 'MCP access is disabled in Settings' });
+                        return;
+                    }
                     const payload = await this.readJson(req);
+                    // Internal Agent traffic has its own manifest/policy. The external
+                    // gateway cannot use Automation's fallback to reach unlisted actions.
+                    if (externalMcp) {
+                        // Reading the request body yields; the switch may change meanwhile.
+                        if (!this.externalMcpEnabled) {
+                            this.sendJson(res, 403, { ok: false, code: 'MCP_DISABLED', message: 'MCP access is disabled in Settings' });
+                            return;
+                        }
+                        validateExternalMcpCall(payload.method, payload.params);
+                        payload.origin = 'mcp-bridge';
+                    }
                     const requestId = typeof payload.requestId === 'string' && payload.requestId.trim()
                         ? payload.requestId.trim()
                         : randomUUID();
@@ -164,6 +212,7 @@ export class AutomationServer {
                     });
                     const controller = new AbortController();
                     this.activeRequests.set(requestId, controller);
+                    if (externalMcp) this.externalRequests.add(controller);
                     let data: unknown;
                     try {
                         data = await this.automationService.invoke(payload.method, payload.params, {
@@ -175,6 +224,7 @@ export class AutomationServer {
                             signal: controller.signal,
                         });
                     } finally {
+                        this.externalRequests.delete(controller);
                         if (this.activeRequests.get(requestId) === controller) {
                             this.activeRequests.delete(requestId);
                         }

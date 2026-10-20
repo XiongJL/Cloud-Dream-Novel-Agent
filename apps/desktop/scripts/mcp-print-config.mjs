@@ -9,7 +9,7 @@ function parseArgs(argv) {
     copy: '',
     serverName: 'novel_editor',
     startupTimeoutSec: 60,
-    toolTimeoutSec: 120,
+    toolTimeoutSec: 300,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -54,12 +54,13 @@ function quoteWindowsArg(value) {
 
 function buildConfig(options) {
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const cmdPath = path.join(scriptDir, 'novel-editor-mcp.cmd');
-  const cmdPathEscaped = cmdPath.replace(/\\/gu, '\\\\');
+  const windows = process.platform === 'win32';
+  const command = windows ? 'cmd' : 'sh';
+  const cmdPath = path.join(scriptDir, windows ? 'novel-editor-mcp.cmd' : 'novel-editor-mcp.sh');
   const codexToml = [
     `[mcp_servers.${options.serverName}]`,
-    'command = "cmd"',
-    `args = ["/c", "${cmdPathEscaped}"]`,
+    `command = "${command}"`,
+    `args = ${JSON.stringify(windows ? ['/c', cmdPath] : [cmdPath])}`,
     `startup_timeout_sec = ${options.startupTimeoutSec}`,
     `tool_timeout_sec = ${options.toolTimeoutSec}`,
   ].join('\n');
@@ -68,8 +69,8 @@ function buildConfig(options) {
     {
       mcpServers: {
         [options.serverName]: {
-          command: 'cmd',
-          args: ['/c', cmdPath],
+          command,
+          args: windows ? ['/c', cmdPath] : [cmdPath],
         },
       },
     },
@@ -77,7 +78,7 @@ function buildConfig(options) {
     2,
   );
 
-  const claudeCommand = `claude mcp add novel-editor --scope local -- cmd /c ${quoteWindowsArg(cmdPath)}`;
+  const claudeCommand = `claude mcp add novel-editor --scope local -- ${command} ${windows ? '/c ' : ''}${quoteWindowsArg(cmdPath)}`;
 
   return {
     cmdPath,
@@ -119,7 +120,7 @@ function main() {
   const options = parseArgs(process.argv.slice(2));
   const output = buildConfig(options);
 
-  process.stdout.write(`CloudDream Novel Agent MCP launcher:\n${output.cmdPath}\n`);
+  process.stdout.write(`MCP stdio compatibility configuration (primary HTTP URL: Settings > AI > MCP CLI):\n${output.cmdPath}\n`);
 
   if (options.format === 'all' || options.format === 'codex') {
     printBlock('Codex config.toml', output.codexToml);

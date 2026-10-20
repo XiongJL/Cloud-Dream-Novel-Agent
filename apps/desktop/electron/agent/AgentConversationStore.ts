@@ -120,6 +120,7 @@ export type AgentConversationRecord = {
         activities?: Array<Record<string, unknown>>;
         failure?: Record<string, unknown>;
         evidenceSnapshotId?: string;
+        skillDraftId?: string;
     }>;
 };
 
@@ -712,6 +713,7 @@ export class AgentConversationStore {
                         ...(Array.isArray(record.activities) ? { activities: record.activities as Array<Record<string, unknown>> } : {}),
                         ...(record.failure && typeof record.failure === 'object' ? { failure: record.failure as Record<string, unknown> } : {}),
                         ...(typeof record.evidenceSnapshotId === 'string' ? { evidenceSnapshotId: record.evidenceSnapshotId } : {}),
+                        ...(typeof record.skillDraftId === 'string' ? { skillDraftId: record.skillDraftId } : {}),
                     };
                 }),
             });
@@ -764,6 +766,7 @@ export class AgentConversationStore {
                     ...(message.activities?.length ? { activities: message.activities } : {}),
                     ...(message.failure ? { failure: message.failure } : {}),
                     ...(message.evidenceSnapshotId ? { evidenceSnapshotId: message.evidenceSnapshotId } : {}),
+                    ...(message.skillDraftId ? { skillDraftId: message.skillDraftId } : {}),
                 };
                 await this.db.$executeRawUnsafe(`
                     INSERT INTO AgentMessage (id, conversationId, role, content, metadataJson, sequence, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -821,7 +824,25 @@ export class AgentConversationStore {
                 run.resumedFrom ? JSON.stringify(run.resumedFrom) : null,
                 run.completionKind || 'complete', run.recovery ? JSON.stringify(run.recovery) : null,
                 now, updatedAt);
+                const storedEvents = run.events?.length
+                    ? await this.db.$queryRawUnsafe<AgentRunEventRow[]>(`
+                        SELECT eventId, sequence, runId, planId, threadId, stepId,
+                               type, agent, toolName, status, payloadJson, createdAt
+                        FROM AgentRunEvent WHERE runId = ?
+                    `, run.runId)
+                    : [];
+                const storedEventValues = new Map(storedEvents.map(event => [event.eventId, JSON.stringify([
+                    Number(event.sequence || 0), event.runId, event.planId || null, event.threadId || null,
+                    event.stepId || null, event.type, event.agent || null, event.toolName || null,
+                    event.status || null, event.payloadJson || '{}', event.createdAt || now,
+                ])]));
                 for (const event of run.events || []) {
+                    const values = [event.eventId, Number(event.sequence || 0), run.runId, event.planId || null,
+                        event.threadId || null, event.stepId || null, event.type, event.agent || null,
+                        event.toolName || null, event.status || null, JSON.stringify(event.payload || {}), event.createdAt || now];
+                    // Long analyses retain the entire event ledger. Rewriting
+                    // it on every progress update creates quadratic write load.
+                    if (storedEventValues.get(event.eventId) === JSON.stringify(values.slice(1))) continue;
                     await this.db.$executeRawUnsafe(`
                         INSERT INTO AgentRunEvent (
                             eventId, sequence, runId, planId, threadId, stepId,
@@ -833,9 +854,7 @@ export class AgentConversationStore {
                             type = excluded.type, agent = excluded.agent, toolName = excluded.toolName,
                             status = excluded.status, payloadJson = excluded.payloadJson,
                             createdAt = excluded.createdAt
-                    `, event.eventId, Number(event.sequence || 0), run.runId, event.planId || null,
-                    event.threadId || null, event.stepId || null, event.type, event.agent || null,
-                    event.toolName || null, event.status || null, JSON.stringify(event.payload || {}), event.createdAt || now);
+                    `, ...values);
                 }
                 for (const artifact of run.artifacts || []) {
                     await this.db.$executeRawUnsafe(`

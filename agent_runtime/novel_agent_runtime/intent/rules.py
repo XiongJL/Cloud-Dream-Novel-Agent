@@ -82,11 +82,12 @@ _CHAPTER_COUNT_TOKENS: dict[str, int] = {
     "三": 3,
     "四": 4,
     "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
     "几": 2,
     "多": 2,
 }
 _ORDINAL_CHAPTER_REFERENCE = re.compile(
-    r"(?:最后一章|最终一章|倒数第?[一二两三四五1-5]章|第\s*[一二两三四五1-5]\s*章|末章|最终章)"
+    r"(?:最后一章|最终一章|倒数第?[一二两三四五六七八九十百\d]+章|第\s*[一二两三四五六七八九十百\d]+\s*章|末章|最终章)"
 )
 _EXPLICIT_CHAPTER_RANGE = re.compile(
     r"第?\s*[零〇一二两三四五六七八九十百\d]+\s*(?:章)?\s*(?:到|至|—|－|-|~|～)\s*"
@@ -207,26 +208,37 @@ def requested_continuation_chapter_count(message: str) -> int | None:
     normalized = _mask_non_requested_draft_language(message.strip().lower())
     count_source = _ORDINAL_CHAPTER_REFERENCE.sub(" ", normalized)
     match = re.search(
-        r"(?:续写|继续写|接着写|连续写|往下写|再写|生成)(?:(?!第).){0,10}([1-5一二两三四五几多])\s*(?:个)?章",
+        r"(?:续写|继续写|接着写|连续新写|连续写|新写|往下写|再写|生成)(?:(?!第).){0,10}?(\d+|[一二两三四五六七八九十]+|[几多])\s*(?:个)?章",
         count_source,
     )
     if not match:
         return None
     token = match.group(1)
-    return _CHAPTER_COUNT_TOKENS.get(token, int(token) if token.isdigit() else None)
+    return _generation_count(token)
 
 
 def requested_created_chapter_count(message: str) -> int | None:
     """Extract the number of newly inserted chapters; omitted means one."""
-    normalized = message.strip().lower()
+    normalized = _ORDINAL_CHAPTER_REFERENCE.sub(" ", message.strip().lower())
     match = re.search(
-        r"(?:新增|新建|创建|写下)(?:.{0,6}?)([1-5一二两三四五])\s*(?:个)?章",
+        r"(?:新增|新建|创建|写下|连续新写|新写)(?:.{0,6}?)(\d+|[一二两三四五六七八九十]+)\s*(?:个)?章",
         normalized,
     )
     if not match:
         return 1 if any(marker in normalized for marker in ("新增章节", "新建章节", "创建章节", "写下一章")) else None
     token = match.group(1)
-    return _CHAPTER_COUNT_TOKENS.get(token, int(token) if token.isdigit() else None)
+    return _generation_count(token)
+
+
+def _generation_count(token: str) -> int | None:
+    if token.isdigit():
+        return int(token)
+    if token in _CHAPTER_COUNT_TOKENS:
+        return _CHAPTER_COUNT_TOKENS[token]
+    if "十" in token:
+        before, after = token.split("十", 1)
+        return (_CHAPTER_COUNT_TOKENS.get(before, 1) * 10 + _CHAPTER_COUNT_TOKENS.get(after, 0))
+    return None
 
 
 def detect_explicit_operations(message: str) -> list[str]:

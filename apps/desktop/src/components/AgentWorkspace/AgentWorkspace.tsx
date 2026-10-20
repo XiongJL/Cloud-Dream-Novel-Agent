@@ -1,3 +1,5 @@
+import { reconcileTerminalRunStatus } from '../../../shared/agentTerminalStatus';
+import { storageErrorMessage } from '../../../shared/systemErrors';
 import { Component, Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type ErrorInfo, type ReactNode, type RefObject, type SetStateAction } from 'react';
 import {
   AlertCircle,
@@ -69,7 +71,7 @@ import {
   projectChatActivity,
   type ActivityDetail,
 } from '../../../shared/agentActivityProjection';
-import { appendPlainTextToLexical, extractReadableText } from '../../../shared/lexicalDocument';
+import { appendPlainTextToLexical, extractReadableText, ensureLexicalDocument } from '../../../shared/lexicalDocument';
 import {
   chapterScopePayload,
   chapterScopeSelectionFromPlan,
@@ -115,15 +117,20 @@ import {
   type AgentPendingStatus,
 } from '../../../shared/agentPendingStatus';
 import { resolveAgentComposerAction } from '../../../shared/agentComposerAction';
+import { AgentSkillCatalogCache } from '../../../shared/agentSkillCatalogCache';
 import {
   agentSkillEntryHint,
   agentSkillShortcutSeed,
   buildAgentSkillMenuItems,
   findAgentSkillSlashQuery,
   removeAgentSkillSlashQuery,
+  selectedAgentSkills,
+  selectAgentSkillMode,
+  removeSelectedAgentSkill,
   shouldOpenAgentSkillSlashMenu,
   type AgentSkillComposerMode,
   type AgentSkillMenuItem,
+  type AgentSkillMenuPack,
   type AgentSkillSlashQuery,
 } from '../../../shared/agentSkillComposer';
 import { formatAiErrorFromUnknown } from '../../utils/aiError';
@@ -133,6 +140,11 @@ import {
   type AgentWorkspaceAttentionSummary,
 } from '../../../shared/agentWorkspaceAttention';
 import { AgentSkillSlashMenu } from './AgentSkillSlashMenu';
+import { SkillVisibilityDialog, type SkillVisibilityTarget } from './SkillVisibilityDialog';
+import { SkillDeleteDialog } from './SkillDeleteDialog';
+import { SelectedSkillChips } from './SelectedSkillChips';
+import { SkillDraftReviewCard } from './SkillDraftReviewCard';
+import { skillDraftIdFromNotice, type SkillDraftReviewRecord } from '../../../shared/agentSkillDraftReview';
 
 export type AgentEditorContentSnapshot = {
   novelId: string;
@@ -208,6 +220,7 @@ type ConversationMessage = {
   activities?: AgentChatActivityEvent[];
   failure?: AgentChatFailure;
   evidenceSnapshotId?: string;
+  skillDraftId?: string;
 };
 
 const CONTEXT_COMPRESSION_MESSAGE_KIND = 'agent_context_compression_v1';
@@ -576,6 +589,8 @@ function createSeedConversations(novelId: string, currentChapter?: AgentChapterC
 }
 
 function toErrorMessage(error: unknown): string {
+  const storageMessage = storageErrorMessage(error);
+  if (storageMessage) return storageMessage;
   const rawMessage = error instanceof Error ? error.message : String(error || '');
   if (rawMessage.includes('CHAPTER_TARGET_UNRESOLVED')) {
     return '暂时无法确定目标章节。章节目录或上一步解析结果可能尚未就绪，请点击“重新生成计划草稿”继续。';
@@ -737,6 +752,22 @@ function AgentWorkspace({
   const [modelDraft, setModelDraft] = useState('');
   const [isModelSaving, setIsModelSaving] = useState(false);
   const [modelError, setModelError] = useState('');
+  const [persistenceError, setPersistenceError] = useState('');
+  const persistenceErrorRef = useRef('');
+  const reportPersistenceError = useCallback((error: unknown, operation: 'load' | 'save' = 'save') => {
+    const message = `${operation === 'load' ? '会话读取失败，历史记录尚未加载；已暂停自动保存。' : '会话保存失败，历史记录可能未保存。'}${toErrorMessage(error)}`;
+    setPersistenceError(message);
+    if (persistenceErrorRef.current !== message) {
+      toast.error(message);
+      if (storageErrorMessage(error)) {
+        const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : undefined;
+        void window.agent.reportSystemFailure({ code, message: error instanceof Error ? error.message : String(error) })
+          .catch((reportError) => console.warn('[AgentWorkspace] Failed to report storage failure:', reportError));
+      }
+    }
+    persistenceErrorRef.current = message;
+  }, []);
+  useEffect(() => { setPersistenceError(''); persistenceErrorRef.current = ''; }, [novelId]);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('context');
   const [reviewTarget, setReviewTarget] = useState<'draft' | 'report'>('report');
   const [selectedReviewRunId, setSelectedReviewRunId] = useState<string | null>(null);
@@ -761,7 +792,20 @@ function AgentWorkspace({
     Object.fromEntries(initialConversations.map((conversation) => [conversation.id, conversation.composerDraft ?? '']))
   ));
   const [agentSkills, setAgentSkills] = useState<AgentSkillIndexEntry[]>([]);
+  const [agentSkillsLoading, setAgentSkillsLoading] = useState(false);
+  const [agentSkillsError, setAgentSkillsError] = useState('');
+  const agentSkillsRequestRef = useRef(0);
+  const agentSkillCatalogCacheRef = useRef(new AgentSkillCatalogCache<{
+    skills: AgentSkillIndexEntry[] | null;
+    packs: AgentSkillMenuPack[] | null;
+    preference: Awaited<ReturnType<typeof window.agent.skillPackDefault>> | null;
+    error: string;
+  }>());
   const [agentSkillModes, setAgentSkillModes] = useState<Record<string, AgentSkillComposerMode | undefined>>({});
+  const [agentPacks, setAgentPacks] = useState<AgentSkillMenuPack[]>([]);
+  const [skillVisibilityTarget, setSkillVisibilityTarget] = useState<SkillVisibilityTarget | null>(null);
+  const [skillDeleteTarget, setSkillDeleteTarget] = useState<SkillVisibilityTarget | null>(null);
+  const [packDefault, setPackDefault] = useState<{packId: string | null; version: number; enabled?: boolean; legacyBindings?: boolean}>({packId: null, version: 0});
   const [dismissedSkillSlashQuery, setDismissedSkillSlashQuery] = useState<AgentSkillSlashQuery | null>(null);
   const [activeSkillMenuIndex, setActiveSkillMenuIndex] = useState(0);
   const [userInputCardDrafts, setUserInputCardDrafts] = useState<Record<string, UserInputCardDraft>>({});
@@ -828,8 +872,8 @@ function AgentWorkspace({
     [activeConversationId, input],
   );
   const agentSkillMenuItems = useMemo(
-    () => buildAgentSkillMenuItems(agentSkills, agentSkillSlashQuery?.query ?? ''),
-    [agentSkillSlashQuery?.query, agentSkills],
+    () => buildAgentSkillMenuItems(agentSkills, agentSkillSlashQuery?.query ?? '', agentPacks),
+    [agentSkillSlashQuery?.query, agentSkills, agentPacks],
   );
   const agentSkillMenuOpen = Boolean(
     shouldOpenAgentSkillSlashMenu(agentSkillSlashQuery, dismissedSkillSlashQuery)
@@ -853,11 +897,7 @@ function AgentWorkspace({
     setInput(nextInput);
     setAgentSkillModes((current) => ({
       ...current,
-      [activeConversationId]: item.kind === 'none'
-        ? { kind: 'skill.none' }
-        : item.kind === 'author'
-          ? { kind: 'skill.author' }
-          : { kind: 'skill.use', skill: item.skill },
+      [activeConversationId]: selectAgentSkillMode(current[activeConversationId], item),
     }));
     setDismissedSkillSlashQuery(null);
     window.setTimeout(() => {
@@ -885,6 +925,7 @@ function AgentWorkspace({
   }, [composerDrafts]);
 
   const flushComposerDrafts = useCallback(async (drafts = composerDraftsRef.current) => {
+    if (!conversationsLoadedRef.current) return;
     const changed = Object.entries(drafts).filter(([conversationId, draft]) => (
       persistedComposerDraftsRef.current[conversationId] !== draft
     ));
@@ -897,10 +938,13 @@ function AgentWorkspace({
     }));
   }, []);
 
+  useEffect(() => window.backup.onFlush(() => flushComposerDrafts()), [flushComposerDrafts]);
+
   useEffect(() => {
     const flushBeforeUnload = () => {
       void flushComposerDrafts().catch((error) => {
         console.warn('[AgentWorkspace] Failed to flush composer drafts:', error);
+        reportPersistenceError(error);
       });
     };
     window.addEventListener('beforeunload', flushBeforeUnload);
@@ -908,7 +952,7 @@ function AgentWorkspace({
       window.removeEventListener('beforeunload', flushBeforeUnload);
       flushBeforeUnload();
     };
-  }, [flushComposerDrafts, novelId]);
+  }, [flushComposerDrafts, novelId, reportPersistenceError]);
 
   useEffect(() => {
     try {
@@ -1531,6 +1575,7 @@ function AgentWorkspace({
   useEffect(() => {
     let cancelled = false;
     const shouldShowLoader = loadedConversationNovelIdRef.current !== novelId;
+    let loadSucceeded = false;
     conversationsLoadedRef.current = false;
     if (shouldShowLoader) setIsConversationsLoading(true);
     setConversationSearch('');
@@ -1567,10 +1612,12 @@ function AgentWorkspace({
         persistedComposerDraftsRef.current = nextDrafts;
         setComposerDrafts(nextDrafts);
         setActiveConversationId(nextActiveConversationId);
+        loadSucceeded = true;
       } catch (err) {
         console.warn('[AgentWorkspace] Failed to load agent conversations:', err);
         const fallback = createSeedConversations(novelId, currentChapter);
         if (cancelled) return;
+        reportPersistenceError(err, 'load');
         const fallbackDrafts = Object.fromEntries(fallback.map((conversation) => [conversation.id, '']));
         setConversations(fallback);
         persistedComposerDraftsRef.current = fallbackDrafts;
@@ -1578,8 +1625,8 @@ function AgentWorkspace({
         setActiveConversationId(readActiveConversationId(novelId) ?? fallback[0]?.id ?? 'conv-current-chapter-review');
       } finally {
         if (!cancelled) {
-          conversationsLoadedRef.current = true;
-          loadedConversationNovelIdRef.current = novelId;
+          conversationsLoadedRef.current = loadSucceeded;
+          loadedConversationNovelIdRef.current = loadSucceeded ? novelId : null;
           if (shouldShowLoader) setIsConversationsLoading(false);
         }
       }
@@ -1588,7 +1635,7 @@ function AgentWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [novelId]);
+  }, [novelId, reportPersistenceError]);
 
   useEffect(() => {
     if (!conversationsLoadedRef.current) return;
@@ -1603,9 +1650,10 @@ function AgentWorkspace({
         )));
       } catch (err) {
         console.warn('[AgentWorkspace] Failed to save agent conversations:', err);
+        reportPersistenceError(err);
       }
     })();
-  }, [conversations, novelId]);
+  }, [conversations, novelId, reportPersistenceError]);
 
   useEffect(() => {
     if (!conversationsLoadedRef.current) return undefined;
@@ -1616,10 +1664,11 @@ function AgentWorkspace({
     const timer = window.setTimeout(() => {
       void flushComposerDrafts(changed).catch((error) => {
         console.warn('[AgentWorkspace] Failed to persist composer drafts:', error);
+        reportPersistenceError(error);
       });
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [composerDrafts, flushComposerDrafts]);
+  }, [composerDrafts, flushComposerDrafts, reportPersistenceError]);
 
   const updateConversation = useCallback((
     conversationId: string,
@@ -1782,6 +1831,7 @@ function AgentWorkspace({
           failureRevision: status.failureRevision,
           completionKind: status.completionKind,
           recovery: status.recovery,
+                  failure: status.failure,
         };
         return {
           ...withCurrentRun(conversation, nextRun),
@@ -1793,6 +1843,47 @@ function AgentWorkspace({
       console.warn('[AgentWorkspace] Failed to reconcile live Agent runs:', error);
     });
   }, [isVisible]);
+
+  // SSE heartbeats only prove transport liveness. Reconcile terminal state even
+  // when the worker exits without a persisted event; never infer failure by age.
+  useEffect(() => {
+    let disposed = false;
+    let polling = false;
+    const poll = async () => {
+      if (polling || disposed) return;
+      const runs = conversationsRef.current.filter((item) => item.run &&
+        ['running', 'cancelling', 'waiting_approval', 'waiting_user_input'].includes(item.run.status));
+      if (!runs.length) return;
+      polling = true;
+      try {
+        await Promise.all(runs.map(async (item) => {
+          try {
+            const status = await window.agent.runStatus({ runId: item.run!.runId });
+            if (disposed || !['completed', 'failed', 'cancelled'].includes(status.status)) return;
+            updateConversation(item.id, (current) => {
+              if (current.run?.runId !== status.runId || !['running', 'cancelling', 'waiting_approval', 'waiting_user_input'].includes(current.run.status)) return current;
+              const nextRun = reconcileTerminalRunStatus(current.run, {
+                ...status, pendingApproval: null, pendingUserInput: null,
+                progress: status.status === 'completed' ? 1 : current.run.progress,
+              });
+              const next = withCurrentRun(current, nextRun);
+              const plan = next.plan && status.status === 'failed' ? { ...next.plan,
+                steps: next.plan.steps.map((step) => step.stepId === current.run!.currentStepId
+                  && !['completed', 'skipped'].includes(step.status) ? { ...step, status: 'failed' as const } : step),
+              } : next.plan;
+              return { ...next, plan, pendingUserInput: null, error: status.failure?.message ?? current.error };
+            });
+            if (activeRunIdRef.current === status.runId) setIsWorking(false);
+          } catch (error) {
+            if (!disposed && storageErrorMessage(error)) reportPersistenceError(error);
+          }
+        }));
+      } finally { polling = false; }
+    };
+    const timer = window.setInterval(() => { void poll(); }, 5000);
+    void poll();
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [novelId, updateConversation, reportPersistenceError]);
 
   const changeChapterScope = useCallback((selection: AgentChapterScopeSelection) => {
     const snapshot: AgentChapterScopeSelection = {
@@ -2006,15 +2097,98 @@ function AgentWorkspace({
     }
   }, [contextPayload, locale]);
 
-  const refreshAgentSkills = useCallback(async () => {
+  const refreshAgentSkills = useCallback(async (force = true) => {
+    const key = JSON.stringify([novelId, locale]);
+    const cache = agentSkillCatalogCacheRef.current;
+    if (force) cache.clear();
+    const request = ++agentSkillsRequestRef.current;
+    setAgentSkillsLoading(cache.peek(key) === undefined);
+    setAgentSkillsError('');
     try {
-      const skills = await window.agent.skills({ novelId, locale, context: contextPayload });
-      setAgentSkills(skills.filter((skill) => skill.enabled));
+      const catalog = await cache.load(key, async () => {
+        const [skills, packs, preference] = await Promise.allSettled([
+          window.agent.skills({ novelId, locale }),
+          window.agent.skillPacks({ novelId }),
+          window.agent.skillPackDefault({ novelId }),
+        ]);
+        const errors = [];
+        if (skills.status === 'rejected') errors.push('Skill 列表加载失败，请重试。');
+        if (packs.status === 'rejected') errors.push('文风包列表加载失败；单个 Skill 仍可使用，请重试。');
+        if (preference.status === 'rejected') errors.push('本书文风默认暂时无法读取，请重试。');
+        return {
+          skills: skills.status === 'fulfilled' ? skills.value : null,
+          packs: packs.status === 'fulfilled' ? packs.value : null,
+          preference: preference.status === 'fulfilled' ? preference.value : null,
+          error: errors.join(' '),
+        };
+      }, value => !value.error);
+      if (request !== agentSkillsRequestRef.current) return;
+      const {skills, packs, preference} = catalog;
+      if (skills) {
+        setAgentSkills(skills.filter((skill) => skill.enabled));
+        setAgentSkillModes(current => Object.fromEntries(Object.entries(current).map(([id, mode]) => {
+          let next = mode;
+          for (const skill of selectedAgentSkills(mode)) if (skill.scope !== 'builtin' && !skills.some(s => s.id === skill.id)) next = removeSelectedAgentSkill(next, skill.id);
+          return [id, next];
+        })));
+      } else setAgentSkills(current => current.filter(skill => skill.scope === 'builtin'));
+      if (packs) {
+        setAgentPacks(packs.map(p => ({ ...p, entryType: 'pack' })));
+        setAgentSkillModes(current => Object.fromEntries(Object.entries(current).map(([id, mode]) => [id,
+          mode?.kind === 'skill.pack.use' && !packs.some(p => p.id === mode.pack.id) ? undefined : mode])));
+      }
+      if (preference) setPackDefault(preference);
+      setAgentSkillsError(catalog.error);
     } catch (err) {
+      if (request !== agentSkillsRequestRef.current) return;
       console.warn('[AgentWorkspace] Failed to load Agent Skills:', err);
-      setAgentSkills([]);
+      setAgentSkills(current => current.filter(skill => skill.scope === 'builtin'));
+      setAgentSkillsError('Skill 列表加载失败，请重试。');
+    } finally {
+      if (request === agentSkillsRequestRef.current) setAgentSkillsLoading(false);
     }
-  }, [contextPayload, locale, novelId]);
+  }, [locale, novelId]);
+
+  useEffect(() => { if (isVisible) void refreshAgentSkills(false); }, [isVisible, refreshAgentSkills]);
+
+  useEffect(() => { setAgentPacks([]); setPackDefault({packId: null, version: 0}); setAgentSkillModes({}); setSkillVisibilityTarget(null); setSkillDeleteTarget(null); }, [novelId]);
+  useEffect(() => window.automation?.onDataChanged?.(({method}) => {
+    if (method === 'agent_skill.delete') void refreshAgentSkills();
+  }), [refreshAgentSkills]);
+  useEffect(() => {
+    const manage = (event: Event) => setSkillVisibilityTarget((event as CustomEvent<SkillVisibilityTarget>).detail);
+    window.addEventListener('agent-skill-manage', manage);
+    return () => window.removeEventListener('agent-skill-manage', manage);
+  }, []);
+  useEffect(() => {
+    const selectPack = (event: Event) => {
+      const pack = (event as CustomEvent<AgentSkillMenuPack>).detail;
+      if (!pack?.available || (pack.scope === 'novel' && pack.ownerNovelId !== novelId)) return;
+      setAgentSkillModes(current => ({...current, [activeConversationId]: {kind: 'skill.pack.use', pack, auxiliaryMode: 'default'}}));
+      chatInputRef.current?.focus();
+    };
+    window.addEventListener('agent-skill-pack-selected', selectPack);
+    return () => window.removeEventListener('agent-skill-pack-selected', selectPack);
+  }, [activeConversationId, novelId]);
+
+  const setDefaultPack = async (pack: AgentSkillMenuPack | null) => {
+    try {
+      const saved = await window.agent.setSkillPackDefault({novelId, packId: pack?.id || null, revisionId: pack?.revisionId, expectedVersion: packDefault.version});
+      setPackDefault(saved);
+      toast.success(pack ? '已设为本书 Agent 默认文风包' : '已取消本书默认文风包');
+    } catch { toast.error('默认设置未保存，可能已在其他位置变更，请重新加载后再设置。'); }
+    await refreshAgentSkills();
+  };
+
+  const openSkillDeletion = (target: SkillVisibilityTarget) => {
+    if (isWorking) {toast.error('请先结束当前任务再删除 Skill。'); return;}
+    setSkillVisibilityTarget(null);
+    setSkillDeleteTarget(target);
+  };
+
+  useEffect(() => {
+    if (isVisible && agentSkillMenuOpen) void refreshAgentSkills(false);
+  }, [agentSkillMenuOpen, isVisible, refreshAgentSkills]);
 
   const ensureRuntimeReady = useCallback(async (forceRestart = false): Promise<AgentHealthResult> => {
     if (runtimeRecoveryRequestRef.current) return runtimeRecoveryRequestRef.current;
@@ -2073,6 +2247,22 @@ function AgentWorkspace({
     toast.error(result.message || 'Runtime 恢复失败');
   }, [ensureRuntimeReady, isRuntimeRecoveryPending, refreshAgentSkills, refreshRoles]);
 
+  useEffect(() => {
+    const run = activeConversation?.run;
+    if (!run || run.status !== 'failed') return;
+    const conversationId = activeConversation.id;
+    let abandoned = false;
+    void window.agent.runStatus({ runId: run.runId }).then(status => {
+      if (abandoned) return;
+      updateConversation(conversationId, conversation => {
+        if (conversation.run?.runId !== run.runId || conversation.run.status !== 'failed') return conversation;
+        return withCurrentRun(conversation, { ...conversation.run, failureRevision: status.failureRevision,
+          recovery: status.recovery, failure: status.failure, completionKind: status.completionKind, artifacts: status.artifacts });
+      });
+    }).catch(error => console.warn('[AgentWorkspace] Failed to refresh completed-result recovery', error));
+    return () => { abandoned = true; };
+  }, [activeConversation?.id, activeConversation?.run?.runId, activeConversation?.run?.status, health?.data?.availability, updateConversation]);
+
   const refreshAiSettings = useCallback(async () => {
     try {
       const settings = await window.ai.getSettings();
@@ -2109,7 +2299,7 @@ function AgentWorkspace({
   useEffect(() => {
     if (!isVisible) return;
     void refreshRoles();
-    void refreshAgentSkills();
+    void refreshAgentSkills(false);
     void refreshAiSettings();
   }, [isVisible, refreshAgentSkills, refreshAiSettings, refreshRoles]);
 
@@ -2336,6 +2526,7 @@ function AgentWorkspace({
                   failureRevision: status.failureRevision,
                   completionKind: status.completionKind,
                   recovery: status.recovery,
+                  failure: status.failure,
               }),
               pendingUserInput: status.pendingUserInput
                 ?? (status.status === 'waiting_user_input' ? conversation.pendingUserInput : null),
@@ -2671,19 +2862,21 @@ function AgentWorkspace({
     scrollToLatest();
   }, [contextPayload, scrollToLatest, subscribeRun, updateConversation]);
 
-  const retryFailedRun = useCallback(async (failedRun: AgentRun) => {
+  const retryFailedRun = useCallback(async (failedRun: AgentRun, mode: 'failed_node' | 'use_completed_results' | 'retry_unconfirmed_units' = failedRun.recovery?.blockedReason === 'unconfirmed_model_request' ? 'retry_unconfirmed_units' : 'failed_node') => {
     if (
       !activeConversation
       || isWorking
       || failedRun.status !== 'failed'
       || !failedRun.failureRevision
-      || (failedRun.recovery && !failedRun.recovery.canRecover)
+      || (mode === 'use_completed_results' ? !failedRun.recovery?.canFinalizeCompleted
+        : (failedRun.recovery && !failedRun.recovery.canRecover))
     ) return;
     const conversationId = activeConversation.id;
     setIsWorking(true);
     updateConversation(conversationId, (conversation) => ({ ...conversation, error: '' }));
     try {
-      await beginRetryRun(conversationId, failedRun);
+      await beginRetryRun(conversationId, failedRun, mode !== 'failed_node'
+        ? { failedRunId: failedRun.runId, expectedFailureRevision: failedRun.failureRevision, mode } : undefined);
     } catch (error) {
       setIsWorking(false);
       let latestStatus: AgentRunStatusResult | null = null;
@@ -2943,11 +3136,11 @@ function AgentWorkspace({
         if (messageOverride === undefined) persistedComposerDraftsRef.current[conversationId] = '';
       }
       if (selectedSkillMode?.kind === 'skill.author') {
-        const novelScoped = /(?:本小说|当前小说|本项目|novel[- ]?scoped)/iu.test(message);
+        const novelScoped = selectedSkillMode.publicationScope !== 'user';
         const authored = await window.agent.authorSkill({
           goal: message.replace(/^创建一个\s*Skill\s*[：:]?\s*/iu, '').trim() || message,
           scope: novelScoped ? 'novel' : 'user',
-          ...(novelScoped ? { novelId } : {}),
+          novelId,
           locale,
           context: contextPayload,
         }) as {
@@ -2958,21 +3151,21 @@ function AgentWorkspace({
           validationReport?: { errorCount?: number };
         };
         if (authored.requiresReview === false || authored.needsAttention) {
-          const errorCount = Number(authored.validationReport?.errorCount || 0);
           appendMessage(conversationId, {
             role: 'assistant',
             kind: 'workflow_notice',
-            content: `Skill 文档已保留为可继续修改的草稿，但尚未通过校验${errorCount ? `（${errorCount} 项待处理）` : ''}。它不会参与任务，也不能发布；草稿 ID：\`${authored.draft?.id || 'unknown'}\`。`,
+            skillDraftId: authored.draft?.id,
+            content: '技能内容已保留。软件会整理保存格式，你可以在下方预览、修改并确认保存。',
           });
           clearPendingStatus(conversationId);
           return;
         }
         const title = authored.proposal?.definition?.title || '未命名 Skill';
-        const stableId = authored.proposal?.definition?.stableId;
         appendMessage(conversationId, {
           role: 'assistant',
           kind: 'workflow_notice',
-          content: `已生成“${title}”的可审核草稿${stableId ? `（\`${stableId}\`）` : ''}。当前尚未发布，也不会参与任务；确认后才会创建不可变 Revision。草稿 ID：\`${authored.draft?.id || 'unknown'}\`。`,
+          skillDraftId: authored.draft?.id,
+          content: `已生成“${title}”的技能内容。请在下方预览，确认满意后保存 Skill。`,
         });
         clearPendingStatus(conversationId);
         return;
@@ -3104,6 +3297,10 @@ function AgentWorkspace({
     } catch (err) {
       clearPendingStatus(conversationId);
       setLiveChatActivities((current) => current?.conversationId === conversationId ? null : current);
+      if (selectedSkillMode?.kind === 'skill.pack.use') {
+        setAgentSkillModes(current => ({...current, [conversationId]: current[conversationId] || selectedSkillMode}));
+        setComposerDrafts(current => { const next = {...current, [conversationId]: current[conversationId] || message}; composerDraftsRef.current = next; return next; });
+      }
       if (!activeChatRequestRef.current?.cancelled && !isCancelledError(err)) {
         const failure = chatFailureFromError(err);
         const exhaustedManualRepair = Boolean(recoveryOptions?.repair);
@@ -3815,18 +4012,24 @@ function AgentWorkspace({
     ));
     try {
       const nextRun = await window.agent.cancel({ runId });
-      updateConversation(conversationId, (conversation) => (
-        conversation.run?.runId === runId
-          ? withCurrentRun(conversation, {
-            ...conversation.run,
-            status: nextRun.status,
-            cancelRequested: nextRun.status === 'cancelling' || nextRun.status === 'cancelled',
-          })
-          : conversation
-      ));
+      updateConversation(conversationId, (conversation) => {
+        if (conversation.run?.runId !== runId) return conversation;
+        // A late cancel response must not overwrite a terminal SSE/poll result.
+        if (['completed', 'failed', 'cancelled'].includes(conversation.run.status)
+          && !['completed', 'failed', 'cancelled'].includes(nextRun.status)) return conversation;
+        return { ...withCurrentRun(conversation, {
+          ...conversation.run, status: nextRun.status, failure: nextRun.failure,
+          recovery: nextRun.recovery, failureRevision: nextRun.failureRevision,
+          pendingApproval: nextRun.pendingApproval, pendingUserInput: nextRun.pendingUserInput,
+          cancelRequested: nextRun.cancelRequested,
+        }), error: nextRun.failure?.message ?? conversation.error };
+      });
+      if (['completed', 'failed', 'cancelled'].includes(nextRun.status)) setIsWorking(false);
       return true;
     } catch (err) {
       updateConversation(conversationId, (conversation) => {
+        if (conversation.run?.runId !== runId) return conversation;
+        if (conversation.run?.runId === runId && ['completed', 'failed', 'cancelled'].includes(conversation.run.status)) return conversation;
         const restored = conversation.run?.runId === runId
           ? withCurrentRun(conversation, { ...conversation.run, status: previousStatus, cancelRequested: false })
           : conversation;
@@ -3936,7 +4139,7 @@ function AgentWorkspace({
                 >
                   {runtimeHealth.tone === 'loading' && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
                   <span className="truncate">{runtimeHealth.text}</span>
-                  {runtimeHealth.tone === 'failed' && health?.data?.canManualRetry && (
+                  {['failed', 'slow'].includes(runtimeHealth.tone) && health?.data?.canManualRetry && (
                     <button
                       type="button"
                       className={clsx(
@@ -3945,8 +4148,8 @@ function AgentWorkspace({
                       )}
                       onClick={() => void retryRuntime()}
                       disabled={isRuntimeRecoveryPending}
-                      title="重试 Runtime"
-                      aria-label="重试 Runtime"
+                      title="重启执行服务，运行中的任务将停止"
+                      aria-label="重启执行服务"
                     >
                       <RotateCcw className="h-3 w-3" />
                     </button>
@@ -4139,10 +4342,11 @@ function AgentWorkspace({
               }
               if (entry.kind === 'message') {
                 const message = entry.message as ConversationMessage;
+                const skillDraftId = skillDraftIdFromNotice(message);
                 return (
                   <Fragment key={entry.key}>
                     <MessageBubble
-                      message={message}
+                      message={skillDraftId ? { ...message, content: '这次生成的技能内容保存在下方。可以查看当前内容和保存状态。' } : message}
                       attachments={attachments.filter((attachment) => message.attachmentIds?.includes(attachment.id))}
                       isDark={isDark}
                       onOpenAttachment={openAttachment}
@@ -4154,6 +4358,9 @@ function AgentWorkspace({
                         if (source) void sendChat(source.content);
                       }}
                     />
+                    {skillDraftId && (
+                      <SkillDraftReviewCard draftId={skillDraftId} novelId={novelId} isDark={isDark} onPublished={refreshAgentSkills} />
+                    )}
                     {message.role === 'assistant' && message.activities && message.activities.length > 0 && (
                       <ChatActivityCard activities={message.activities} isDark={isDark} />
                     )}
@@ -4267,6 +4474,7 @@ function AgentWorkspace({
                       interactive={isActiveTask}
                       isWorking={isWorking}
                       onRetry={() => void retryFailedRun(timelineRun)}
+                      onFinalizeCompleted={() => void retryFailedRun(timelineRun, 'use_completed_results')}
                       onReplan={() => prepareFailedRunReplan(timelinePlan)}
                     />
                   ) : null}
@@ -4392,6 +4600,11 @@ function AgentWorkspace({
               />
             )}
 
+              {persistenceError && (
+                <div role="alert" className="rounded-lg border border-red-400 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {persistenceError}
+                </div>
+              )}
               {activeError && !(activeRun?.status === 'failed' && activeRun.events.some((event) => event.type === 'run_failed')) && (
                 <div className={clsx('rounded-lg border px-3 py-2 text-sm flex gap-2', isDark ? 'border-red-500/30 bg-red-500/10 text-red-200' : 'border-red-200 bg-red-50 text-red-700')}>
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -4421,13 +4634,37 @@ function AgentWorkspace({
           <div className={clsx('relative mx-auto max-w-[880px] rounded-lg border p-2', isDark ? 'border-white/10 bg-black/20' : 'border-[var(--ui-border)] bg-white')}>
             {agentSkillMenuOpen && agentSkillSlashQuery && (
               <AgentSkillSlashMenu
+                packs={agentPacks}
+                selectedSkillIds={selectedAgentSkills(activeAgentSkillMode).map(skill => skill.id)}
                 skills={agentSkills}
                 query={agentSkillSlashQuery.query}
                 activeItem={agentSkillMenuItems[activeSkillMenuIndex]}
                 isDark={isDark}
+                loading={agentSkillsLoading}
+                error={agentSkillsError}
+                onRetry={() => { void refreshAgentSkills(); }}
                 onSelect={selectAgentSkillMenuItem}
+                onManage={(item, view) => {
+                  const target: SkillVisibilityTarget = {targetType: 'entryType' in item ? 'pack' : 'skill', targetId: item.id, title: item.title, builtin: item.scope === 'builtin', supportedOperations: item.supportedOperations, allowedRoles: item.allowedRoles};
+                  if (view === 'delete') openSkillDeletion(target);
+                  else setSkillVisibilityTarget({...target, initialView: view});
+                }}
               />
             )}
+            {skillVisibilityTarget && <SkillVisibilityDialog target={skillVisibilityTarget} novelId={novelId} isDark={isDark}
+              onClose={() => {setSkillVisibilityTarget(null); chatInputRef.current?.focus();}}
+              onDelete={openSkillDeletion}
+              onChanged={async result => {await refreshAgentSkills(); toast.success(result?.copied ? `已另存 ${result.title}，原对象与引用保留。` : '可见范围已修改，方法正文保留。');}} />}
+            {skillDeleteTarget && <SkillDeleteDialog target={skillDeleteTarget} isDark={isDark}
+              onClose={() => {setSkillDeleteTarget(null); requestAnimationFrame(() => chatInputRef.current?.focus());}}
+              onDeleted={async result => {
+                setAgentSkillModes(current => Object.fromEntries(Object.entries(current).map(([id, mode]) => [id,
+                  mode?.kind === 'skill.pack.use' && mode.pack.id === result.targetId ? undefined : removeSelectedAgentSkill(mode, result.targetId)])));
+                if (result.targetType === 'pack') setAgentPacks(current => current.filter(pack => pack.id !== result.targetId));
+                else setAgentSkills(current => current.filter(skill => skill.id !== result.targetId));
+                toast.success('已删除，历史版本与草稿保留。');
+                await refreshAgentSkills();
+              }} />}
             {pendingAttachments.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-1.5 px-1">
                 {pendingAttachments.map((attachment) => (
@@ -4455,22 +4692,35 @@ function AgentWorkspace({
                 ))}
               </div>
             )}
-            {activeAgentSkillMode && (
+            {!activeAgentSkillMode && (packDefault.packId || packDefault.legacyBindings) && <div className="mb-2 flex items-center gap-2 px-1 text-xs">
+              <span>{packDefault.packId ? `本书默认文风包：${agentPacks.find(p => p.id === packDefault.packId)?.title || '已设置'}${packDefault.enabled === false ? '（待启用）' : ''}` : '旧版文风绑定：可选择一个包设为本书默认，避免混用'}</span>
+              {packDefault.packId && <button disabled={isWorking} type="button" onClick={() => void setDefaultPack(null)}>取消默认</button>}
+            </div>}
+            {activeAgentSkillMode?.kind === 'skill.use' && <SelectedSkillChips skills={selectedAgentSkills(activeAgentSkillMode)} isDark={isDark} disabled={isWorking || isRuntimeRecoveryPending}
+              onRemove={id => {setAgentSkillModes(current => ({...current, [activeConversationId]: removeSelectedAgentSkill(current[activeConversationId], id)})); requestAnimationFrame(() => chatInputRef.current?.focus());}}
+              onAdd={() => {const next = input + (input && !/\s$/.test(input) ? ' /' : '/'); setInput(next); setDismissedSkillSlashQuery(null); window.setTimeout(() => {chatInputRef.current?.focus(); chatInputRef.current?.setSelectionRange(next.length, next.length);}, 0);}}
+              onManage={skill => setSkillVisibilityTarget({targetType: 'skill', targetId: skill.id, title: skill.title, builtin: skill.scope === 'builtin', initialView: skill.scope === 'builtin' ? 'detail' : 'visibility', supportedOperations: skill.supportedOperations, allowedRoles: skill.allowedRoles})} />}
+            {activeAgentSkillMode && activeAgentSkillMode.kind !== 'skill.use' && (
               <div className="mb-1.5 flex flex-wrap gap-1.5 px-1">
                 <div className={clsx(
-                  'inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border px-2 text-xs',
+                  'max-w-full rounded-md border px-2 text-xs',
+                  activeAgentSkillMode.kind === 'skill.pack.use' ? 'w-full min-w-0 py-1.5' : 'inline-flex h-7 items-center',
                   activeAgentSkillMode.kind === 'skill.none'
                     ? isDark ? 'border-amber-400/20 bg-amber-400/10 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800'
                     : isDark ? 'border-[#2f80ed]/30 bg-[#2f80ed]/10 text-[#9cc8ff]' : 'border-[#b8d7ff] bg-[#eef6ff] text-[#1f6fca]',
                 )}>
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
                   <Sparkles className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">
+                  <span className="min-w-0 flex-1 truncate">
                     {activeAgentSkillMode.kind === 'skill.none'
                       ? '本次不使用 Skill'
                       : activeAgentSkillMode.kind === 'skill.author'
                         ? '创建 Skill · 生成审核草稿'
-                        : `${activeAgentSkillMode.skill.title} · v${activeAgentSkillMode.skill.version}`}
+                        : `文风包：${activeAgentSkillMode.pack.title} · v${activeAgentSkillMode.pack.version}`}
                   </span>
+                  {activeAgentSkillMode.kind === 'skill.pack.use' && activeAgentSkillMode.pack.schemaVersion === 1 && <span className="shrink-0 whitespace-nowrap text-amber-600" title="按原版本保存的任务绑定运行；不会自动改成新的语言核心组合。">旧版绑定</span>}
+                  {activeAgentSkillMode.kind === 'skill.pack.use' && <button type="button" aria-label="已选 Skill 的更多设置" className="grid h-7 w-7 shrink-0 place-items-center rounded hover:bg-black/10"
+                    onClick={() => {const entry = activeAgentSkillMode.pack; setSkillVisibilityTarget({targetType: 'pack', targetId: entry.id, title: entry.title, initialView: 'visibility', supportedOperations: entry.supportedOperations, allowedRoles: entry.allowedRoles});}}>⋯</button>}
                   <button
                     type="button"
                     className="grid h-5 w-5 shrink-0 place-items-center rounded hover:bg-black/10"
@@ -4480,9 +4730,27 @@ function AgentWorkspace({
                   >
                     <X className="h-3 w-3" />
                   </button>
+                  </div>
+                  {activeAgentSkillMode.kind === 'skill.pack.use' && <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+                    <select aria-label="本次辅助方法" value={activeAgentSkillMode.auxiliaryMode === 'member' ? activeAgentSkillMode.auxiliaryMemberKey : activeAgentSkillMode.auxiliaryMode}
+                      className="min-w-0 max-w-full flex-1 basis-40 rounded border border-current/20 bg-transparent px-1 py-0.5" disabled={isWorking}
+                      onChange={event => { const value = event.target.value; setAgentSkillModes(current => ({...current, [activeConversationId]: {
+                        ...activeAgentSkillMode, auxiliaryMode: value === 'default' || value === 'none' ? value : 'member', auxiliaryMemberKey: value === 'default' || value === 'none' ? undefined : value,
+                      }})); }}>
+                      <option value="default">按包默认辅助</option><option value="none">只用主成员</option>
+                      {activeAgentSkillMode.pack.members.filter(m => m.slot === 'auxiliary' || m.slot === 'legacy').map(m => <option key={m.memberKey} value={m.memberKey}>{m.title}</option>)}
+                    </select>
+                    <button className="shrink-0 whitespace-nowrap rounded px-1 py-0.5 hover:bg-black/10" disabled={isWorking} type="button" onClick={() => void setDefaultPack(activeAgentSkillMode.pack)}>设为本书默认</button>
+                  </div>}
                 </div>
               </div>
             )}
+            {activeAgentSkillMode && (activeAgentSkillMode.kind === 'skill.author' || activeAgentSkillMode.kind === 'skill.use' && selectedAgentSkills(activeAgentSkillMode).some(skill => skill.id === 'builtin.style-skill-extractor')) && <label className="mb-2 flex items-center gap-2 px-1 text-xs">保存范围
+              <select aria-label="新 Skill 保存范围" disabled={isWorking} value={activeAgentSkillMode.publicationScope || 'novel'} className={clsx('rounded border p-1', isDark ? 'border-white/15 bg-[#202124]' : 'border-[var(--ui-border)] bg-white')}
+                onChange={e => setAgentSkillModes(current => ({...current, [activeConversationId]: {...activeAgentSkillMode, publicationScope: e.target.value as 'novel' | 'user'}}))}>
+                <option value="novel">仅当前小说：{novel?.title || '请先选择小说'}</option><option value="user">所有小说可见</option>
+              </select>
+            </label>}
             <textarea
               ref={chatInputRef}
               value={input}
@@ -5443,7 +5711,7 @@ function PlanCard({
           {scopeLabel && (
             <div className="mt-2 flex flex-wrap gap-1.5">
               <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'bg-[#eef6ff] text-[#1f6fca]')}>初始上下文：{scopeLabel}</span>
-              <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>{scopedInput?.processingMode === 'batched' ? '分批处理' : '详细处理'}</span>
+              <span className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>{plan.steps.some((step) => step.toolchain?.id === 'agent_skill.style_extract') ? '自适应原文分析' : scopedInput?.processingMode === 'batched' ? '摘要／摘录上下文' : '详细上下文'}</span>
               {scopeExperts.map((expert) => <span key={expert} className={clsx('rounded px-1.5 py-0.5 text-[11px]', isDark ? 'bg-white/10 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>{expert}</span>)}
             </div>
           )}
@@ -5496,6 +5764,9 @@ function PlanCard({
                     <span className="opacity-65">· {skill.selectionSource}</span>
                   </span>
                 ))}
+                {step.skillPackSelection && <span className="text-xs text-violet-600">
+                  文风包：{step.skillPackSelection.title} v{step.skillPackSelection.version} · {step.skillPackSelection.applicable ? (step.skillPackSelection.source === 'novel_default' ? '本书默认' : '本次选择') : '此步骤不适用'} · 辅助：{step.skillPackSelection.auxiliaryMode === 'none' ? '未使用' : step.skillPackSelection.auxiliaryMode === 'member' ? '本次指定' : '按包绑定'}
+                </span>}
               </div>
               {targetLabel && (
                 <div className={clsx('mt-2 text-xs', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-secondary)]')}>
@@ -5673,6 +5944,7 @@ function AgentActivityStream({
   interactive,
   isWorking,
   onRetry,
+  onFinalizeCompleted,
   onReplan,
 }: {
   run: AgentRun;
@@ -5682,6 +5954,7 @@ function AgentActivityStream({
   interactive: boolean;
   isWorking: boolean;
   onRetry: () => void;
+  onFinalizeCompleted?: () => void;
   onReplan: () => void;
 }) {
   const projection = useMemo(() => projectAgentActivity(run), [run]);
@@ -5729,6 +6002,8 @@ function AgentActivityStream({
       || (projection.retry?.phase === 'exhausted' && projection.retry.retryable)
     );
   const canRetry = retryableFailure && interactive;
+  const canFinalizeCompleted = run.status === 'failed' && Boolean(run.failureRevision)
+    && run.recovery?.canFinalizeCompleted && interactive && Boolean(onFinalizeCompleted);
   const retryActionLabel = run.recovery?.actionLabel || '重试失败步骤';
   const completedSteps = plan.steps.filter((step) => step.status === 'completed' || step.status === 'skipped').length;
   const totalActivitySteps = plan.steps.length + (projection.retry?.stage === '整理最终回答' ? 1 : 0);
@@ -5756,7 +6031,9 @@ function AgentActivityStream({
       {retryableFailure && (
         <div className={clsx('border-t px-3 pb-3 pt-2.5', isDark ? 'border-white/10' : 'border-[#f0dedb]')}>
           <p className={clsx('text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
-            已完成的检查结果会保留，继续时将从失败步骤恢复。
+            {run.recovery?.blockedReason === 'unconfirmed_model_request'
+              ? '未确认请求的返回结果尚未核对。点击重新请求会先核对已保存返回，找不到时重新请求对应分片，可能重复计费。已完成结果继续保留。'
+              : '已完成的检查结果会保留，继续时将从失败步骤恢复。'}
           </p>
           <div className={clsx('mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md px-2.5 py-2 text-xs', isDark ? 'bg-black/20 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
             <span>已完成 {completedSteps}/{totalActivitySteps}</span>
@@ -5783,6 +6060,18 @@ function AgentActivityStream({
               </button>
             </div>
           )}
+        </div>
+      )}
+
+      {canFinalizeCompleted && (
+        <div className={clsx('border-t px-3 py-3', isDark ? 'border-white/10' : 'border-[#f0dedb]')}>
+          <p className={clsx('mb-2 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
+            使用已完成且核验通过的分析生成产物，跳过剩余分析，并标注实际覆盖范围。
+          </p>
+          <button type="button" onClick={onFinalizeCompleted} disabled={isWorking}
+            className={clsx('min-h-9 rounded-md border px-3 text-sm disabled:opacity-50', isDark ? 'border-white/15 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
+            仅用已完成结果收尾
+          </button>
         </div>
       )}
 
@@ -5850,317 +6139,6 @@ function ActivityDetailRow({ detail, isDark, isLast }: { detail: ActivityDetail;
     </div>
   );
 }
-
-type LegacyUserInputDraftAnswer = {
-  answerKind: 'option' | 'custom';
-  selectedOptionId: string;
-  customText: string;
-};
-
-function legacyDefaultUserInputAnswers(request: AgentUserInputRequest): Record<string, LegacyUserInputDraftAnswer> {
-  return Object.fromEntries(request.questions.map((question) => [question.questionId, {
-    answerKind: 'option' as const,
-    selectedOptionId: question.options[0]?.optionId ?? '',
-    customText: '',
-  }]));
-}
-
-function LegacyUserInputRequiredCard({
-  request,
-  isDark,
-  isWorking,
-  onSubmit,
-}: {
-  request: AgentUserInputRequest;
-  isDark: boolean;
-  isWorking: boolean;
-  onSubmit: (answers: AgentUserInputAnswer[]) => void;
-}) {
-  const [questionIndex, setQuestionIndex] = useState(0);
-  const [answers, setAnswers] = useState<Record<string, LegacyUserInputDraftAnswer>>(() => legacyDefaultUserInputAnswers(request));
-  useEffect(() => {
-    setQuestionIndex(0);
-    setAnswers(legacyDefaultUserInputAnswers(request));
-  }, [request.requestId]);
-
-  const question = request.questions[questionIndex];
-  if (!question) return null;
-  const answer = answers[question.questionId] ?? {
-    answerKind: 'option' as const,
-    selectedOptionId: question.options[0]?.optionId ?? '',
-    customText: '',
-  };
-  const currentValid = answer.answerKind === 'custom'
-    ? Boolean(answer.customText.trim())
-    : Boolean(answer.selectedOptionId);
-  const allValid = request.questions.every((item) => {
-    const value = answers[item.questionId];
-    return value?.answerKind === 'custom' ? Boolean(value.customText.trim()) : Boolean(value?.selectedOptionId);
-  });
-  const isLast = questionIndex === request.questions.length - 1;
-  const selectOption = (optionId: string) => {
-    setAnswers((current) => ({
-      ...current,
-      [question.questionId]: { answerKind: 'option', selectedOptionId: optionId, customText: '' },
-    }));
-  };
-  const selectCustom = () => {
-    setAnswers((current) => ({
-      ...current,
-      [question.questionId]: { answerKind: 'custom', selectedOptionId: '', customText: current[question.questionId]?.customText ?? '' },
-    }));
-  };
-  const submit = () => {
-    if (!allValid || isWorking) return;
-    onSubmit(request.questions.map((item): AgentUserInputAnswer => {
-      const value = answers[item.questionId];
-      return value.answerKind === 'custom'
-        ? { questionId: item.questionId, answerKind: 'custom', customText: value.customText.trim() }
-        : { questionId: item.questionId, answerKind: 'option', selectedOptionId: value.selectedOptionId };
-    }));
-  };
-
-  return (
-    <div className={clsx('rounded-lg border p-4', isDark ? 'border-[#2f80ed]/40 bg-[#2f80ed]/10' : 'border-[#b8d7ff] bg-[#f3f8ff]')}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className={clsx('inline-flex items-center gap-2 rounded-full px-2 py-1 text-xs font-semibold text-white', isDark ? 'bg-[#1f2328]' : 'bg-indigo-600')}>
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            需要你决定
-          </div>
-          <div className="mt-3 text-base font-semibold">{request.title}</div>
-          <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{request.reason}</p>
-          {request.evidence.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {request.evidence.map((item) => (
-                <span key={item.evidenceId} className={clsx('rounded px-2 py-1 text-[11px]', isDark ? 'bg-white/10 text-neutral-300' : 'border border-[#d8e8ff] bg-white text-[var(--ui-text-muted)]')}>
-                  已读取：{item.title}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-        <span className={clsx('shrink-0 rounded px-2 py-1 text-xs tabular-nums', isDark ? 'bg-white/10 text-neutral-300' : 'border border-[#d8e8ff] bg-white text-[var(--ui-text-muted)]')}>
-          {questionIndex + 1} / {request.questions.length}
-        </span>
-      </div>
-
-      <div className="mt-4">
-        <div className={clsx('text-xs font-semibold', isDark ? 'text-[#76b7ff]' : 'text-indigo-600')}>{question.header}</div>
-        <p className="mt-1 text-sm font-medium leading-6">{question.prompt}</p>
-        <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-          推荐理由：{question.recommendationReason}
-        </p>
-      </div>
-
-      <div className="mt-3 space-y-2">
-        {question.options.map((option, optionIndex) => {
-          const selected = answer.answerKind === 'option' && answer.selectedOptionId === option.optionId;
-          return (
-            <button
-              key={option.optionId}
-              type="button"
-              onClick={() => selectOption(option.optionId)}
-              className={clsx(
-                'w-full rounded-md border px-3 py-2 text-left transition-colors',
-                selected
-                  ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/20' : 'border-[#2f80ed] bg-white')
-                  : (isDark ? 'border-white/10 bg-black/20 hover:bg-white/5' : 'border-[#d8e8ff] bg-white/70 hover:bg-white'),
-              )}
-            >
-              <div className="flex items-start gap-3">
-                <span className={clsx('mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs', selected ? (isDark ? 'bg-[#2f80ed] text-white' : 'bg-indigo-600 text-white') : (isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'))}>
-                  {optionIndex + 1}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-2 text-sm font-medium">
-                    {option.label}
-                    {option.optionId === question.recommendedOptionId && (
-                      <span className={clsx('rounded px-1.5 py-0.5 text-[10px]', isDark ? 'bg-[#2f80ed]/30 text-[#9dccff]' : 'bg-indigo-50 text-indigo-700')}>推荐</span>
-                    )}
-                  </span>
-                  <span className={clsx('mt-0.5 block text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{option.description}</span>
-                </span>
-              </div>
-            </button>
-          );
-        })}
-
-        <div className={clsx('rounded-md border px-3 py-2', answer.answerKind === 'custom' ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/20' : 'border-[#2f80ed] bg-white') : (isDark ? 'border-white/10 bg-black/20' : 'border-[#d8e8ff] bg-white/70'))}>
-          <button type="button" onClick={selectCustom} className="flex w-full items-center gap-3 text-left">
-            <span className={clsx('grid h-6 w-6 place-items-center rounded-full text-xs', answer.answerKind === 'custom' ? (isDark ? 'bg-[#2f80ed] text-white' : 'bg-indigo-600 text-white') : (isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'))}>○</span>
-            <span className="text-sm font-medium">都不是，告诉我如何做</span>
-          </button>
-          {answer.answerKind === 'custom' && (
-            <textarea
-              autoFocus
-              value={answer.customText}
-              onChange={(event) => setAnswers((current) => ({
-                ...current,
-                [question.questionId]: { answerKind: 'custom', selectedOptionId: '', customText: event.target.value },
-              }))}
-              rows={3}
-              maxLength={4000}
-              placeholder="输入具体要求……"
-              className={clsx('mt-2 block w-full resize-none rounded-md border px-3 py-2 text-sm leading-6 outline-none', isDark ? 'border-white/10 bg-black/20 placeholder:text-neutral-600' : 'border-[#d8e8ff] bg-white placeholder:text-[var(--ui-text-disabled)]')}
-            />
-          )}
-        </div>
-      </div>
-
-      <div className="mt-4 flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={() => setQuestionIndex((current) => Math.max(0, current - 1))}
-          disabled={isWorking || questionIndex === 0}
-          className={clsx('h-9 rounded-md border px-3 text-sm disabled:opacity-40', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[#d8e8ff] bg-white text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-subtle)]')}
-        >
-          上一个问题
-        </button>
-        <button
-          type="button"
-          onClick={() => isLast ? submit() : setQuestionIndex((current) => Math.min(request.questions.length - 1, current + 1))}
-          disabled={isWorking || !currentValid || (isLast && !allValid)}
-          className={clsx('inline-flex h-9 items-center gap-2 rounded-md px-4 text-sm text-white disabled:opacity-50', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
-        >
-          {isWorking && isLast ? <Loader2 className="h-4 w-4 animate-spin" /> : isLast ? <Send className="h-4 w-4" /> : null}
-          {isLast ? '提交回答' : '下一个问题'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function LegacyUserInputResolutionCard({ resolution, isDark }: { resolution: AgentUserInputResolution; isDark: boolean }) {
-  const request = resolution.request;
-  return (
-    <div className={clsx('rounded-lg border p-4', isDark ? 'border-white/10 bg-white/[0.03]' : 'border-[var(--ui-border)] bg-white')}>
-      <div className="flex items-center gap-2 text-sm font-semibold">
-        <CheckCircle2 className={clsx('h-4 w-4', isDark ? 'text-[#76b7ff]' : 'text-indigo-600')} />
-        已提交 {resolution.answers.length} 个决定
-      </div>
-      <div className="mt-3 space-y-2">
-        {resolution.answers.map((answer, index) => {
-          const question = request?.questions.find((item) => item.questionId === answer.questionId);
-          const selected = answer.answerKind === 'custom'
-            ? answer.customText
-            : answer.answerKind === 'skipped'
-              ? '已跳过'
-              : question?.options.find((item) => item.optionId === answer.selectedOptionId)?.label ?? answer.selectedOptionId;
-          return (
-            <div key={answer.questionId} className={clsx('text-sm leading-6', isDark ? 'text-neutral-300' : 'text-[var(--ui-text-primary)]')}>
-              {index + 1}. {question?.header ?? answer.questionId}：{selected}
-            </div>
-          );
-        })}
-      </div>
-      <div className={clsx('mt-3 rounded-md px-3 py-2 text-sm leading-6', isDark ? 'bg-black/20 text-neutral-400' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]')}>
-        AI 理解：{resolution.understandingSummary}
-      </div>
-    </div>
-  );
-}
-
-function LegacyApprovalRequiredCard({
-  approval,
-  isDark,
-  isWorking,
-  onSubmit,
-}: {
-  approval: AgentApprovalRequest;
-  isDark: boolean;
-  isWorking: boolean;
-  onSubmit: (selectedOptionIds: string[], freeText: string) => void;
-}) {
-  const [selectedOptionId, setSelectedOptionId] = useState(approval.options[0]?.id ?? '');
-  const [freeText, setFreeText] = useState('');
-  useEffect(() => {
-    setSelectedOptionId(approval.options[0]?.id ?? '');
-    setFreeText('');
-  }, [approval.checkpointId]);
-
-  return (
-    <div className={clsx('rounded-lg border p-4', isDark ? 'border-[#2f80ed]/40 bg-[#2f80ed]/10' : 'border-[#b8d7ff] bg-[#f3f8ff]')}>
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className={clsx('inline-flex items-center gap-2 rounded-full px-2 py-1 text-xs font-semibold text-white', isDark ? 'bg-[#1f2328]' : 'bg-indigo-600')}>
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            需要你确认
-          </div>
-          <div className="mt-3 text-base font-semibold">{approval.title}</div>
-          <p className={clsx('mt-1 text-sm leading-6', isDark ? 'text-neutral-300' : 'text-[var(--ui-text-primary)]')}>{approval.question}</p>
-          {approval.reason && (
-            <p className={clsx('mt-2 text-sm leading-6', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{approval.reason}</p>
-          )}
-        </div>
-        <span className={clsx('rounded px-2 py-1 text-xs', isDark ? 'bg-white/10 text-neutral-300' : 'bg-white text-[var(--ui-text-muted)] border border-[#d8e8ff]')}>
-          等待回答
-        </span>
-      </div>
-      <div className="mt-4 space-y-2">
-        {approval.options.map((option, index) => (
-          <button
-            key={option.id}
-            type="button"
-            onClick={() => setSelectedOptionId(option.id)}
-            className={clsx(
-              'w-full rounded-md border px-3 py-2 text-left transition-colors',
-              selectedOptionId === option.id
-                ? (isDark ? 'border-[#2f80ed] bg-[#2f80ed]/20' : 'border-[#2f80ed] bg-white')
-                : (isDark ? 'border-white/10 bg-black/20 hover:bg-white/5' : 'border-[#d8e8ff] bg-white/70 hover:bg-white'),
-            )}
-          >
-            <div className="flex items-start gap-3">
-              <span className={clsx('mt-0.5 grid h-6 w-6 place-items-center rounded-full text-xs', selectedOptionId === option.id ? (isDark ? 'bg-[#1f2328] text-white' : 'bg-indigo-600 text-white') : (isDark ? 'bg-white/10 text-neutral-300' : 'bg-[var(--ui-surface-muted)] text-[var(--ui-text-muted)]'))}>
-                {index + 1}
-              </span>
-              <span className="min-w-0">
-                <span className="block text-sm font-medium">{option.label}</span>
-                {option.description && (
-                  <span className={clsx('mt-0.5 block text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>{option.description}</span>
-                )}
-              </span>
-            </div>
-          </button>
-        ))}
-      </div>
-      {approval.allowFreeText && (
-        <textarea
-          value={freeText}
-          onChange={(event) => setFreeText(event.target.value)}
-          rows={2}
-          placeholder="或者输入其他想法..."
-          className={clsx('mt-3 block w-full resize-none rounded-md border px-3 py-2 text-sm leading-6 outline-none', isDark ? 'border-white/10 bg-black/20 placeholder:text-neutral-600' : 'border-[#d8e8ff] bg-white placeholder:text-[var(--ui-text-disabled)]')}
-        />
-      )}
-      <div className="mt-3 flex items-center justify-end gap-2">
-        <button
-          type="button"
-          onClick={() => onSubmit([], '忽略该确认，按默认方案继续')}
-          disabled={isWorking}
-          className={clsx('h-9 px-3 rounded-md text-sm border disabled:opacity-50', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[#d8e8ff] bg-white text-[var(--ui-text-muted)] hover:bg-[var(--ui-surface-subtle)]')}
-        >
-          忽略
-        </button>
-        <button
-          type="button"
-          onClick={() => onSubmit(selectedOptionId ? [selectedOptionId] : [], freeText)}
-          disabled={isWorking || (!selectedOptionId && !freeText.trim())}
-          className={clsx('h-9 px-3 rounded-md inline-flex items-center gap-2 text-sm text-white disabled:opacity-50', isDark ? 'bg-[#2f80ed]' : 'bg-indigo-600')}
-        >
-          {isWorking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-          提交
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// Kept as source-level read compatibility while persisted legacy cards remain
-// loadable; all live decision flows below use AgentDecisionCard.
-void LegacyUserInputRequiredCard;
-void LegacyUserInputResolutionCard;
-void LegacyApprovalRequiredCard;
 
 function UserInputRequiredCard({
   request,
@@ -6898,6 +6876,7 @@ function InspectorPanel({
         {activeTab === 'artifacts' && (
           <ArtifactPanelErrorBoundary key={`${sourceConversationId}:${activeRun?.runId ?? 'all'}`} isDark={isDark}>
             <ArtifactPanel
+              novelId={novelId}
               isDark={isDark}
               runs={conversationRuns}
               preferredRunId={activeRun?.runId ?? null}
@@ -7418,104 +7397,6 @@ class ArtifactPanelErrorBoundary extends Component<{
   }
 }
 
-type SkillDraftReviewRecord = {
-  id: string;
-  version: number;
-  status: 'editing' | 'ready_for_review' | 'committed' | 'discarded';
-  action?: 'create' | 'update' | 'derive' | 'pack';
-  draft?: Record<string, unknown>;
-};
-
-function SkillDraftReviewCard({ artifact, isDark, onPublished }: { artifact: AgentArtifact; isDark: boolean; onPublished: () => Promise<void> }) {
-  const embedded = artifact.metadata?.skillDraft as SkillDraftReviewRecord | undefined;
-  const draftId = typeof artifact.reference?.skillDraftId === 'string'
-    ? artifact.reference.skillDraftId
-    : embedded?.id;
-  const [draft, setDraft] = useState<SkillDraftReviewRecord | null>(embedded ?? null);
-  const [pending, setPending] = useState<'commit' | 'discard' | null>(null);
-
-  useEffect(() => {
-    if (!draftId) return;
-    let active = true;
-    window.agent.skillDraft({ draftId })
-      .then((value) => {
-        if (active && value) setDraft(value as SkillDraftReviewRecord);
-      })
-      .catch(() => undefined);
-    return () => { active = false; };
-  }, [draftId]);
-
-  if (!draftId) return null;
-  const statusLabel = draft?.status === 'committed'
-    ? '已发布'
-    : draft?.status === 'discarded'
-      ? '已放弃'
-      : draft?.status === 'editing'
-        ? '编辑中'
-        : '待审核';
-  const reviewable = Boolean(draft && (draft.status === 'ready_for_review' || draft.status === 'editing'));
-
-  const commit = async () => {
-    if (!draft || !window.confirm('确认发布这个 Skill Pack？成员 Skill、Pack Revision 与绑定会作为一个事务写入。')) return;
-    setPending('commit');
-    try {
-      const result = await window.agent.commitSkillDraft({
-        draftId: draft.id,
-        expectedVersion: draft.version,
-        confirmed: true,
-      }) as { draft?: SkillDraftReviewRecord };
-      if (result.draft) setDraft(result.draft);
-      await onPublished();
-      toast.success(draft.action === 'pack' ? 'Skill Pack 已发布' : 'Skill Revision 已发布');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Skill 草稿发布失败');
-    } finally {
-      setPending(null);
-    }
-  };
-
-  const discard = async () => {
-    if (!draft || !window.confirm('确定放弃这个 Skill 草稿吗？已提炼内容会保留在任务产物中，但不会进入 Skill 列表。')) return;
-    setPending('discard');
-    try {
-      const result = await window.agent.discardSkillDraft({ draftId: draft.id, expectedVersion: draft.version });
-      setDraft(result as SkillDraftReviewRecord);
-      toast.success('Skill 草稿已放弃');
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Skill 草稿放弃失败');
-    } finally {
-      setPending(null);
-    }
-  };
-
-  return (
-    <section className={clsx('mt-4 rounded-lg border p-4', isDark ? 'border-blue-400/20 bg-blue-500/5' : 'border-blue-100 bg-blue-50/50')} aria-label="Skill 草稿审核">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold">Skill Pack 审核</div>
-          <p className={clsx('mt-1 text-xs leading-5', isDark ? 'text-neutral-400' : 'text-[var(--ui-text-muted)]')}>
-            检查成员 Skill、来源覆盖、污染警告与 Operation/Role 绑定。确认后原子发布，失败不会留下部分 Skill。
-          </p>
-        </div>
-        <span className={clsx('shrink-0 rounded px-2 py-1 text-[10px]', draft?.status === 'committed' ? 'bg-emerald-500/10 text-emerald-600' : draft?.status === 'discarded' ? 'bg-neutral-500/10 text-neutral-500' : 'bg-amber-500/10 text-amber-700')}>
-          {statusLabel}
-        </span>
-      </div>
-      {reviewable && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" disabled={Boolean(pending)} onClick={commit} className="inline-flex h-9 items-center gap-1.5 rounded-md bg-[#2f80ed] px-3 text-xs font-medium text-white hover:bg-[#246fce] disabled:opacity-50">
-            {pending === 'commit' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
-            确认发布
-          </button>
-          <button type="button" disabled={Boolean(pending)} onClick={discard} className={clsx('h-9 rounded-md border px-3 text-xs disabled:opacity-50', isDark ? 'border-white/10 text-neutral-300 hover:bg-white/5' : 'border-[var(--ui-border-strong)] bg-white text-[var(--ui-text-primary)] hover:bg-[var(--ui-surface-subtle)]')}>
-            放弃草稿
-          </button>
-        </div>
-      )}
-    </section>
-  );
-}
-
 function NovelBootstrapInitializeCard({
   artifact,
   isDark,
@@ -7554,6 +7435,7 @@ function NovelBootstrapInitializeCard({
 }
 
 function ArtifactPanel({
+  novelId,
   isDark,
   runs,
   preferredRunId,
@@ -7561,6 +7443,7 @@ function ArtifactPanel({
   onSkillPublished,
   onInitializeNovelProject,
 }: {
+  novelId?: string;
   isDark: boolean;
   runs: AgentRun[];
   preferredRunId: string | null;
@@ -7713,7 +7596,7 @@ function ArtifactPanel({
                   </p>
                 )}
                 {selectedArtifact.type === 'agent_skill_pack_draft' && (
-                  <SkillDraftReviewCard artifact={selectedArtifact} isDark={isDark} onPublished={onSkillPublished} />
+                  <SkillDraftReviewCard novelId={novelId} draftId={String(selectedArtifact.reference?.skillDraftId || (selectedArtifact.metadata?.skillDraft as SkillDraftReviewRecord | undefined)?.id || '')} embedded={selectedArtifact.metadata?.skillDraft as SkillDraftReviewRecord | undefined} isDark={isDark} onPublished={onSkillPublished} />
                 )}
                 {selectedArtifact.type === 'novel_bootstrap_draft' && (
                   <NovelBootstrapInitializeCard
@@ -7732,7 +7615,9 @@ function ArtifactPanel({
                     </div>
                     {expertReport.coverage && (
                       <div className={clsx('mt-2 text-[11px] leading-5', isDark ? 'text-neutral-500' : 'text-[var(--ui-text-muted)]')}>
-                        覆盖 {expertReport.coverage.contextChapterCount}/{expertReport.coverage.totalChapterCount} 章
+                        {expertReport.coverage.expertReviewMode === 'analysis_evidence'
+                          ? `原文分析 ${expertReport.coverage.analyzedChapterCount ?? 0}/${expertReport.coverage.totalChapterCount} 章 · 专家审核材料 ${expertReport.coverage.expertReviewedChapterCount ?? 0}/${expertReport.coverage.totalChapterCount} 章`
+                          : `覆盖 ${expertReport.coverage.contextChapterCount}/${expertReport.coverage.totalChapterCount} 章`}
                         {expertReport.coverage.omittedChapterCount > 0 ? ` · 省略 ${expertReport.coverage.omittedChapterCount} 章` : ''}
                       </div>
                     )}
@@ -7956,7 +7841,8 @@ function ReviewPanel({
   } : null;
   const reviewComments = useReviewComments(reviewCommentContext);
   const normalizedContent = useMemo(
-    () => chapterPayload ? appendPlainTextToLexical(chapterPayload.baseContent, generatedText) : '',
+    () => chapterPayload ? chapterPayload.writeMode === 'replace' ? ensureLexicalDocument(generatedText)
+      : appendPlainTextToLexical(chapterPayload.baseContent, generatedText) : '',
     [chapterPayload, generatedText],
   );
   const isDirty = Boolean(chapterPayload && (
@@ -8307,10 +8193,17 @@ function ReviewPanel({
             </div>
           </div>
         )}
-        {chapterPayload && !chapterPayload.consistency.ok && (
+        {chapterPayload?.warnings?.length ? <div role="status" className="mt-3 rounded-md bg-amber-500/10 px-3 py-2 text-xs leading-5">
+          <p>生成提示</p>{[...new Set(chapterPayload.warnings)].map(warning => <p key={warning}>{warning}</p>)}
+        </div> : null}
+        {chapterPayload && (
           <div className={clsx('mt-3 flex gap-2 rounded-md px-3 py-2 text-xs leading-5', isDark ? 'bg-amber-500/10 text-amber-200' : 'bg-[#fff6df] text-[#76520b]')}>
             <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>{chapterPayload.consistency.issues.join('；')}</span>
+            <div>
+              <p>{chapterPayload.consistency.status === 'needs_review' ? '基础检查发现待核对项' : chapterPayload.consistency.status === 'not_reviewed' ? '基础检查已完成，语义连续性与文风尚未独立审核' : '历史检查记录未标明核验范围，不能视为完整一致性审核通过'}</p>
+              {chapterPayload.consistency.issues.length > 0 && <p>{chapterPayload.consistency.issues.join('；')}</p>}
+              {chapterPayload.consistency.checks?.map(check => <p key={check.id}>{check.status === 'passed' ? '已检查' : check.status === 'warning' ? '待核对' : '未检查'}：{check.detail}</p>)}
+            </div>
           </div>
         )}
         {(error || reviewComments.error) && (

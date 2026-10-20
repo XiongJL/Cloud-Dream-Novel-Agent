@@ -57,7 +57,7 @@ export function resolveWritingLength(input: {
         }
     }
     const completeChapter = input.mode === 'new_chapter' || input.mode === 'rewrite_chapter'
-        || /整章|完整.{0,8}(?:章节|正文)|(?:章节|正文).{0,8}完整|首章|完整替换|complete chapter|full chapter/i.test(request);
+        || /整章|完成本章(?:内容|正文)?|完整.{0,8}(?:章节|正文)|(?:章节|正文).{0,8}完整|首章|完整替换|complete chapter|full chapter/i.test(request);
     const explicit = Number(input.targetLength) >= 100;
     const hasNovelDefault = completeChapter && Number(input.novelDefault) >= 100;
     const target = normalizeWritingLength(explicit ? input.targetLength : hasNovelDefault ? input.novelDefault

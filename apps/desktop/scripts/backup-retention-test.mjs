@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import ts from 'typescript';
+const source = await readFile(new URL('../electron/backup/BackupRetention.ts', import.meta.url), 'utf8');
+const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+const { retentionPlan } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+const now = Date.now(), day = 86400000;
+const files = Array.from({ length: 100 }, (_, index) => ({ filename: `auto_backup_${index}.nebak`, createdAt: now - index * day / 2, size: 128 * 1024 ** 2, valid: true, pinned: index === 99 }));
+files.push({ filename: 'corrupt.nebak', createdAt: now + 1, size: 100, valid: false, pinned: false });
+const roomy = retentionPlan(files, now, 100 * 1024 ** 3);
+assert.ok(!roomy.remove.includes(files[99].filename), 'pinned snapshot survives rotation');
+assert.ok(!roomy.remove.includes(files[9].filename), 'most recent 10 survive ordinary rotation');
+assert.ok(roomy.remove.includes(files[98].filename), 'expired daily/weekly snapshots are removed');
+const tiny = retentionPlan(files, now, 1);
+assert.equal(tiny.overBudget, true);
+for (const file of [...files.slice(0, 3), files[99], files[100]]) assert.ok(!tiny.remove.includes(file.filename), 'last good snapshots, pinned and unverified files must never be removed');
+console.log('Backup retention passed: recent/daily/weekly, pinned, last three and soft-budget protection.');

@@ -1,282 +1,77 @@
-# CloudDream Novel Agent MCP CLI 接入说明
+# MCP 接入说明
 
-本文档说明当前已经验证可用的本地 MCP 接入方式，适用于：
+Streamable HTTP 是主要入口，stdio 作为兼容入口保留；两种方式共用 Python FastMCP、同一份外部工具契约和桌面业务服务。
 
-- Codex
-- Claude Code
-- 兼容标准 MCP 的其他本地 CLI
+## 设置与连接
 
-整体设计是：
+1. 打开桌面应用，进入 **设置 → AI → MCP CLI**。
+2. 打开 **启用 MCP**，等待“Streamable HTTP 可连接”。
+3. 点击 **复制接入指令**，粘贴给同一台电脑上支持 Streamable HTTP 的 Agent。也可以复制 HTTP JSON 并转换为客户端要求的格式。
+4. 配置后让客户端列出工具。当前开放 31 个工具，更多写作与 Agent 高层委托功能仍按需求分阶段接入。
 
-- 桌面应用仍然是唯一真实数据源
-- 外部 CLI 不直接连接 SQLite
-- 本地 stdio MCP bridge 负责把工具调用转发给正在运行的桌面应用
+默认地址是 `http://127.0.0.1:18765/mcp`。以设置页实际地址为准，端口可在“端口与 stdio 兼容配置”中修改。接入指令包含本机随机令牌，请求必须携带：
 
-## 工作原理
-
-桌面应用启动后，会在本地 `userData` 目录下写出一个 runtime 文件。
-
-开发环境默认路径：
-
-`C:\Users\<你的用户名>\AppData\Roaming\@novel-editor\desktop-dev\automation\runtime.json`
-
-这个文件里包含：
-
-- 本次桌面应用的本地 automation 端口
-- 临时 bearer token
-- 当前桌面应用进程 id
-
-MCP bridge 会自动读取这个文件，所以通常不需要把端口和 token 手动写进 CLI 配置。
-
-## 正确启动顺序
-
-1. 先启动桌面应用：
-
-```bash
-pnpm dev
+```text
+Authorization: Bearer <设置页生成的本机令牌>
 ```
 
-如果你只想启动桌面端，也可以：
-
-```bash
-pnpm dev:desktop
-```
-
-2. 确认 runtime 文件已经生成：
-
-```powershell
-Get-Content "$env:APPDATA\@novel-editor\desktop-dev\automation\runtime.json"
-```
-
-3. 再启动你的 MCP 客户端。
-
-## Runtime 说明
-
-- runtime 里的端口和 token 每次启动都会变化
-- MCP bridge 会自动读取最新 runtime
-- 如果你重启了桌面应用，也建议重启一次 CLI
-
-## 软件内设置页（MCP CLI 模式）
-
-在软件 `设置 -> AI -> MCP CLI` 模式下，当前行为是：
-
-- 不再展示旧的“CLI 可执行路径 / 工作目录 / 启动参数模板 / 环境变量 JSON”手填项
-- 改为直接展示三段可复制配置：
-  - Codex `config.toml` 片段
-  - Claude Code 注册命令
-  - 通用 `mcpServers` JSON 片段
-- `测试 MCP` 会走本地 bridge 就绪性检查（launcher + runtime + automation invoke），不再依赖旧的 MCP CLI 启动参数
-
-在 `HTTP API` 模式下：
-
-- 预设按钮仅在该模式显示
-- “其他高级配置 / 章节摘要策略 / 代理配置”默认折叠展示
-- `连接测试 / 代理测试 / 生成测试` 仅在该模式显示
-
-## Codex 配置
-
-先在仓库根目录执行下面命令，自动输出当前机器可直接复制的 MCP 配置（避免手填绝对路径）：
-
-```bash
-pnpm mcp:config
-```
-
-推荐在 `~/.codex/config.toml` 中这样配置：
-
-```toml
-[mcp_servers.novel_editor]
-command = "cmd"
-args = ["/c", "D:\\aiproject\\novalEditor\\apps\\desktop\\scripts\\novel-editor-mcp.cmd"]
-startup_timeout_sec = 60
-```
-
-在启动 `codex` 之前，先在同一个终端里设置 Node 路径：
-
-```powershell
-$env:NOVEL_EDITOR_NODE_EXE = "D:\all_install\node.js\node.exe"
-codex
-```
-
-为什么推荐走 `.cmd` wrapper：
-
-- Windows 下有些 MCP 客户端对 `node + .mjs` 的启动兼容性不稳定
-- wrapper 会自动定位 `node.exe`
-- wrapper 会自动写 MCP 日志，便于排查问题
-
-## Claude Code 配置
-
-Windows 下推荐这样注册：
-
-```powershell
-claude mcp remove novel-editor
-claude mcp add novel-editor --scope local -- cmd /c D:\aiproject\novalEditor\apps\desktop\scripts\novel-editor-mcp.cmd
-```
-
-也可以直接用自动生成命令（推荐）：
-
-```bash
-pnpm mcp:config -- --format claude
-```
-
-可以这样验证：
-
-```bash
-claude mcp list
-claude mcp get novel-editor
-```
-
-## 通用 MCP JSON 配置
-
-如果某个客户端支持 `mcpServers` 这种 JSON 配置，可以直接用：
+用于支持 `mcpServers` / `url` / `headers` 的客户端的配置示意（其他客户端需适配其配置格式）：
 
 ```json
 {
   "mcpServers": {
-    "novel-editor": {
-      "command": "cmd",
-      "args": [
-        "/c",
-        "D:\\aiproject\\novalEditor\\apps\\desktop\\scripts\\novel-editor-mcp.cmd"
-      ],
-      "env": {
-        "NOVEL_EDITOR_NODE_EXE": "D:\\all_install\\node.js\\node.exe"
-      }
+    "novel_editor": {
+      "url": "http://127.0.0.1:18765/mcp",
+      "headers": { "Authorization": "Bearer <本机令牌>" }
     }
   }
 }
 ```
 
-也可以直接输出 JSON 片段：
+这是同机接入地址，桌面应用必须保持运行。内网其他机器和云端 Agent 无法直接通过自己的 `127.0.0.1` 访问此服务。端口冲突会显示失败，可换端口或释放占用后重试；更改端口后需更新客户端配置。
 
-```bash
-pnpm mcp:config -- --format json
-```
+## 总开关
 
-## OpenClaw
+- 开关立即生效并自动保存，不需要点击模型配置的“保存”。
+- 关闭后停止 HTTP 监听，已有 stdio 连接的新工具调用返回 `MCP_DISABLED`。
+- 活跃外部请求会收到取消信号；已受理的持久化章节任务不会自动撤销，也不保证撤销已经发生的写入。
+- 内置 Agent 和内部 Automation 服务继续可用；切换 AI 提供方式或离开设置页不会改变开关。
+- 开关、端口与令牌保存在 `userData/mcp/settings.json`，重启保持不变。外部令牌与内部 Automation 令牌不同。
+- 沿用原有外部 MCP 默认开启的行为。配置损坏时关闭接入，可重新开启生成有效配置。
 
-如果你当前使用的 OpenClaw 版本支持标准 MCP 客户端配置，可以直接复用上面的 `mcpServers` 配置。
+## 测试 MCP
 
-如果你当前的 OpenClaw 仍然依赖它原有的接入方式，那就继续使用现有接入方式即可。当前这个 MCP bridge 不会替代项目里已有的 OpenClaw 专用能力路径。
+设置页的“测试 MCP”使用官方 Python MCP SDK 客户端连接真实 HTTP 地址，完成 initialize、tools/list 和 `novel.list` 只读调用，不调用模型或修改小说。
 
-## 当前已支持的能力
+开发环境先执行 `uv sync --frozen --project agent_runtime --extra dev`。发布包直接使用随应用附带的 Runtime，不要求安装系统 Python 或 Node。
 
-当前 bridge 已经提供这些工具：
+## stdio 兼容入口
 
-- 列出小说、卷、章节、主线、角色、物品、世界观、地图
-- 读取章节内容
-- 创建章节、保存章节
-- 创建世界观、更新世界观（不开放 MCP 删除）
-- 调用软件内置 AI 生成草稿
-- 读取、更新、提交、丢弃草稿会话
-- 把外部生成的大纲、角色、剧情补丁写回软件
+仅支持 stdio 的客户端可展开“端口与 stdio 兼容配置”，复制兼容 JSON。Windows 启动器为随应用发布的 `mcp/novel-editor-mcp.cmd`，macOS/Linux 为 `mcp/novel-editor-mcp.sh`；设置页按本机安装路径生成，不应复制开发者的固定目录。
 
-## 推荐的第一次联调流程
-
-MCP 接通后，建议按这个顺序试：
-
-1. `novel_list`
-2. `draft_list`
-3. `creative_assets_generate_draft`
-
-可以直接对 CLI 这样说：
-
-- “调用 `novel_list`，列出当前所有小说”
-- “调用 `draft_list`，查看当前活跃草稿”
-- “对这本小说调用 `creative_assets_generate_draft`，生成 3 个角色和 1 条主线，但先不要提交入库，把 JSON 展示给我”
-
-这样可以同时验证：
-
-- MCP 握手成功
-- 桌面应用正在运行
-- bridge 能正确读取 runtime
-- CLI 返回 JSON 和软件右侧草稿区能共用同一份草稿来源
-
-## 本地诊断方法
-
-### 1. 查看桌面应用 runtime
+从仓库根目录输出开发环境 stdio 兼容配置：
 
 ```powershell
-Get-Content "$env:APPDATA\@novel-editor\desktop-dev\automation\runtime.json"
+pnpm mcp:config
 ```
 
-### 2. 运行 MCP smoke 测试
-
-在仓库根目录执行：
+验证 stdio 协议和工具发现（无需桌面运行）：
 
 ```powershell
-D:\all_install\node.js\node.exe apps\desktop\scripts\mcp-smoke.mjs --tool draft.list
+& .\apps\desktop\scripts\novel-editor-mcp.cmd --smoke --list-only
 ```
 
-如果这条成功，说明：
-
-- 桌面应用 automation 服务是通的
-- MCP bridge 本身也是通的
-
-### 3. 查看 MCP bridge 日志
-
-wrapper 默认会把日志写到：
+验证 stdio 只读调用（需桌面运行且 MCP 已开启）：
 
 ```powershell
-$env:TEMP\novel-editor-mcp.log
+& .\apps\desktop\scripts\novel-editor-mcp.cmd --smoke --tool novel.list
 ```
 
-查看最近日志：
+stdio 自动发现桌面的 `automation/runtime.json`，其中是每次桌面启动产生的内部端口和令牌。它不是 MCP HTTP 接入地址；外部客户端应使用设置页 `/mcp` URL。需要指定应用实例时，stdio 支持 `NOVEL_EDITOR_RUNTIME_FILE` 或 `--runtime-file`。
 
-```powershell
-Get-Content "$env:TEMP\novel-editor-mcp.log" -Tail 200
-```
+## 实现边界
 
-如果某个客户端提示 MCP 启动失败，这个日志最有用。
-
-## 已知兼容性说明
-
-- 当前 `Codex` 在 Windows 上启动 MCP 时，会使用 bare JSON / NDJSON，而不一定是标准 `Content-Length` 帧
-- 本地 bridge 现在已经同时兼容：
-  - `Content-Length` framed messages
-  - bare JSON
-  - 按行分隔的 NDJSON
-- 某些客户端在启动后还会探测：
-  - `resources/list`
-  - `resources/templates/list`
-
-当前 CloudDream Novel Agent 这条链路主要使用 tools，不依赖 resources。
-
-## 故障排查
-
-### 提示 `APP_NOT_RUNNING`
-
-- 确认桌面应用还在运行
-- 确认 runtime 文件存在
-- 如果你刚重启过桌面应用，重启一次 CLI
-
-### MCP 能连接，但没有数据
-
-- 先调用 `novel_list`
-- 再确认你当前看的数据库是否就是开发环境数据库：
-
-`C:\Users\<你的用户名>\AppData\Roaming\@novel-editor\desktop-dev\novel_editor.db`
-
-### Codex 或 Claude Code 启动超时
-
-- 优先使用 `.cmd` wrapper，不要直接让客户端跑 `.mjs`
-- 启动客户端前先设置 `NOVEL_EDITOR_NODE_EXE`
-- 查看：
-
-```powershell
-Get-Content "$env:TEMP\novel-editor-mcp.log" -Tail 200
-```
-
-### `连接测试` 或 `生成测试` 出现 `fetch failed`
-
-这类错误通常是 HTTP Provider 连接超时（例如 `UND_ERR_CONNECT_TIMEOUT`），常见原因：
-
-- 当前网络无法直连你配置的 `baseUrl`
-- 代理模式/代理地址配置不正确
-- 服务端域名可解析但 443 端口不可达
-
-建议按顺序检查：
-
-1. 在 `HTTP API` 模式下确认 `baseUrl` 与 `apiKey` 正确
-2. 检查代理模式（`system/off/custom`）是否符合当前网络环境
-3. 用系统命令测试端口连通性（例如 PowerShell `Test-NetConnection <host> -Port 443`）
-4. 在软件内重新点一次 `连接测试`，观察状态栏错误详情（已包含更具体网络错误）
+- HTTP 与 stdio 共用 Python FastMCP 3.4.3 / mcp 1.28.1，不引入第二套 TypeScript MCP 协议实现。
+- 桌面仍是唯一业务数据源；网关不直接访问小说 SQLite，也不为每个客户端启动 LangGraph。
+- 已验证协商协议为 2025-11-25，不宣称支持所有未来协议版本。
+- 详细范围见 [需求文档](agent/mcp-application-capabilities-requirements.md) 和 [HTTP 验收记录](agent/acceptance-mcp-http-2026-10-19.md)。

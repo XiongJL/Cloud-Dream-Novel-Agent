@@ -12,8 +12,11 @@ import type {
 } from '../../../shared/agentChapterScope';
 import { extractReadableText } from '../../../shared/lexicalDocument';
 import { novelChapterLength, resolveWritingLength } from '../../../shared/writingPolicy';
+import { chapterMemoryExcerpt, distinctNarrativeMemories, isSemanticChapterSummary } from '../../../shared/chapterGenerationQuality';
+import { prepareChapterWritingPayload } from '../../../shared/chapterWritingPrompt';
 
 export interface ContinueWritingContext {
+    generationPolicyVersion?: 2;
     currentContentSource: string;
     hardContext: {
         worldSettings: Array<Record<string, unknown>>;
@@ -36,7 +39,7 @@ export interface ContinueWritingContext {
         narrativeSummaries: Array<{ level: 'volume' | 'novel'; title: string; summaryText: string; keyFacts: string[] }>;
     };
     params: {
-        mode: 'new_chapter' | 'continue_chapter';
+        mode: 'new_chapter' | 'continue_chapter' | 'rewrite_chapter';
         contextChapterCount: number;
         targetLength: number;
         novelChapterLength?: number;
@@ -158,6 +161,13 @@ export class ContextBuilder {
         const novelId = String(payload.novelId || '').trim();
         if (!novelId) throw new Error('novelId is required');
 
+        if (payload.representation === 'expert_context') {
+            const catalog = await this.buildForChapterScope({ ...payload, representation: 'catalog' });
+            const support = await this.readScopeProjectContext(novelId, uniqueArray(catalog.chapters.map(chapter => chapter.volumeId)));
+            const result = { ...catalog, ...support };
+            return { ...result, estimatedTokens: estimateTokenCount(JSON.stringify(result)) };
+        }
+
         const requestedKind = payload.kind || 'current_chapter';
         const kind: AgentChapterScopeKind = requestedKind;
         const batchSize = Math.max(1, Math.min(10, Math.floor(payload.batchSize ?? 4)));
@@ -233,6 +243,52 @@ export class ContextBuilder {
             contextMetadata = orderedMetadata.slice(Math.min(...indexes), Math.max(...indexes) + 1);
         }
         const contextChapterIds = contextMetadata.map((chapter: any) => String(chapter.id));
+        // Catalogs resolve approved targets without loading prose or project assets.
+        // Fingerprints identify the saved version, not a claim that prose was read.
+        if (payload.representation === 'catalog') {
+            const rows = await (db as any).chapter.findMany({
+                where: { id: { in: targetChapterIds }, deleted: false },
+                select: { id: true, volumeId: true, title: true, order: true, version: true, updatedAt: true },
+            });
+            const byId = new Map<string, any>(rows.map((row: any) => [String(row.id), row]));
+            const chapters = targetMetadata.map((metadata: any) => {
+                const row = byId.get(String(metadata.id));
+                if (!row) throw new Error(`Approved chapter disappeared: ${metadata.id}`);
+                const updatedAt = new Date(row.updatedAt).toISOString();
+                return {
+                    chapterId: String(row.id), volumeId: String(row.volumeId), title: String(row.title || ''),
+                    order: Number(row.order || 0), volumeOrder: Number(metadata.volumeOrder || 0),
+                    version: Number(row.version || 1), updatedAt,
+                    contentHash: contentHash(JSON.stringify([row.id, row.version, updatedAt])),
+                    contentMode: 'catalog' as const, content: '', summaryFresh: false, target: true,
+                };
+            });
+            const snapshot = chapters.map((chapter) => ({
+                chapterId: chapter.chapterId, version: chapter.version, contentHash: chapter.contentHash,
+                updatedAt: chapter.updatedAt, source: 'database' as const,
+            }));
+            const batches = Array.from({ length: Math.ceil(targetChapterIds.length / batchSize) }, (_, index) => ({
+                index, chapterIds: targetChapterIds.slice(index * batchSize, (index + 1) * batchSize),
+            }));
+            const bundle = {
+                scope: { scopeId: String(payload.scopeId || randomUUID()), novelId, kind,
+                    ...(payload.volumeId ? { volumeId: payload.volumeId } : {}),
+                    ...(anchorChapterId ? { anchorChapterId } : {}), chapterIds: targetChapterIds,
+                    processingMode: 'batched' as const, snapshot },
+                chapters, narrativeSummaries: [],
+                entityContext: { characters: [], items: [], worldSettings: [], maps: [] },
+                plotContext: { plotlines: [] }, evidence: [],
+                stateLedger: { entities: {}, timelineHints: [], openQuestions: [], unresolvedThreads: [] },
+                coverage: { totalChapterCount: chapters.length, contextChapterCount: chapters.length,
+                    readonlyChapterCount: 0, detailedChapterCount: 0, summarizedChapterCount: 0,
+                    excerptChapterCount: 0, omittedChapterCount: 0, batchSize, batchCount: batches.length, batches },
+                sourceSnapshot: snapshot, warnings: ['仅解析获准章节目录与版本，正文由执行工作单元补读。'],
+            };
+            return { ...bundle, estimatedTokens: estimateTokenCount(JSON.stringify(bundle)) };
+        }
+        if (payload.representation === 'verbatim' && targetChapterIds.length !== 1) {
+            throw new Error('Verbatim work-unit reads require exactly one approved chapter');
+        }
         const processingMode = contextChapterIds.length > maxDetailedChapters
             ? 'batched'
             : (payload.processingMode || 'detailed');
@@ -277,10 +333,13 @@ export class ContextBuilder {
             const plainText = extractPlainTextFromLexical(rawContent);
             const hash = contentHash(rawContent);
             const summary = summaryByChapterId.get(String(chapter.id));
-            const summaryFresh = !!summary && String(summary.sourceContentHash || '') === hash;
+            const summaryFresh = isSemanticChapterSummary(summary) && String(summary.sourceContentHash || '') === hash;
             let contentMode: ChapterScopeContextItem['contentMode'];
             let content: string;
-            if (processingMode === 'detailed') {
+            if (payload.representation === 'verbatim') {
+                contentMode = 'full';
+                content = plainText;
+            } else if (processingMode === 'detailed') {
                 contentMode = plainText.length > 30000 ? 'truncated' : 'full';
                 content = plainText.slice(0, 30000);
             } else if (summaryFresh) {
@@ -327,7 +386,66 @@ export class ContextBuilder {
             warnings.push(`范围上下文包含 ${contextChapterIds.length} 章，超过详细处理上限 ${maxDetailedChapters}，已切换分批摘要模式。`);
         }
 
+        if (payload.representation === 'verbatim') {
+            const bundle = {
+                scope: { scopeId: String(payload.scopeId || randomUUID()), novelId, kind,
+                    ...(payload.volumeId ? { volumeId: payload.volumeId } : {}),
+                    chapterIds: targetChapterIds, anchorChapterId, processingMode: 'detailed' as const, snapshot },
+                chapters: contextChapters, narrativeSummaries: [],
+                entityContext: { characters: [], items: [], worldSettings: [], maps: [] },
+                plotContext: { plotlines: [] }, evidence: [],
+                stateLedger: { entities: {}, timelineHints: [], openQuestions: [], unresolvedThreads: [] },
+                coverage: { totalChapterCount: 1, contextChapterCount: 1, readonlyChapterCount: 0,
+                    detailedChapterCount: 1, summarizedChapterCount: 0, excerptChapterCount: 0,
+                    omittedChapterCount: 0, batchSize: 1, batchCount: 1,
+                    batches: [{ index: 0, chapterIds: targetChapterIds }] },
+                sourceSnapshot: snapshot, warnings,
+            };
+            return { ...bundle, estimatedTokens: estimateTokenCount(JSON.stringify(bundle)) };
+        }
+
         const volumeIds = uniqueArray(contextChapters.map((chapter) => chapter.volumeId));
+        const { narrativeSummaries, entityContext, plotContext, stateLedger } = await this.readScopeProjectContext(novelId, volumeIds);
+        const freshSummaryIds = new Set(
+            contextChapters.filter((chapter) => chapter.summaryFresh && chapter.summaryId).map((chapter) => chapter.summaryId),
+        );
+        for (const summary of summaries) {
+            if (!freshSummaryIds.has(String(summary.id))) continue;
+            Object.assign(stateLedger.entities, parseJsonRecord(summary.entitiesSnapshot));
+            stateLedger.timelineHints.push(...parseJsonArray(summary.timelineHints, 20));
+            stateLedger.openQuestions.push(...parseJsonArray(summary.openQuestions, 20));
+        }
+        stateLedger.timelineHints = stateLedger.timelineHints.slice(0, 100);
+        stateLedger.openQuestions = stateLedger.openQuestions.slice(0, 100);
+
+        const batches = Array.from({ length: Math.ceil(targetChapterIds.length / batchSize) }, (_, index) => ({
+            index, chapterIds: targetChapterIds.slice(index * batchSize, (index + 1) * batchSize),
+        }));
+        const coverage = {
+            totalChapterCount: targetChapterIds.length, contextChapterCount: contextChapters.length,
+            readonlyChapterCount: contextChapters.filter((chapter) => !chapter.target).length,
+            detailedChapterCount: contextChapters.filter((chapter) => chapter.target && (chapter.contentMode === 'full' || chapter.contentMode === 'truncated')).length,
+            summarizedChapterCount: contextChapters.filter((chapter) => chapter.target && chapter.contentMode === 'summary').length,
+            excerptChapterCount: contextChapters.filter((chapter) => chapter.target && chapter.contentMode === 'excerpt').length,
+            omittedChapterCount: Math.max(0, targetChapterIds.length - contextChapters.filter((chapter) => chapter.target).length),
+            batchSize, batchCount: batches.length, batches,
+        };
+        const scope = {
+            scopeId: String(payload.scopeId || randomUUID()), novelId, kind,
+            ...(payload.volumeId ? { volumeId: payload.volumeId } : {}), chapterIds: targetChapterIds,
+            ...(anchorChapterId ? { anchorChapterId } : {}), processingMode,
+            snapshot: snapshot.filter((item) => targetIdSet.has(item.chapterId)),
+        };
+        const bundleWithoutEstimate = { scope, chapters: contextChapters, narrativeSummaries, entityContext, plotContext,
+            evidence: [], stateLedger, coverage, sourceSnapshot: snapshot, warnings };
+        const estimatedTokens = estimateTokenCount(JSON.stringify(bundleWithoutEstimate));
+        if (estimatedTokens > maxEstimatedTokens) {
+            warnings.push(`范围上下文估算 ${estimatedTokens} tokens，超过目标预算 ${maxEstimatedTokens}；下游必须按批次与角色投影继续裁剪。`);
+        }
+        return { ...bundleWithoutEstimate, estimatedTokens };
+    }
+
+    private async readScopeProjectContext(novelId: string, volumeIds: string[]) {
         const [narrativeRows, characters, items, worldSettings, maps, plotlines] = await Promise.all([
             (db as any).narrativeSummary.findMany({
                 where: {
@@ -358,9 +476,9 @@ export class ContextBuilder {
             level: (item.level === 'volume' ? 'volume' : 'novel') as 'volume' | 'novel',
             ...(item.volumeId ? { volumeId: String(item.volumeId) } : {}),
             title: String(item.title || ''),
-            summaryText: String(item.summaryText || '').slice(0, 4000),
-            keyFacts: parseJsonArray(item.keyFacts, 20).map(String),
-            unresolvedThreads: parseJsonArray(item.unresolvedThreads, 20).map(String),
+            summaryText: (isSemanticChapterSummary(item) ? '' : '[本地拼接摘录，非完整情节摘要]\n') + String(item.summaryText || '').slice(0, 4000),
+            keyFacts: isSemanticChapterSummary(item) ? parseJsonArray(item.keyFacts, 20).map(String) : [],
+            unresolvedThreads: isSemanticChapterSummary(item) ? parseJsonArray(item.unresolvedThreads, 20).map(String) : [],
             sourceFingerprint: String(item.sourceFingerprint || ''),
         }));
         const stateLedger: NarrativeStateLedger = {
@@ -369,61 +487,8 @@ export class ContextBuilder {
             openQuestions: [],
             unresolvedThreads: narrativeSummaries.flatMap((item: any) => item.unresolvedThreads).slice(0, 100),
         };
-        const freshSummaryIds = new Set(
-            contextChapters.filter((chapter) => chapter.summaryFresh && chapter.summaryId).map((chapter) => chapter.summaryId),
-        );
-        for (const summary of summaries) {
-            if (!freshSummaryIds.has(String(summary.id))) continue;
-            Object.assign(stateLedger.entities, parseJsonRecord(summary.entitiesSnapshot));
-            stateLedger.timelineHints.push(...parseJsonArray(summary.timelineHints, 20));
-            stateLedger.openQuestions.push(...parseJsonArray(summary.openQuestions, 20));
-        }
-        stateLedger.timelineHints = stateLedger.timelineHints.slice(0, 100);
-        stateLedger.openQuestions = stateLedger.openQuestions.slice(0, 100);
-
-        const batches = Array.from({ length: Math.ceil(targetChapterIds.length / batchSize) }, (_, index) => ({
-            index,
-            chapterIds: targetChapterIds.slice(index * batchSize, (index + 1) * batchSize),
-        }));
-        const coverage = {
-            totalChapterCount: targetChapterIds.length,
-            contextChapterCount: contextChapters.length,
-            readonlyChapterCount: contextChapters.filter((chapter) => !chapter.target).length,
-            detailedChapterCount: contextChapters.filter((chapter) => chapter.target && (chapter.contentMode === 'full' || chapter.contentMode === 'truncated')).length,
-            summarizedChapterCount: contextChapters.filter((chapter) => chapter.target && chapter.contentMode === 'summary').length,
-            excerptChapterCount: contextChapters.filter((chapter) => chapter.target && chapter.contentMode === 'excerpt').length,
-            omittedChapterCount: Math.max(0, targetChapterIds.length - contextChapters.filter((chapter) => chapter.target).length),
-            batchSize,
-            batchCount: batches.length,
-            batches,
-        };
-        const scope = {
-            scopeId: String(payload.scopeId || randomUUID()),
-            novelId,
-            kind,
-            ...(payload.volumeId ? { volumeId: payload.volumeId } : {}),
-            chapterIds: targetChapterIds,
-            ...(anchorChapterId ? { anchorChapterId } : {}),
-            processingMode,
-            snapshot: snapshot.filter((item) => targetIdSet.has(item.chapterId)),
-        };
-        const bundleWithoutEstimate = {
-            scope,
-            chapters: contextChapters,
-            narrativeSummaries,
-            entityContext: { characters, items, worldSettings, maps },
-            plotContext: { plotlines },
-            evidence: [],
-            stateLedger,
-            coverage,
-            sourceSnapshot: snapshot,
-            warnings,
-        };
-        const estimatedTokens = estimateTokenCount(JSON.stringify(bundleWithoutEstimate));
-        if (estimatedTokens > maxEstimatedTokens) {
-            warnings.push(`范围上下文估算 ${estimatedTokens} tokens，超过目标预算 ${maxEstimatedTokens}；下游必须按批次与角色投影继续裁剪。`);
-        }
-        return { ...bundleWithoutEstimate, estimatedTokens };
+        return { narrativeSummaries, entityContext: { characters, items, worldSettings, maps },
+            plotContext: { plotlines }, stateLedger };
     }
 
     async buildForCreativeAssets(payload: CreativeAssetsGeneratePayload): Promise<CreativeAssetsContext> {
@@ -603,7 +668,51 @@ export class ContextBuilder {
         };
     }
 
+    private async buildForOutlineRewrite(payload: ContinueWritingPayload): Promise<ContinueWritingContext> {
+        // Validate ownership without reading prose. Draft commit keeps its own source-version snapshot.
+        const chapter = await db.chapter.findUnique({where: {id: payload.chapterId},
+            select: {id: true, deleted: true, volume: {select: {novelId: true}}}});
+        if (!chapter || chapter.deleted || chapter.volume.novelId !== payload.novelId) {
+            throw new Error('Current chapter does not belong to novel');
+        }
+        const novel = await db.novel.findUnique({where: {id: payload.novelId}, select: {formatting: true}});
+        const novelDefault = novelChapterLength(novel?.formatting);
+        const lengthTarget = resolveWritingLength({...payload, novelDefault});
+        const excluded = uniqueArray(payload.excludedWorldSettingIds || []);
+        const [worldSettings, plotLines, characters, items, maps] = await Promise.all([
+            db.worldSetting.findMany({where: {novelId: payload.novelId, ...(excluded.length ? {id: {notIn: excluded}} : {})},
+                select: {id: true, name: true, type: true, content: true}, orderBy: {sortOrder: 'asc'}}),
+            db.plotLine.findMany({where: {novelId: payload.novelId}, select: {id: true, name: true, description: true,
+                points: {select: {title: true, description: true, type: true}, orderBy: {order: 'asc'}}}, orderBy: {sortOrder: 'asc'}}),
+            db.character.findMany({where: {novelId: payload.novelId}, select: {id: true, name: true, role: true, description: true},
+                orderBy: {updatedAt: 'desc'}, take: 100}),
+            db.item.findMany({where: {novelId: payload.novelId}, select: {id: true, name: true, type: true, description: true},
+                orderBy: {updatedAt: 'desc'}, take: 100}),
+            db.mapCanvas.findMany({where: {novelId: payload.novelId}, select: {id: true, name: true, type: true, description: true},
+                orderBy: {updatedAt: 'desc'}, take: 50}),
+        ]);
+        const hardContext = {worldSettings, characters, items, maps,
+            plotLines: plotLines.map(line => ({...line, points: line.points.map(point => ({...point, status: 'planned'}))}))};
+        const policy: ContinuationContextPolicy = {version: 'continuation-context-v1', sourcePolicy: 'outline_only',
+            summaryChapterCount: 0, fullTextChapterCount: 0, maxFullTextChars: 0, maxSummaryChars: 0, maxCurrentContentChars: 0};
+        return {generationPolicyVersion: 2, currentContentSource: '', hardContext,
+            dynamicContext: {recentChapters: [], selectedIdeas: [], selectedIdeaEntities: [],
+                currentChapterBeforeCursor: '', narrativeSummaries: []},
+            params: {mode: 'rewrite_chapter', contextChapterCount: 0, targetLength: lengthTarget.target,
+                novelChapterLength: novelDefault, style: payload.style || 'default', tone: payload.tone || 'balanced', pace: payload.pace || 'medium'},
+            policy, snapshot: {policy, scopeId: randomUUID(), novelId: payload.novelId, anchorChapterId: payload.chapterId,
+                chapterSources: [], narrativeSummaryIds: [], estimatedTokens: estimateTokenCount(JSON.stringify(hardContext)),
+                createdAt: new Date().toISOString()},
+            usedContext: ['outline_only', 'plot_outline_as_plan', 'characters_items_maps_snapshot',
+                ...worldSettings.map(setting => `world_setting_${setting.id}`)],
+            warnings: ['仅按大纲和设定重新创作：未加载任何旧章正文、章节摘要、卷/全书摘要、旧节拍或会话背景。',
+                ...(excluded.length ? [`本次排除世界设定：${excluded.join(', ')}`] : [])],
+        };
+    }
+
     async buildForContinueWriting(payload: ContinueWritingPayload): Promise<ContinueWritingContext> {
+        payload = prepareChapterWritingPayload(payload);
+        if (payload.sourcePolicy === 'outline_only') return this.buildForOutlineRewrite(payload);
         const novel = await db.novel.findUnique({ where: { id: payload.novelId }, select: { formatting: true } });
         const novelDefault = novelChapterLength(novel?.formatting);
         const lengthTarget = resolveWritingLength({ ...payload, novelDefault });
@@ -664,7 +773,9 @@ export class ContextBuilder {
             maxDetailedChapters: 20,
             maxEstimatedTokens: 120000,
         });
-        const rawChapterIds = previousMetadata.slice(-recentRawChapterCount).map((chapter: any) => String(chapter.id));
+        // The approved lookback is bounded. Keep the actual ending available for
+        // excerpt fallback even when the scope view trimmed a long chapter.
+        const rawChapterIds = previousMetadata.map((chapter: any) => String(chapter.id));
         const rawChapterRows = rawChapterIds.length > 0
             ? await db.chapter.findMany({
                 where: { id: { in: rawChapterIds }, deleted: false },
@@ -694,7 +805,8 @@ export class ContextBuilder {
             })
             : [];
 
-        const narrativeSummaries = scopeBundle.narrativeSummaries.map((item) => ({
+        const narrativeEntries = distinctNarrativeMemories(scopeBundle.narrativeSummaries);
+        const narrativeSummaries = narrativeEntries.map((item) => ({
             level: item.level,
             title: item.title,
             summaryText: item.summaryText.slice(0, 1200),
@@ -727,7 +839,7 @@ export class ContextBuilder {
             return {
                 chapterId: chapter.chapterId,
                 title: chapter.title,
-                excerpt: boundedExcerpt(chapter.content, policy.maxSummaryChars),
+                excerpt: chapterMemoryExcerpt(rawContentByChapterId.get(chapter.chapterId) || chapter.content, Math.min(policy.maxSummaryChars, 1200)),
                 contentMode: 'excerpt' as const,
             };
         });
@@ -791,7 +903,7 @@ export class ContextBuilder {
         const missingIdeaCount = Math.max(0, requestedIdeaIds.length - selectedIdeas.length);
         const warnings = [...scopeBundle.warnings];
         if (fallbackCount > 0) {
-            warnings.push(`${fallbackCount} chapter summaries missing or stale; fell back to chapter text excerpts.`);
+            warnings.push(`${fallbackCount} 章无可用语义摘要（缺失、过期或仅为本地摘录），已使用含末段的原文摘录；未验证完整情节状态。`);
         }
         if (missingIdeaCount > 0) {
             warnings.push(`${missingIdeaCount} selected ideas not found; ignored.`);
@@ -808,7 +920,7 @@ export class ContextBuilder {
             chapterSources: scopeChapterIds.flatMap((chapterId) => {
                 const source = sourceByChapterId.get(chapterId);
                 const chapter = chapterItemById.get(chapterId);
-                if (!source || !chapter) return [];
+                if (!source || !chapter || chapter.contentMode === 'catalog') return [];
                 const isAnchor = chapterId === payload.chapterId;
                 return [{
                     ...source,
@@ -821,7 +933,7 @@ export class ContextBuilder {
                     summaryFresh: chapter.summaryFresh,
                 }];
             }),
-            narrativeSummaryIds: scopeBundle.narrativeSummaries.map((item) => item.id),
+            narrativeSummaryIds: narrativeEntries.map((item) => item.id),
             estimatedTokens: estimateTokenCount(JSON.stringify({
                 recentChapterItems,
                 currentChapterBeforeCursor,
@@ -832,6 +944,7 @@ export class ContextBuilder {
         };
         return {
             currentContentSource,
+            generationPolicyVersion: 2,
             hardContext: {
                 worldSettings,
                 plotLines,

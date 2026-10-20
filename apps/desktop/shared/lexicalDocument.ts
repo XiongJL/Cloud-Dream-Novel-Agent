@@ -59,13 +59,30 @@ function parseLexicalPrefix(value: string): { document: LexicalDocument | null; 
     }
 }
 
-function nodeText(node: LexicalNode): string {
-    if (node.type === 'linebreak') return '\n';
-    if (typeof node.text === 'string') return node.text;
-    if (!Array.isArray(node.children)) return '';
+const blockTypes = ['paragraph', 'heading', 'quote', 'listitem'];
 
-    const content = node.children.map(nodeText).join('');
-    if (['paragraph', 'heading', 'quote', 'listitem'].includes(node.type ?? '')) {
+function nodeText(node: LexicalNode, forExport = false): string {
+    if (!node || typeof node !== 'object') {
+        if (forExport) throw new Error('正文包含无效节点');
+        return '';
+    }
+    if (node.type === 'linebreak') return '\n';
+    if (forExport && node.type === 'tab') return '\t';
+    if (forExport && node.type === 'mention') {
+        if (typeof node.mentionName !== 'string') throw new Error('正文引用缺少名称');
+        return node.mentionName;
+    }
+    if (typeof node.text === 'string') return forExport ? node.text.replace(/\r\n?/g, '\n') : node.text;
+    if (!Array.isArray(node.children)) {
+        if (forExport) throw new Error(`正文包含不支持的节点：${String(node.type || 'unknown')}`);
+        return '';
+    }
+    if (forExport && !node.children.length && !['root', ...blockTypes, 'list', 'link', 'autolink', 'mark', 'idea-mark', 'plot-anchor'].includes(node.type ?? '')) {
+        throw new Error(`正文包含不支持的节点：${String(node.type || 'unknown')}`);
+    }
+
+    const content = node.children.map(child => nodeText(child, forExport)).join('');
+    if (blockTypes.includes(node.type ?? '')) {
         return `${content}\n`;
     }
     return content;
@@ -121,6 +138,38 @@ export function extractReadableText(content: string): string {
 
     const lexicalText = normalizeReadableText(nodeText(document.root));
     return [lexicalText, normalizeReadableText(trailingText)].filter(Boolean).join('\n\n');
+}
+
+/** Export uses the same parser and node traversal, but never trims prose whitespace. */
+export function extractChapterParagraphs(content: string): string[] {
+    if (!content) return [];
+    const { document, trailingText } = parseLexicalPrefix(content);
+    if (!document) {
+        // A recognizable, truncated Lexical root is corruption, not an empty chapter.
+        if (/^\s*\{\s*"root"\s*:\s*\{/u.test(content)
+            && /"(?:children|type)"\s*:/u.test(content)) {
+            throw new Error('Lexical 正文结构损坏');
+        }
+        return content.replace(/\r\n?/g, '\n').split('\n');
+    }
+    if (document.root.type !== 'root' && !Array.isArray(document.root.children)) {
+        return content.replace(/\r\n?/g, '\n').split('\n');
+    }
+    if (document.root.type !== 'root' || !Array.isArray(document.root.children)) {
+        throw new Error('Lexical 正文根节点无效');
+    }
+    const paragraphs = document.root.children.map(node => {
+        const text = nodeText(node, true);
+        return blockTypes.includes(node.type ?? '') ? text.slice(0, -1) : text;
+    });
+    if (trailingText) {
+        // Historical documents can contain plain prose after the JSON root.
+        const normalized = content.trimStart();
+        const end = findJsonObjectEnd(normalized);
+        const tail = normalized.slice(end).replace(/\r\n?/g, '\n');
+        paragraphs.push(...tail.split('\n'));
+    }
+    return paragraphs;
 }
 
 function comparableReadableText(value: string): string {

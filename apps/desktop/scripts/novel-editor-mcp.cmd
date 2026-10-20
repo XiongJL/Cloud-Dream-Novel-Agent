@@ -1,26 +1,19 @@
 @echo off
 setlocal
-
 set "SCRIPT_DIR=%~dp0"
-set "NODE_EXE="
-
-if defined NOVEL_EDITOR_NODE_EXE (
-  set "NODE_EXE=%NOVEL_EDITOR_NODE_EXE%"
+if exist "%SCRIPT_DIR%..\agent-runtime\novel-agent-runtime.exe" (
+  "%SCRIPT_DIR%..\agent-runtime\novel-agent-runtime.exe" --mode mcp-stdio %*
+  exit /b
 )
-
-if not defined NODE_EXE (
-  for /f "delims=" %%I in ('where node 2^>nul') do (
-    if not defined NODE_EXE set "NODE_EXE=%%I"
-  )
-)
-
-if not defined NODE_EXE (
-  echo [novel-editor-mcp.cmd] node.exe not found. Set NOVEL_EDITOR_NODE_EXE or add node to PATH. 1>&2
+set "RUNTIME_ROOT=%SCRIPT_DIR%..\..\..\agent_runtime"
+set "PYTHON_EXE=%RUNTIME_ROOT%\.venv\Scripts\python.exe"
+if defined NOVEL_EDITOR_PYTHON_EXE set "PYTHON_EXE=%NOVEL_EDITOR_PYTHON_EXE%"
+if not exist "%PYTHON_EXE%" (
+  echo [novel-editor-mcp] Project Python missing. Sync agent_runtime/.venv or set NOVEL_EDITOR_PYTHON_EXE. 1>&2
   exit /b 1
 )
-
-if not defined NOVEL_EDITOR_MCP_LOG_FILE (
-  set "NOVEL_EDITOR_MCP_LOG_FILE=%TEMP%\novel-editor-mcp.log"
-)
-
-"%NODE_EXE%" "%SCRIPT_DIR%novel-editor-mcp.mjs"
+pushd "%RUNTIME_ROOT%"
+"%PYTHON_EXE%" -m novel_mcp %*
+set "MCP_EXIT=%ERRORLEVEL%"
+popd
+exit /b %MCP_EXIT%

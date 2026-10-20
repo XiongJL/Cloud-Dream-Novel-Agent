@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Chapter, Novel, Volume } from '../../../types';
 import type { RecentFile } from '../../../components/RecentFilesDropdown';
+import { chapterSaveQueue } from '../../../../shared/chapterSaveQueue';
 
 type UseChapterLifecycleParams = {
     novelId: string;
@@ -8,6 +9,7 @@ type UseChapterLifecycleParams = {
     onActiveChapterMetadataChange?: (meta: { id: string; title: string } | null) => void;
     onClearTitleCandidates?: () => void;
     onBeforeSelectChapter?: () => void;
+    getLatestContent?: () => Promise<string | undefined>;
 };
 
 export function useChapterLifecycle({
@@ -16,12 +18,13 @@ export function useChapterLifecycle({
     onActiveChapterMetadataChange,
     onClearTitleCandidates,
     onBeforeSelectChapter,
+    getLatestContent,
 }: UseChapterLifecycleParams) {
     const [novel, setNovel] = useState<Novel | null>(null);
     const [volumes, setVolumes] = useState<Volume[]>([]);
     const [currentChapter, setCurrentChapter] = useState<Chapter | null>(null);
-    const [title, setTitle] = useState('');
-    const [content, setContent] = useState('');
+    const [title, setTitleState] = useState('');
+    const [content, setContentState] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [recentFiles, setRecentFiles] = useState<RecentFile[]>([]);
     const [lastCreatedVolumeId, setLastCreatedVolumeId] = useState<string | null>(null);
@@ -35,12 +38,18 @@ export function useChapterLifecycle({
     const isCreatingChapterRef = useRef(false);
     const activeChapterIdRef = useRef<string | null>(null);
     const chapterCacheRef = useRef(new Map<string, Chapter>());
-    const saveQueueRef = useRef(Promise.resolve());
+    const saveQueue = chapterSaveQueue(novelId);
     const saveStatusTimerRef = useRef<number | null>(null);
+    const setTitle = useCallback((value: React.SetStateAction<string>) => {
+        titleRef.current = typeof value === 'function' ? value(titleRef.current) : value;
+        setTitleState(titleRef.current);
+    }, []);
+    const setContent = useCallback((value: React.SetStateAction<string>) => {
+        contentRef.current = typeof value === 'function' ? value(contentRef.current) : value;
+        setContentState(contentRef.current);
+    }, []);
 
     useEffect(() => {
-        contentRef.current = content;
-        titleRef.current = title;
         chapterRef.current = currentChapter;
         onActiveChapterMetadataChange?.(currentChapter ? { id: currentChapter.id, title: currentChapter.title } : null);
     }, [content, currentChapter, onActiveChapterMetadataChange, title]);
@@ -173,14 +182,17 @@ export function useChapterLifecycle({
     }, [currentChapter, novelId, onActiveChapterMetadataChange]);
 
     const saveChanges = useCallback(async (trigger: 'manual' | 'auto' | 'lifecycle' = 'manual') => {
+        const current = chapterRef.current;
+        if (!current) return;
+        const contentToSave = contentRef.current;
+        const titleToSave = titleRef.current;
+        if (contentToSave === current.content && titleToSave === current.title) {
+            if (trigger === 'manual') {
+                setSaveState('saved'); setSaveStatusText(t('editor.saveUpToDate')); scheduleSaveStatusReset();
+            }
+            return;
+        }
         const runSave = async () => {
-            const current = chapterRef.current;
-            if (!current) return;
-
-            const contentToSave = contentRef.current;
-            const titleToSave = titleRef.current;
-
-            if (chapterRef.current?.id !== current.id) return;
 
             const hasContentChanges = contentToSave !== current.content;
             const hasTitleChanges = titleToSave !== current.title;
@@ -211,8 +223,6 @@ export function useChapterLifecycle({
                     chapterUpdated = true;
                 }
 
-                if (chapterRef.current?.id !== current.id) return;
-
                 if (hasTitleChanges) {
                     await window.db.renameChapter({
                         chapterId: current.id,
@@ -222,15 +232,20 @@ export function useChapterLifecycle({
                     chapterUpdated = true;
                 }
 
-                if (chapterRef.current?.id !== current.id) return;
-
                 if (chapterUpdated) {
                     const updatedChapter = {
                         ...current,
                         content: contentToSave,
                         title: titleToSave,
                     };
-                    setCurrentChapter(updatedChapter);
+                    const cached = chapterCacheRef.current.get(current.id);
+                    if (!cached || cached === current || (cached.content === contentToSave && cached.title === titleToSave)) {
+                        chapterCacheRef.current.set(current.id, updatedChapter);
+                    }
+                    if (chapterRef.current?.id === current.id) {
+                        chapterRef.current = updatedChapter;
+                        setCurrentChapter(updatedChapter);
+                    }
                     addToRecentFiles(updatedChapter);
                 }
 
@@ -251,16 +266,29 @@ export function useChapterLifecycle({
             }
         };
 
-        const queued = saveQueueRef.current.then(runSave, runSave);
-        saveQueueRef.current = queued.catch(() => undefined);
-        return queued;
-    }, [addToRecentFiles, clearSaveStatusTimer, loadVolumes, scheduleSaveStatusReset, t]);
+        return saveQueue.enqueue(current.id, runSave);
+    }, [addToRecentFiles, clearSaveStatusTimer, loadVolumes, saveQueue, scheduleSaveStatusReset, t]);
+
+    const flushEdits = useCallback(async () => {
+        const chapterId = chapterRef.current?.id;
+        const latest = await getLatestContent?.();
+        if (latest !== undefined && chapterRef.current?.id === chapterId) setContent(latest);
+        // Do not re-enqueue stale current content ahead of a failed older write.
+        await saveQueue.flush();
+        await saveChanges('lifecycle');
+        await saveQueue.flush();
+    }, [getLatestContent, saveChanges, saveQueue, setContent]);
+
+    useEffect(() => window.backup.onFlush(flushEdits), [flushEdits]);
+    useEffect(() => window.novelExport.onFlush(novelId, flushEdits), [flushEdits, novelId]);
+
+    useEffect(() => window.backup.onFlush(() => saveChanges('lifecycle')), [saveChanges]);
 
     useEffect(() => {
         const timer = window.setTimeout(() => {
             if (!currentChapter) return;
             if (content !== currentChapter.content || title !== currentChapter.title) {
-                void saveChanges('auto');
+                void saveChanges('auto').catch(() => undefined);
             }
         }, 1000);
         return () => window.clearTimeout(timer);
@@ -270,7 +298,7 @@ export function useChapterLifecycle({
         const handleUnload = () => {
             if (!chapterRef.current) return;
             if (contentRef.current !== chapterRef.current.content || titleRef.current !== chapterRef.current.title) {
-                void saveChanges('lifecycle');
+                void saveChanges('lifecycle').catch(() => undefined);
             }
         };
         window.addEventListener('beforeunload', handleUnload);
@@ -306,39 +334,39 @@ export function useChapterLifecycle({
             chapterCacheRef.current.set(oldChapter.id, updatedOldChapter);
 
             const savePromise = async () => {
-                let saved = false;
                 if (oldContent !== oldChapter.content) {
                     await window.db.saveChapter({ chapterId: oldChapter.id, content: oldContent });
-                    saved = true;
                 }
                 if (oldTitle !== oldChapter.title) {
                     await window.db.renameChapter({ chapterId: oldChapter.id, title: oldTitle });
                     await loadVolumes();
-                    saved = true;
-                }
-                if (saved || !chapterCacheRef.current.has(oldChapter.id)) {
-                    chapterCacheRef.current.set(oldChapter.id, updatedOldChapter);
                 }
             };
-            void savePromise().catch((error) => console.error('[Editor] Background save failed', error));
+            if (oldContent !== oldChapter.content || oldTitle !== oldChapter.title) {
+                void saveQueue.enqueue(oldChapter.id, savePromise).catch((error) => console.error('[Editor] Background save failed', error));
+            }
         }
 
         const cached = chapterCacheRef.current.get(chapterId);
         if (cached) {
+            chapterRef.current = cached;
             onActiveChapterMetadataChange?.({ id: cached.id, title: cached.title });
             setTitle(cached.title);
             setContent(cached.content);
             setCurrentChapter(cached);
             setIsLoading(false);
         } else {
+            chapterRef.current = null;
             setCurrentChapter(null);
             setIsLoading(true);
         }
 
         try {
-            const chapter = await window.db.getChapter(chapterId);
+            const stored = await window.db.getChapter(chapterId);
+            const chapter = saveQueue.has(chapterId) ? chapterCacheRef.current.get(chapterId) || stored : stored;
             if (activeChapterIdRef.current !== chapterId) return;
             if (chapter) {
+                chapterRef.current = chapter;
                 chapterCacheRef.current.set(chapterId, chapter);
                 onActiveChapterMetadataChange?.({ id: chapter.id, title: chapter.title });
                 setTitle(chapter.title);
@@ -366,6 +394,7 @@ export function useChapterLifecycle({
         onActiveChapterMetadataChange,
         onBeforeSelectChapter,
         onClearTitleCandidates,
+        saveQueue,
     ]);
 
     const handleDeleteChapter = useCallback(async (chapterId: string) => {
@@ -373,6 +402,8 @@ export function useChapterLifecycle({
 
         try {
             const result = await window.db.deleteChapter({ chapterId });
+            saveQueue.discard(chapterId);
+            saveQueue.discard(`rename-chapter:${chapterId}`);
             chapterCacheRef.current.delete(chapterId);
             handleDeleteRecent(chapterId);
 
@@ -406,7 +437,7 @@ export function useChapterLifecycle({
         } catch (error) {
             console.error('Failed to delete chapter:', error);
         }
-    }, [clearEditorChapterState, handleDeleteRecent, novelId, syncChapterIntoEditor]);
+    }, [clearEditorChapterState, handleDeleteRecent, novelId, saveQueue, syncChapterIntoEditor]);
 
     const handleCreateChapter = useCallback(async (volumeId: string) => {
         if (isCreatingChapterRef.current) return;
@@ -436,16 +467,16 @@ export function useChapterLifecycle({
 
     const handleRenameVolume = useCallback(async (volumeId: string, newTitle: string) => {
         try {
-            await window.db.renameVolume({ volumeId, title: newTitle });
+            await saveQueue.enqueue(`rename-volume:${volumeId}`, async () => { await window.db.renameVolume({ volumeId, title: newTitle }); });
             await loadVolumes();
         } catch (error) {
             console.error('Failed to rename volume:', error);
         }
-    }, [loadVolumes]);
+    }, [loadVolumes, saveQueue]);
 
     const handleRenameChapter = useCallback(async (chapterId: string, newTitle: string) => {
         try {
-            await window.db.renameChapter({ chapterId, title: newTitle });
+            await saveQueue.enqueue(`rename-chapter:${chapterId}`, async () => { await window.db.renameChapter({ chapterId, title: newTitle }); });
             if (currentChapter?.id === chapterId) {
                 setTitle(newTitle);
             }
@@ -453,7 +484,7 @@ export function useChapterLifecycle({
         } catch (error) {
             console.error('Failed to rename chapter:', error);
         }
-    }, [currentChapter?.id, loadVolumes]);
+    }, [currentChapter?.id, loadVolumes, saveQueue, setTitle]);
 
     useEffect(() => {
         void loadVolumes();

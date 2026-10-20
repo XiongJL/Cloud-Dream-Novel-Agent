@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { prepareChapterWritingPayload } from '../../shared/chapterWritingPrompt';
+import { dataOperation } from '../backup/MaintenanceGate';
 import { jsonrepair } from 'jsonrepair';
 import type { CreativeAssetsDraft, CreativeAssetsDraftValidationResult, CreativeAssetsGeneratePayload, PromptPreviewResult } from '../ai/types';
+import type { CompiledAgentSkill } from '../ai/AgentSkillPrompt';
 import { db } from '@novel-editor/core';
 import { AiService } from '../ai/AiService';
 import * as searchIndex from '../search/searchIndex';
@@ -118,6 +121,11 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'agent.generate_consistency_review': 330000,
     'agent.generate_novel_bootstrap': 240000,
     'agent.plan_style_skill_pack': 240000,
+    'agent.style_quality': 240000,
+    'agent.analyze_skill_work_unit': 240000,
+    'agent.merge_skill_analysis': 240000,
+    'agent.get_skill_execution_policy': 15000,
+    'agent.plan_skill_execution': 240000,
     'agent.generate_skill_document': 240000,
     'agent.generate_editor_range_review': 240000,
     'agent.generate_writer_range_revision_plan': 240000,
@@ -139,6 +147,8 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'agent_skill.draft.upsert': 30000,
     'agent_skill.draft.commit': 30000,
     'agent_skill.draft.discard': 15000,
+    'agent_skill.delete.preview': 15000,
+    'agent_skill.delete': 30000,
     'agent_skill.workspace.create': 30000,
     'agent_skill.workspace.list': 15000,
     'agent_skill.workspace.read': 15000,
@@ -147,6 +157,7 @@ const AUTOMATION_TIMEOUT_MS: Record<string, number> = {
     'agent_skill.workspace.remove': 30000,
     'agent_skill.workspace.set_pack': 30000,
     'agent_skill.workspace.validate': 30000,
+    'agent_skill.workspace.prepare': 30000,
     'agent_skill.workspace.compile': 30000,
     'agent_skill.workspace.diff': 15000,
     'artifact.review.submit': 30000,
@@ -201,6 +212,9 @@ const INCOMPLETE_CHAPTER_TEXT_CONTRACT = {
     contractId: 'chapter.draft.incomplete_text',
     version: '1.0.0',
     schema: { type: 'string' },
+} satisfies AgentStructuredOutputContract;
+const CHAPTER_STATE_PENDING_CONTRACT = {
+    contractId: 'chapter.draft.state_pending', version: '1.0.0', schema: {type: 'object'},
 } satisfies AgentStructuredOutputContract;
 const DEFAULT_AUTOMATION_TIMEOUT_MS = 30000;
 
@@ -323,7 +337,8 @@ function normalizePromptPreviewKind(kind: unknown): NormalizedPromptPreviewKind 
     throw createAutomationError('INVALID_INPUT', `Unsupported prompt preview kind: ${String(kind || '')}`);
 }
 
-type ChapterDraftGenerationPayload = {
+type ChapterDraftGenerationPayload = import('../../shared/chapterWritingPrompt').ChapterSourceOptions & {
+    agentSkill?: CompiledAgentSkill;
     novelId: string;
     chapterId: string;
     currentContent: string;
@@ -493,7 +508,7 @@ export class AutomationService {
     private async startChapterDraftOperation(input: any): Promise<unknown> {
         const operationKey = assertRequiredString(input?.operationKey, 'operationKey');
         const payload = input?.payload && typeof input.payload === 'object'
-            ? input.payload as Record<string, unknown>
+            ? prepareChapterWritingPayload(input.payload as ChapterDraftGenerationPayload)
             : null;
         if (!payload) throw createAutomationError('INVALID_INPUT', 'payload is required');
         const novelId = assertRequiredString(payload.novelId, 'payload.novelId');
@@ -628,10 +643,12 @@ export class AutomationService {
         context: AutomationInvokeContext,
         task: () => Promise<T>,
         checkpointOptions: {
+            agentSkill?: CompiledAgentSkill;
             repairAttemptId?: string;
             repairedFromRevision?: number;
             modelResultRef?: string;
             autoRepair?: boolean;
+            executionLease?: import('../ai/AiService').SkillExecutionLease;
         } = {},
     ): Promise<T> {
         const contract = getAgentStructuredOutputContract(method);
@@ -644,6 +661,8 @@ export class AutomationService {
         }
         const resultRequestId = checkpointOptions.modelResultRef || context.requestId || randomUUID();
         return this.aiService.withAgentStructuredInvocation({
+            agentSkill: checkpointOptions.agentSkill,
+            executionLease: checkpointOptions.executionLease,
             requestId: resultRequestId,
             method,
             contract,
@@ -678,6 +697,7 @@ export class AutomationService {
                             validationIssues,
                             repairAttempt: 1,
                             repairAttemptId,
+                            executionLease: checkpointOptions.executionLease,
                         }, context);
                         const repairedPayload = result.repairedPayload;
                         if (!repairedPayload || typeof repairedPayload !== 'object' || Array.isArray(repairedPayload)) {
@@ -857,6 +877,7 @@ export class AutomationService {
                     modelResultRef,
                     repairAttemptId,
                     repairedFromRevision: source.revision,
+                    executionLease: params?.executionLease,
                 },
             );
             const repaired = await this.modelResultStore.findByRepairAttempt(repairAttemptId);
@@ -995,11 +1016,13 @@ export class AutomationService {
             };
         }
 
+        const chapterPayload = prepareChapterWritingPayload(payload as unknown as ChapterDraftGenerationPayload);
         return {
-            ...payload,
-            novelId: assertRequiredString(payload.novelId, 'payload.novelId'),
-            chapterId: assertRequiredString(payload.chapterId, 'payload.chapterId'),
-            currentContent: assertRequiredString(payload.currentContent, 'payload.currentContent'),
+            ...chapterPayload,
+            novelId: assertRequiredString(chapterPayload.novelId, 'payload.novelId'),
+            chapterId: assertRequiredString(chapterPayload.chapterId, 'payload.chapterId'),
+            currentContent: chapterPayload.sourcePolicy === 'outline_only' ? ''
+                : assertRequiredString(chapterPayload.currentContent, 'payload.currentContent'),
         };
     }
 
@@ -1170,6 +1193,7 @@ export class AutomationService {
 
             const batch = await this.draftStore.getBatchById(draftBatchId);
             if (!batch) throw createAutomationError('NOT_FOUND', 'Draft batch not found');
+            if ((batch as any).restoreOrigin?.requiresRevalidation) throw createAutomationError('VERSION_CONFLICT', '恢复副本中的历史批次仅供审阅，请重新生成后写回。');
             if (batch.version !== version) throw createAutomationError('VERSION_CONFLICT', 'Draft batch version conflict');
             if (!Number.isInteger(prefixLength) || prefixLength < 1 || prefixLength > batch.children.length) {
                 throw createAutomationError('INVALID_INPUT', 'prefixLength is outside the draft batch');
@@ -1280,6 +1304,7 @@ export class AutomationService {
             const writebackId = assertRequiredString(input?.writebackId, 'writebackId');
             const batch = await this.draftStore.getBatchById(draftBatchId);
             if (!batch) throw createAutomationError('NOT_FOUND', 'Draft batch not found');
+            if ((batch as any)?.restoreOrigin?.requiresRevalidation) throw createAutomationError('VERSION_CONFLICT', '恢复副本中的历史撤销仅供查看，请基于当前正文重新生成。');
             if (batch.version !== version) throw createAutomationError('VERSION_CONFLICT', 'Draft batch version conflict');
             const latestWriteback = [...(batch.writebacks ?? [])].reverse().find((item) => item.status === 'committed');
             if (!latestWriteback || latestWriteback.writebackId !== writebackId) {
@@ -1330,10 +1355,11 @@ export class AutomationService {
                 generation = result.generation;
                 return result.draft;
             },
-            { autoRepair: true },
+            { autoRepair: true, agentSkill: payload.agentSkill },
         );
         const sanitizedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(generatedDraft));
         return this.draftStore.create({
+            agentSkill: payload.agentSkill,
             workspace: 'ai-workbench',
             type,
             source: 'internal-ai',
@@ -1362,9 +1388,10 @@ export class AutomationService {
         context: AutomationInvokeContext,
         options?: { deferPersistence?: boolean },
     ): Promise<DraftSessionRecord | PreparedChapterDraft> {
+        payload = prepareChapterWritingPayload(payload);
         assertRequiredString(payload?.novelId, 'novelId');
         assertRequiredString(payload?.chapterId, 'chapterId');
-        if (payload?.mode === 'new_chapter') {
+        if (payload?.mode === 'new_chapter' || payload?.sourcePolicy === 'outline_only') {
             if (typeof payload.currentContent !== 'string') {
                 throw createAutomationError('INVALID_INPUT', 'currentContent must be a string');
             }
@@ -1399,6 +1426,7 @@ export class AutomationService {
             throw createAutomationError('INVALID_INPUT', 'draftBatchId and integer childIndex must be supplied together');
         }
         let sourceSnapshot: ChapterDraftPayload['sourceSnapshot'];
+        let replacementBaseContent = payload.currentContent;
         if (!draftBatchId) {
             const sourceChapter = await db.chapter.findUnique({
                 where: { id: payload.chapterId },
@@ -1412,6 +1440,7 @@ export class AutomationService {
                 version: sourceChapter.version,
                 contentHash: createHash('sha256').update(sourceChapter.content || '', 'utf8').digest('hex'),
             };
+            if (payload.sourcePolicy === 'outline_only') replacementBaseContent = sourceChapter.content || '';
         }
         const {
             presentation: _presentation,
@@ -1433,12 +1462,30 @@ export class AutomationService {
             consistency: { ok: boolean; issues: string[] };
             generation?: import('../ai/types').AiGenerationMetadata;
         };
+        const requireVerifiedState = Boolean(draftBatchId && payload.batchContext?.requireVerifiedState === true);
+        const stateCheckpointRef = requireVerifiedState ? `chapter-state:${createHash('sha256').update(JSON.stringify({
+            draftBatchId, childIndex, generationRevision: payload.generationRevision ?? 1, input: chapterGeneratePayload,
+        })).digest('hex')}` : '';
+        const savedGeneration = stateCheckpointRef ? await this.modelResultStore.getLatest(stateCheckpointRef) : null;
         try {
-            result = await this.aiService.continueWriting(
-                chapterGeneratePayload,
-                context.signal,
-                context.onProviderActivity,
-            );
+            if (savedGeneration) {
+                if (savedGeneration.contractId !== CHAPTER_STATE_PENDING_CONTRACT.contractId) {
+                    throw createAutomationError('PERSISTENCE_ERROR', '章节状态检查点类型不匹配，不能重复请求生成正文。');
+                }
+                try { result = JSON.parse(savedGeneration.rawText); }
+                catch { throw createAutomationError('PERSISTENCE_ERROR', '章节状态检查点无法读取，不能重复请求生成正文。'); }
+                if (!result || typeof result.text !== 'string' || !Array.isArray(result.usedContext)) {
+                    throw createAutomationError('PERSISTENCE_ERROR', '章节状态检查点缺少完整生成结果。');
+                }
+            } else {
+                result = await this.aiService.continueWriting(
+                    chapterGeneratePayload,
+                    context.signal,
+                    context.onProviderActivity,
+                );
+                if (stateCheckpointRef) await this.modelResultStore.save(stateCheckpointRef,
+                    'chapter.generate_draft.state_pending', CHAPTER_STATE_PENDING_CONTRACT, JSON.stringify(result));
+            }
         } catch (error) {
             const normalized = normalizeAiError(error);
             const details = normalized.details ?? {};
@@ -1517,7 +1564,13 @@ export class AutomationService {
                 narrativeStateDelta = extracted.delta;
             } catch (error) {
                 if (context.signal?.aborted) throw error;
-                stateExtractionWarning = '章节状态抽取失败，已使用节拍台账继续生成。';
+                if (requireVerifiedState) {
+                    throw createAutomationError('NARRATIVE_STATE_EXTRACTION_FAILED',
+                        '本章正文已保存，实际状态核对失败，已停止后续章节。可从原任务检查点继续核对，正文不会重复生成。',
+                        {generationCheckpointRef: stateCheckpointRef, draftBatchId, childIndex, textPersisted: true,
+                            causeCode: normalizeAiError(error).code});
+                }
+                stateExtractionWarning = '章节状态抽取失败；实际状态未验证，节拍仅作计划参考。';
                 devLogError('AutomationService.chapter.state-extraction', error, {
                     draftBatchId,
                     childIndex,
@@ -1532,12 +1585,15 @@ export class AutomationService {
             : draftBatchId
                 ? `draft-batch:${draftBatchId}:${childIndex}`
                 : payload.chapterId;
-        const baseContent = isRewriteBatch ? payload.currentContent : draftBatchId ? '' : payload.currentContent;
+        const replaceChapter = isRewriteBatch || payload.mode === 'rewrite_chapter';
+        const baseContent = payload.sourcePolicy === 'outline_only' ? replacementBaseContent
+            : isRewriteBatch ? payload.currentContent : draftBatchId ? '' : payload.currentContent;
         const chapterPayload: ChapterDraftPayload = {
             chapterId: targetChapterId,
+            writeMode: replaceChapter ? 'replace' : 'append',
             baseContent,
             generatedText,
-            content: isRewriteBatch ? generatedText : appendPlainTextToLexical(baseContent, generatedText),
+            content: replaceChapter ? ensureLexicalDocument(generatedText) : appendPlainTextToLexical(baseContent, generatedText),
             presentation: normalizedPresentation,
             usedContext: result.usedContext,
             warnings: [
@@ -1553,6 +1609,7 @@ export class AutomationService {
         };
 
         const sessionInput = {
+            agentSkill: payload.agentSkill,
             workspace: 'chapter-editor',
             type: 'chapter-draft',
             source: 'internal-ai',
@@ -1659,6 +1716,7 @@ export class AutomationService {
         };
         try {
             result = await this.aiService.continueWriting({
+                agentSkill: source.agentSkill,
                 novelId: source.novelId,
                 chapterId: sourcePayload.sourceSnapshot?.chapterId || sourcePayload.chapterId,
                 currentContent: normalizeChapterDraftText(sourcePayload.generatedText, revisedTitle),
@@ -1726,12 +1784,14 @@ export class AutomationService {
             novelId: source.novelId,
             chapterId: source.chapterId,
             revisionOfDraftSessionId: source.draftSessionId,
+            agentSkill: source.agentSkill,
             reviewRequestId: input.reviewRequestId?.trim() || randomUUID(),
             status: 'draft',
             payload: {
                 ...sourcePayload,
                 generatedText,
-                content: appendPlainTextToLexical(sourcePayload.baseContent, generatedText),
+                content: sourcePayload.writeMode === 'replace' ? ensureLexicalDocument(generatedText)
+                    : appendPlainTextToLexical(sourcePayload.baseContent, generatedText),
                 usedContext: result.usedContext,
                 warnings: result.warnings,
                 contextPolicy: result.contextPolicy,
@@ -1792,6 +1852,7 @@ export class AutomationService {
             context,
             async () => {
                 const result = await this.aiService.generateCreativeAssets({
+                    agentSkill: source.agentSkill,
                     novelId: source.novelId,
                     locale: input.locale || 'zh-CN',
                     brief: '根据审批意见重写当前创作素材审核包。',
@@ -1813,7 +1874,7 @@ export class AutomationService {
                 generation = result.generation;
                 return result.draft;
             },
-            { autoRepair: true },
+            { autoRepair: true, agentSkill: source.agentSkill },
         );
         const revisedDraft = sanitizeGeneratedDraft(normalizeCreativeDraft(generatedDraft));
         for (const map of revisedDraft.maps || []) {
@@ -1829,6 +1890,7 @@ export class AutomationService {
         return this.draftStore.create({
             workspace: source.workspace,
             type: 'creative-assets',
+            agentSkill: source.agentSkill,
             source: 'internal-ai',
             origin: context.origin ?? 'desktop-ui',
             novelId: source.novelId,
@@ -1899,6 +1961,7 @@ export class AutomationService {
         if (!session) {
             throw Object.assign(new Error('Draft session not found'), { code: 'NOT_FOUND' });
         }
+        if ((session as any).restoreOrigin?.requiresRevalidation) throw createAutomationError('VERSION_CONFLICT', '恢复副本中的历史草稿仅供审阅，请重新生成后写回。');
         if (typeof input.version === 'number' && session.version !== input.version) {
             throw Object.assign(new Error('Draft session version conflict'), { code: 'VERSION_CONFLICT' });
         }
@@ -1930,6 +1993,7 @@ export class AutomationService {
         assertRequiredString(input?.draftSessionId, 'draftSessionId');
         assertRequiredNumber(input?.version, 'version');
         const session = await this.draftStore.getById(input.draftSessionId);
+        if ((session as any)?.restoreOrigin?.requiresRevalidation) throw createAutomationError('VERSION_CONFLICT', '恢复副本中的历史草稿仅供审阅，请重新生成后写回。');
         if (!session) {
             throw Object.assign(new Error('Draft session not found'), { code: 'NOT_FOUND' });
         }
@@ -1994,7 +2058,9 @@ export class AutomationService {
                 );
             }
             const chapterPayload = session.payload as ChapterDraftPayload;
-            const normalizedContent = appendPlainTextToLexical(chapterPayload.baseContent, chapterPayload.generatedText);
+            const normalizedContent = chapterPayload.writeMode === 'replace'
+                ? ensureLexicalDocument(chapterPayload.generatedText)
+                : appendPlainTextToLexical(chapterPayload.baseContent, chapterPayload.generatedText);
             const sourceSnapshot = chapterPayload.sourceSnapshot;
             const expectedHash = sourceSnapshot?.contentHash
                 ?? createHash('sha256').update(chapterPayload.baseContent || '', 'utf8').digest('hex');
@@ -2099,6 +2165,7 @@ export class AutomationService {
             const writebackId = assertRequiredString(input?.writebackId, 'writebackId');
             const session = await this.draftStore.getById(draftSessionId);
             if (!session) throw createAutomationError('NOT_FOUND', 'Draft session not found');
+            if ((session as any)?.restoreOrigin?.requiresRevalidation) throw createAutomationError('VERSION_CONFLICT', '恢复副本中的历史撤销仅供查看，请基于当前正文重新生成。');
             if (session.version !== version) throw createAutomationError('VERSION_CONFLICT', 'Draft session version conflict');
             const latestWriteback = [...(session.writebacks ?? [])].reverse().find((item) => item.status === 'committed');
             if (!latestWriteback || latestWriteback.writebackId !== writebackId) {
@@ -2256,10 +2323,19 @@ export class AutomationService {
     }
 
     async invoke(method: string, params: any, context: AutomationInvokeContext): Promise<unknown> {
+        return dataOperation(() => this.invokeForBackupGate(method, params, context), method !== 'agent_skill.delete.preview' && !/\.(get|list|read|search|outline|health)$/.test(method));
+    }
+
+    private async invokeForBackupGate(method: string, params: any, context: AutomationInvokeContext): Promise<unknown> {
         return this.withTimeout(method, params, context, async (signal) => {
             const activeContext = { ...context, signal };
+            const executionLease = params?.executionBudget ? {
+                maxCalls: Math.max(1, Math.min(3, Number(params.executionBudget.maxProviderCalls) || 3)),
+                maxOutputTokens: Math.max(128, Math.min(this.aiService.getSettings().http.maxTokens,
+                    Number(params.executionBudget.recoveryTokens) || 8192)), calls: 0, attempts: [],
+            } : undefined;
             const invokeStructured = <T>(task: () => Promise<T>, autoRepair = false): Promise<T> => (
-                this.invokeAgentStructured(method, activeContext, task, { autoRepair })
+                this.invokeAgentStructured(method, activeContext, task, { autoRepair, agentSkill: params?.agentSkill, executionLease })
             );
             switch (method) {
                 case 'agent.generate_chat':
@@ -2280,16 +2356,26 @@ export class AutomationService {
                     return invokeStructured(() => this.aiService.generateAgentNovelBootstrap(params, signal));
                 case 'agent.plan_style_skill_pack':
                     return invokeStructured(() => this.aiService.planAgentStyleSkillPack(params, signal));
+                case 'agent.style_quality':
+                    return invokeStructured(() => this.aiService.evaluateStyleQuality(params, signal), true);
+                case 'agent.analyze_skill_work_unit':
+                    return invokeStructured(() => this.aiService.analyzeSkillWorkUnit(params, signal), true);
+                case 'agent.merge_skill_analysis':
+                    return invokeStructured(() => this.aiService.mergeSkillAnalysis(params, signal), true);
+                case 'agent.get_skill_execution_policy':
+                    return this.aiService.getSkillExecutionPolicy(params);
+                case 'agent.plan_skill_execution':
+                    return invokeStructured(() => this.aiService.planSkillExecution(params, signal));
                 case 'agent.generate_skill_document':
                     return this.aiService.generateAgentSkillDocument(params, signal);
                 case 'agent.generate_editor_range_review':
-                    return invokeStructured(() => this.aiService.generateAgentEditorRangeReview(params, signal));
+                    return invokeStructured(() => this.aiService.generateAgentEditorRangeReview(params, signal), Boolean(params?.scopeBundle?.skillAnalysis));
                 case 'agent.generate_writer_range_revision_plan':
-                    return invokeStructured(() => this.aiService.generateAgentWriterRangeRevisionPlan(params, signal));
+                    return invokeStructured(() => this.aiService.generateAgentWriterRangeRevisionPlan(params, signal), Boolean(params?.scopeBundle?.skillAnalysis));
                 case 'agent.generate_reader_chapter_evaluation':
                     return invokeStructured(() => this.aiService.generateAgentReaderChapterEvaluation(params, signal));
                 case 'agent.generate_worldbuilding_range_consistency':
-                    return invokeStructured(() => this.aiService.generateAgentWorldbuildingRangeConsistency(params, signal));
+                    return invokeStructured(() => this.aiService.generateAgentWorldbuildingRangeConsistency(params, signal), Boolean(params?.scopeBundle?.skillAnalysis));
                 case 'agent.extract_research_claims':
                     return invokeStructured(() => this.aiService.extractAgentResearchClaims(params, signal));
                 case 'agent.generate_research_fact_check':
@@ -2312,6 +2398,26 @@ export class AutomationService {
                     return this.agentSkillStore.getSkill(params);
                 case 'agent_skill.binding.list':
                     return this.agentSkillStore.listBindings(params || {});
+                case 'agent_skill.pack.list':
+                    return this.agentSkillStore.listPacks(params || {});
+                case 'agent_skill.pack.get':
+                    return this.agentSkillStore.getPack(params);
+                case 'agent_skill.pack.default.get':
+                    return this.agentSkillStore.getPackDefault(params);
+                case 'agent_skill.pack.default.set':
+                    return this.agentSkillStore.setPackDefault(params);
+                case 'agent_skill.visibility.preview':
+                    return this.agentSkillStore.previewVisibility(params);
+                case 'agent_skill.visibility.set':
+                    return this.agentSkillStore.setVisibility(params);
+                case 'agent_skill.visibility.check':
+                    return this.agentSkillStore.checkVisibility(params);
+                case 'agent_skill.delete.preview':
+                    return this.agentSkillStore.previewDeletion(params);
+                case 'agent_skill.delete':
+                    return this.agentSkillStore.deleteTarget(params);
+                case 'agent_skill.draft.publication.set':
+                    return this.agentSkillStore.setDraftPublication(params);
                 case 'agent_skill.draft.list':
                     return this.agentSkillStore.listDrafts(params || {});
                 case 'agent_skill.draft.get':
@@ -2338,6 +2444,8 @@ export class AutomationService {
                     return this.agentSkillStore.setAuthoringPack(params);
                 case 'agent_skill.workspace.validate':
                     return this.agentSkillStore.validateAuthoringWorkspace(params);
+                case 'agent_skill.workspace.prepare':
+                    return this.agentSkillStore.prepareAuthoringWorkspace(params);
                 case 'agent_skill.workspace.compile':
                     return this.agentSkillStore.compileAuthoringWorkspace(params);
                 case 'agent_skill.workspace.diff':

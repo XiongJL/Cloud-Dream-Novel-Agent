@@ -30,6 +30,7 @@ RecoveryFailureKind = Literal[
     "artifact_publish_failed",
     "persistence_failed",
     "side_effect_unknown",
+    "execution_incomplete",
 ]
 RecoveryStrategy = Literal[
     "retry_request",
@@ -153,7 +154,8 @@ class AgentPlanStep(BaseModel):
     title: str
     tools: list[str] = Field(default_factory=list)
     toolchain: ToolchainInvocation | None = None
-    skills: list[AgentSkillRef] = Field(default_factory=list, max_length=2)
+    skills: list[AgentSkillRef] = Field(default_factory=list)
+    skillPackSelection: dict[str, Any] | None = None
     status: StepStatus = "pending"
 
 
@@ -168,6 +170,7 @@ class AgentPlan(BaseModel):
     deliverable: Literal["report", "expert_report", "chapter_draft", "chapter_draft_batch", "creative_assets_draft"] = "report"
     requestedEffect: IntentEffect = "unknown"
     userDecisions: dict[str, Any] | None = None
+    skillPackRequest: dict[str, Any] | None = None
 
 
 class AgentMessage(BaseModel):
@@ -437,6 +440,7 @@ class AgentRecoveryDescriptor(BaseModel):
     failedAtPhase: Literal["model_pending", "model_received", "normalizing", "publishing"]
     retryStrategy: RecoveryStrategy
     canRecover: bool
+    canFinalizeCompleted: bool = False
     recoveryRevision: int = Field(default=1, ge=1)
     actionLabel: str | None = None
     blockedReason: Literal[
@@ -444,6 +448,7 @@ class AgentRecoveryDescriptor(BaseModel):
         "stale_dependency",
         "unsafe_side_effect",
         "repair_exhausted",
+        "unconfirmed_model_request",
     ] | None = None
     completedArtifactIds: list[str] = Field(default_factory=list)
     affectedArtifactIds: list[str] = Field(default_factory=list)
@@ -461,6 +466,8 @@ class AgentRun(BaseModel):
     events: list[AgentRunEvent] = Field(default_factory=list)
     artifacts: list[AgentArtifact] = Field(default_factory=list)
     skillSnapshot: list[AgentSkillRef] = Field(default_factory=list)
+    skillPackSnapshot: list[dict[str, Any]] = Field(default_factory=list)
+    skillAccessSnapshot: list[dict[str, Any]] = Field(default_factory=list)
     draftSessionId: str | None = None
     draftBatchId: str | None = None
     draftOperationId: str | None = None
@@ -479,6 +486,7 @@ class AgentRun(BaseModel):
     resumedFrom: dict[str, Any] | None = None
     completionKind: RunCompletionKind = "complete"
     recovery: AgentRecoveryDescriptor | None = None
+    failure: dict[str, Any] | None = None
 
 
 class AgentRunStatusResult(BaseModel):
@@ -508,6 +516,7 @@ class AgentRunStatusResult(BaseModel):
     failureRevision: int = 0
     completionKind: RunCompletionKind = "complete"
     recovery: AgentRecoveryDescriptor | None = None
+    failure: dict[str, Any] | None = None
 
 
 class AgentState(BaseModel):
@@ -521,3 +530,4 @@ class AgentState(BaseModel):
     evidenceSnapshots: dict[str, AgentEvidenceSnapshot] = Field(default_factory=dict)
     recoveryRecords: dict[str, dict[str, Any]] = Field(default_factory=dict)
     pendingModelResults: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    skillRequestRefs: dict[str, dict[str, Any]] = Field(default_factory=dict)

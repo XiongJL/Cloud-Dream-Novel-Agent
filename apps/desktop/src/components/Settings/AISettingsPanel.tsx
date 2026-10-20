@@ -4,6 +4,8 @@ import { useTranslation } from 'react-i18next';
 import { formatAiError, formatAiErrorFromUnknown } from '../../utils/aiError';
 import { Combobox } from '../ui/Combobox';
 import { ModelIdCombobox, type ModelIdOption } from './ModelIdCombobox';
+import { McpServerSettings } from './McpServerSettings';
+import { DEFAULT_MAX_OUTPUT_TOKENS } from '../../../shared/modelOutputCapabilities';
 import {
     AGENT_CONTEXT_WINDOW_PRESETS,
     AGENT_TEXT_MODEL_CAPABILITY_CATALOG,
@@ -24,7 +26,6 @@ const IMAGE_MODELS = [
 
 type CreativityLevel = 'safe' | 'balanced' | 'creative';
 type StatusTone = 'neutral' | 'error' | 'success';
-type CopyTone = 'neutral' | 'error' | 'success';
 type ContextWindowTarget = 'http' | 'mcpCli';
 
 type SettingFieldProps = {
@@ -102,8 +103,6 @@ export function AISettingsPanel({ isDark }: Props) {
     const [testPrompt, setTestPrompt] = useState(t('settings.ai.defaultTestPrompt'));
     const [creativityLevel, setCreativityLevel] = useState<CreativityLevel>('balanced');
     const [mcpSetup, setMcpSetup] = useState<McpCliSetupPayload | null>(null);
-    const [copyStatus, setCopyStatus] = useState('');
-    const [copyTone, setCopyTone] = useState<CopyTone>('neutral');
     const [customContextWindow, setCustomContextWindow] = useState<Record<ContextWindowTarget, boolean>>({
         http: false,
         mcpCli: false,
@@ -202,8 +201,6 @@ export function AISettingsPanel({ isDark }: Props) {
             .catch((error) => {
                 console.error('[AISettingsPanel] load mcp setup failed:', error);
                 if (!mounted) return;
-                setCopyTone('error');
-                setCopyStatus(t('settings.ai.mcpCopy.loadFailed'));
             });
 
         return () => {
@@ -257,7 +254,7 @@ export function AISettingsPanel({ isDark }: Props) {
         });
     };
 
-    const applyPreset = (preset: 'doubao-ark' | 'openai-compatible' | 'openai-responses' | 'gemini-openai-compatible') => {
+    const applyPreset = (preset: 'doubao-ark' | 'deepseek' | 'openai-compatible' | 'openai-responses' | 'gemini-openai-compatible') => {
         if (!settings) return;
         setCustomContextWindow((current) => ({ ...current, http: false }));
         setCustomContextWindowDraft((current) => ({ ...current, http: '' }));
@@ -278,12 +275,33 @@ export function AISettingsPanel({ isDark }: Props) {
                     imageOutputFormat: 'png',
                     imageWatermark: false,
                     timeoutMs: 60000,
-                    maxTokens: 4096,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                     temperature: 0.7,
                 },
             });
             setStatusTone('success');
             setStatus(t('settings.ai.status.presetDoubao'));
+            return;
+        }
+
+        if (preset === 'deepseek') {
+            setCreativityLevel(temperatureToCreativityLevel(0.7));
+            setSettings({
+                ...settings,
+                providerType: 'http',
+                http: {
+                    ...settings.http,
+                    apiMode: 'chat-completions',
+                    baseUrl: 'https://api.deepseek.com',
+                    model: 'deepseek-flash',
+                    contextWindowTokens: 0,
+                    timeoutMs: 60000,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                    temperature: 0.7,
+                },
+            });
+            setStatusTone('success');
+            setStatus(t('settings.ai.status.presetDeepseek'));
             return;
         }
 
@@ -303,7 +321,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     imageOutputFormat: 'png',
                     imageWatermark: true,
                     timeoutMs: 60000,
-                    maxTokens: 4096,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                     temperature: 0.7,
                 },
             });
@@ -328,7 +346,7 @@ export function AISettingsPanel({ isDark }: Props) {
                     imageOutputFormat: 'png',
                     imageWatermark: true,
                     timeoutMs: 60000,
-                    maxTokens: 4096,
+                    maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                     temperature: 0.7,
                 },
             });
@@ -352,7 +370,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 imageOutputFormat: 'png',
                 imageWatermark: true,
                 timeoutMs: 60000,
-                maxTokens: 4096,
+                maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
                 temperature: 0.7,
             },
         });
@@ -427,24 +445,6 @@ export function AISettingsPanel({ isDark }: Props) {
         }
     };
 
-    const copyMcpContent = async (kind: 'codex' | 'claude' | 'json') => {
-        if (!mcpSetup) return;
-        const content = kind === 'codex'
-            ? mcpSetup.codexToml
-            : kind === 'claude'
-                ? mcpSetup.claudeCommand
-                : mcpSetup.jsonConfig;
-        try {
-            await navigator.clipboard.writeText(content);
-            setCopyTone('success');
-            setCopyStatus(t(`settings.ai.mcpCopy.copyOk.${kind}`));
-        } catch (error) {
-            console.error('[AISettingsPanel] copy mcp setup failed:', error);
-            setCopyTone('error');
-            setCopyStatus(t('settings.ai.mcpCopy.copyFailed'));
-        }
-    };
-
     if (!settings) {
         return <div className={clsx('text-sm', isDark ? 'text-neutral-400' : 'text-gray-500')}>{t('common.loading')}</div>;
     }
@@ -465,12 +465,6 @@ export function AISettingsPanel({ isDark }: Props) {
     const inputClass = clsx('w-full border rounded-xl px-4 py-3 outline-none focus:border-indigo-500 transition-colors text-sm', isDark ? 'bg-[#0a0a0f] border-white/10 text-white' : 'bg-white border-gray-200 text-gray-900');
     const textareaClass = clsx('w-full border rounded-xl px-4 py-3 outline-none focus:border-indigo-500 transition-colors text-sm resize-y', isDark ? 'bg-[#0a0a0f] border-white/10 text-white placeholder:text-neutral-600' : 'bg-white border-gray-200 text-gray-900 placeholder:text-gray-400');
     const statusClass = statusTone === 'error' ? (isDark ? 'border-rose-400/30 bg-rose-400/10 text-rose-300' : 'border-rose-200 bg-rose-50 text-rose-700') : statusTone === 'success' ? (isDark ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300' : 'border-emerald-200 bg-emerald-50 text-emerald-700') : (isDark ? 'border-white/10 bg-white/5 text-neutral-300' : 'border-gray-200 bg-gray-50 text-gray-600');
-    const copyStatusClass = copyTone === 'error'
-        ? (isDark ? 'text-rose-300' : 'text-rose-700')
-        : copyTone === 'success'
-            ? (isDark ? 'text-emerald-300' : 'text-emerald-700')
-            : (isDark ? 'text-neutral-400' : 'text-gray-500');
-
     return (
         <div className="space-y-8">
             <div className={clsx('rounded-2xl border px-4 py-3 space-y-2', isDark ? 'border-white/10 bg-white/5' : 'border-gray-200 bg-gray-50')}>
@@ -488,6 +482,7 @@ export function AISettingsPanel({ isDark }: Props) {
                 {settings.providerType === 'http' ? (
                     <div className="flex flex-wrap gap-2 pt-1">
                         <button onClick={() => applyPreset('doubao-ark')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-amber-400/30 text-amber-300 hover:bg-white/5' : 'border-amber-300 text-amber-700 hover:bg-amber-50')}>{t('settings.ai.preset.doubao')}</button>
+                        <button type="button" onClick={() => applyPreset('deepseek')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-sky-400/30 text-sky-300 hover:bg-white/5' : 'border-sky-300 text-sky-700 hover:bg-sky-50')}>{t('settings.ai.preset.deepseek')}</button>
                         <button onClick={() => applyPreset('openai-compatible')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-indigo-400/30 text-indigo-300 hover:bg-white/5' : 'border-indigo-200 text-indigo-700 hover:bg-indigo-50')}>{t('settings.ai.preset.openai')}</button>
                         <button onClick={() => applyPreset('openai-responses')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-purple-400/30 text-purple-300 hover:bg-white/5' : 'border-purple-200 text-purple-700 hover:bg-purple-50')}>{t('settings.ai.preset.openaiResponses')}</button>
                         <button onClick={() => applyPreset('gemini-openai-compatible')} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', isDark ? 'border-emerald-400/30 text-emerald-300 hover:bg-white/5' : 'border-emerald-200 text-emerald-700 hover:bg-emerald-50')}>{t('settings.ai.preset.gemini')}</button>
@@ -566,7 +561,7 @@ export function AISettingsPanel({ isDark }: Props) {
                                     <summary className="cursor-pointer text-sm">{t('settings.ai.generationAdvanced')}</summary>
                                 {settings.http.outputBudgetMode === 'manual' ? (
                                     <SettingField label={t('settings.ai.maxTokens')} hint={t('settings.ai.maxTokensHint')}>
-                                        <input type="number" min={128} step={1024} value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || 4096 } })} placeholder="18432" className={inputClass} />
+                                        <input type="number" min={128} step={1024} value={settings.http.maxTokens} onChange={(e) => setSettings({ ...settings, http: { ...settings.http, maxTokens: Number(e.target.value) || DEFAULT_MAX_OUTPUT_TOKENS } })} placeholder="32768" className={inputClass} />
                                     </SettingField>
                                 ) : null}
                                 <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensHint')} className="md:col-span-2">
@@ -833,13 +828,10 @@ export function AISettingsPanel({ isDark }: Props) {
                 </div>
             ) : (
                 <div className="space-y-3">
+                    <McpServerSettings isDark={isDark} stdio={mcpSetup} />
                     <div className={clsx('text-xs font-medium uppercase tracking-widest', isDark ? 'text-neutral-500' : 'text-gray-500')}>{t('settings.ai.section.mcp')}</div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className={clsx('md:col-span-2 rounded-xl border px-4 py-3 space-y-3', isDark ? 'border-white/10 bg-white/5' : 'border-gray-200 bg-gray-50')}>
-                            <div className="space-y-1">
-                                <p className={clsx('text-sm font-medium', isDark ? 'text-white' : 'text-gray-900')}>{t('settings.ai.mcpCopy.title')}</p>
-                                <p className={clsx('text-xs leading-5', isDark ? 'text-neutral-400' : 'text-gray-600')}>{t('settings.ai.mcpCopy.desc')}</p>
-                            </div>
                             <SettingField label={t('settings.ai.contextWindowTokens')} hint={t('settings.ai.contextWindowTokensMcpHint')}>
                                 <select
                                     value={mcpContextWindowMode}
@@ -902,28 +894,6 @@ export function AISettingsPanel({ isDark }: Props) {
                                     />
                                 ) : null}
                             </SettingField>
-                            <SettingField label={t('settings.ai.mcpCopy.codexLabel')} hint={t('settings.ai.mcpCopy.codexHint')}>
-                                <textarea value={mcpSetup?.codexToml || ''} readOnly placeholder={t('settings.ai.mcpCopy.loading')} rows={5} className={textareaClass} />
-                            </SettingField>
-                            <div className="flex flex-wrap gap-2">
-                                <button onClick={() => copyMcpContent('codex')} disabled={!mcpSetup} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', !mcpSetup ? (isDark ? 'border-white/5 text-neutral-600 bg-white/5 cursor-not-allowed' : 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed') : (isDark ? 'border-indigo-400/30 text-indigo-300 hover:bg-indigo-400/10' : 'border-indigo-200 text-indigo-700 hover:bg-indigo-50'))}>{t('settings.ai.mcpCopy.copyCodex')}</button>
-                            </div>
-                            <SettingField label={t('settings.ai.mcpCopy.claudeLabel')} hint={t('settings.ai.mcpCopy.claudeHint')}>
-                                <input value={mcpSetup?.claudeCommand || ''} readOnly placeholder={t('settings.ai.mcpCopy.loading')} className={inputClass} />
-                            </SettingField>
-                            <div className="flex flex-wrap gap-2">
-                                <button onClick={() => copyMcpContent('claude')} disabled={!mcpSetup} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', !mcpSetup ? (isDark ? 'border-white/5 text-neutral-600 bg-white/5 cursor-not-allowed' : 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed') : (isDark ? 'border-indigo-400/30 text-indigo-300 hover:bg-indigo-400/10' : 'border-indigo-200 text-indigo-700 hover:bg-indigo-50'))}>{t('settings.ai.mcpCopy.copyClaude')}</button>
-                            </div>
-                            <SettingField label={t('settings.ai.mcpCopy.jsonLabel')} hint={t('settings.ai.mcpCopy.jsonHint')}>
-                                <textarea value={mcpSetup?.jsonConfig || ''} readOnly placeholder={t('settings.ai.mcpCopy.loading')} rows={6} className={textareaClass} />
-                            </SettingField>
-                            <div className="flex flex-wrap gap-2">
-                                <button onClick={() => copyMcpContent('json')} disabled={!mcpSetup} className={clsx('px-3 py-1.5 rounded-lg border text-xs transition-colors', !mcpSetup ? (isDark ? 'border-white/5 text-neutral-600 bg-white/5 cursor-not-allowed' : 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed') : (isDark ? 'border-indigo-400/30 text-indigo-300 hover:bg-indigo-400/10' : 'border-indigo-200 text-indigo-700 hover:bg-indigo-50'))}>{t('settings.ai.mcpCopy.copyJson')}</button>
-                            </div>
-                            {!mcpSetup?.launcherExists ? (
-                                <p className={clsx('text-xs', isDark ? 'text-amber-300' : 'text-amber-700')}>{t('settings.ai.mcpCopy.pathMissing')}</p>
-                            ) : null}
-                            {copyStatus ? <p className={clsx('text-xs', copyStatusClass)}>{copyStatus}</p> : null}
                         </div>
                     </div>
                 </div>
@@ -980,9 +950,7 @@ export function AISettingsPanel({ isDark }: Props) {
                                 <button onClick={() => runCheck('proxy')} disabled={isTesting || isSaving} className={clsx("px-4 py-2 rounded-lg border text-sm transition-colors", isTesting ? (isDark ? 'border-white/5 text-neutral-600 bg-white/5 cursor-not-allowed' : 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed') : "border-indigo-400/40 hover:bg-indigo-500/10")}>{isTesting ? t('common.loading') : t('settings.ai.testProxy')}</button>
                                 <button onClick={runGenerateCheck} disabled={isTesting || isSaving} className={clsx("px-4 py-2 rounded-lg border text-sm transition-colors", isTesting ? (isDark ? 'border-white/5 text-neutral-600 bg-white/5 cursor-not-allowed' : 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed') : "border-emerald-400/40 hover:bg-emerald-500/10")}>{isTesting ? t('common.loading') : t('settings.ai.testGenerate')}</button>
                             </>
-                        ) : (
-                            <button onClick={() => runCheck('mcp')} disabled={isTesting || isSaving} className={clsx("px-4 py-2 rounded-lg border text-sm transition-colors", isTesting ? (isDark ? 'border-white/5 text-neutral-600 bg-white/5 cursor-not-allowed' : 'border-gray-200 text-gray-400 bg-gray-50 cursor-not-allowed') : "border-indigo-400/40 hover:bg-indigo-500/10")}>{isTesting ? t('common.loading') : t('settings.ai.testMcp')}</button>
-                        )}
+                        ) : null}
                         <button onClick={saveSettings} disabled={isSaving} className={clsx('px-4 py-2 rounded-lg text-sm text-white', isSaving ? 'bg-indigo-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-500')}>
                             {isSaving ? t('common.loading') : t('common.save')}
                         </button>

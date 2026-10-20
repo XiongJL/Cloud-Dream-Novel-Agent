@@ -84,9 +84,10 @@ function normalizeBeat(input: ChapterBeatInput, childIndex: number): ChapterBeat
     };
 }
 
-function normalizeBeats(beats: ChapterBeatInput[]): ChapterBeat[] {
-    if (!Array.isArray(beats) || beats.length < 1 || beats.length > 5) {
-        throw createStoreError('INVALID_INPUT', 'A chapter draft batch must contain between 1 and 5 beats');
+function normalizeBeats(beats: ChapterBeatInput[], mode: DraftBatchRecord['mode']): ChapterBeat[] {
+    const maximum = mode === 'batch_rewrite' ? 5 : 10;
+    if (!Array.isArray(beats) || beats.length < 1 || beats.length > maximum) {
+        throw createStoreError('INVALID_INPUT', `A chapter draft batch must contain between 1 and ${maximum} beats`);
     }
     return beats.map(normalizeBeat);
 }
@@ -773,7 +774,7 @@ export class DraftSessionStore {
         if (input.mode !== 'sequence_continuation' && input.mode !== 'batch_rewrite') {
             throw createStoreError('INVALID_INPUT', 'Unsupported draft batch mode');
         }
-        const beats = normalizeBeats(input.beats);
+        const beats = normalizeBeats(input.beats, input.mode);
         const targetChapterIds = Array.isArray(input.targetChapterIds)
             ? input.targetChapterIds.map((chapterId) => String(chapterId || '').trim()).filter(Boolean)
             : [];
@@ -849,7 +850,7 @@ export class DraftSessionStore {
         if (current.children.some((child) => Boolean(child.draftSessionId))) {
             throw createStoreError('INVALID_STATE', 'Cannot change chapter beats after draft generation has started');
         }
-        const beats = normalizeBeats(beatInputs);
+        const beats = normalizeBeats(beatInputs, current.mode);
         if (current.mode === 'batch_rewrite' && beats.length !== current.children.length) {
             throw createStoreError('INVALID_INPUT', 'A rewrite batch cannot change its target chapter count');
         }

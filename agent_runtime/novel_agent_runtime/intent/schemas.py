@@ -88,6 +88,8 @@ class FailedRunRef(BaseModel):
     runId: str
     failureRevision: int = Field(ge=1)
     retryable: bool = False
+    canFinalizeCompleted: bool = False
+    requiresUnconfirmedRetry: bool = False
     code: str | None = None
 
 
@@ -117,20 +119,40 @@ class SemanticProposal(BaseModel):
     inputRequest: SemanticUserInputRequest | None = None
 
 
+class IntentSkillHint(BaseModel):
+    skillId: str = Field(min_length=1)
+    requestedRevisionId: str | None = None
+
+
 class IntentEntryHint(BaseModel):
     actionId: str
-    kind: Literal["operation", "skill.use", "skill.none", "skill.manager", "skill.author", "novel.bootstrap"] = "operation"
+    kind: Literal["operation", "skill.use", "skill.pack.use", "skill.none", "skill.manager", "skill.author", "novel.bootstrap"] = "operation"
     operationIds: list[str] = Field(default_factory=list)
     deliverable: IntentDeliverable | None = None
     suggestedToolchainId: str | None = None
     skillId: str | None = None
     requestedRevisionId: str | None = None
+    skills: list[IntentSkillHint] = Field(default_factory=list)
+    packId: str | None = None
+    requestedPackRevisionId: str | None = None
+    auxiliaryMode: Literal['default', 'none', 'member'] = 'default'
+    auxiliaryMemberKey: str | None = None
+    publicationScope: Literal['user', 'novel'] | None = None
 
     @model_validator(mode="after")
     def validate_skill_hint(self) -> "IntentEntryHint":
-        if self.kind == "skill.use" and not self.skillId:
-            raise ValueError("skill.use entry hints require skillId")
+        if self.kind == "skill.use" and not (self.skillId or self.skills):
+            raise ValueError("skill.use entry hints require skillId or skills")
+        if self.skills and (self.kind != 'skill.use' or self.skillId or self.requestedRevisionId or self.packId):
+            raise ValueError('Multiple Skill selection must not mix with a single Skill or pack identity')
+        if len({skill.skillId for skill in self.skills}) != len(self.skills):
+            raise ValueError('Each selected Skill must occur only once')
+        if self.kind == 'skill.pack.use' and (not self.packId or self.skillId or self.skills or (self.auxiliaryMode == 'member' and not self.auxiliaryMemberKey)):
+            raise ValueError('Pack selection requires packId and must not include a single Skill')
         return self
+
+    def selected_skills(self) -> list[IntentSkillHint]:
+        return self.skills or ([IntentSkillHint(skillId=self.skillId, requestedRevisionId=self.requestedRevisionId)] if self.skillId else [])
 
 
 class IntentRequest(BaseModel):
@@ -179,7 +201,7 @@ class IntentOperation(BaseModel):
 class RetryFailedRunAction(BaseModel):
     failedRunId: str
     expectedFailureRevision: int = Field(ge=1)
-    mode: Literal["failed_node"] = "failed_node"
+    mode: Literal["failed_node", "use_completed_results", "retry_unconfirmed_units"] = "failed_node"
 
 
 class IntentSkillRequest(BaseModel):
@@ -201,7 +223,9 @@ class IntentDecision(BaseModel):
     confidence: float = Field(default=0.5, ge=0, le=1)
     reasonCodes: list[str] = Field(default_factory=list)
     responseContent: str
+    publicationScope: Literal['user', 'novel'] | None = None
     explorationPerformed: bool = False
     recovery: RetryFailedRunAction | None = None
-    requestedSkills: list[IntentSkillRequest] = Field(default_factory=list, max_length=2)
+    requestedSkills: list[IntentSkillRequest] = Field(default_factory=list)
+    requestedSkillPack: dict[str, Any] | None = None
     disabledSkillsForTurn: bool = False

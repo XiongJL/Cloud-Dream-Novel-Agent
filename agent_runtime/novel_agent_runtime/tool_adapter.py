@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from fastmcp import Client, FastMCP
+from fastmcp import Client
 from fastmcp.tools import Tool, ToolResult
 from mcp.types import ToolAnnotations
 from pydantic import PrivateAttr
 
 from .automation import AutomationInvokeError
-from .tool_manifest import AGENT_TOOL_MANIFEST, AgentToolDefinition
+from .tool_manifest import AGENT_TOOL_MANIFEST, AGENT_TOOL_BY_NAME, AgentToolDefinition
+from novel_mcp.server import create_registered_server
 
 
 class AutomationInvoker(Protocol):
@@ -66,17 +67,12 @@ class HttpAgentToolAdapter:
         if method not in self._allowed_tools:
             raise AutomationInvokeError("TOOL_NOT_ALLOWED", f"Tool is not registered for Agent use: {method}")
         normalized_params = normalize_tool_arguments(params or {})
-        try:
-            return await self.upstream.invoke(
-                method, normalized_params, origin,
-                request_id=request_id,
-                parent_request_id=parent_request_id,
-                deadline_at=deadline_at,
-            )
-        except TypeError as error:
-            if "unexpected keyword argument" not in str(error):
-                raise
-            return await self.upstream.invoke(method, normalized_params, origin, request_id=request_id)
+        return await self.upstream.invoke(
+            method, normalized_params, origin,
+            request_id=request_id,
+            parent_request_id=parent_request_id,
+            deadline_at=deadline_at,
+        )
 
     async def cancel(self, request_id: str) -> bool:
         return await self.upstream.cancel(request_id)
@@ -138,21 +134,14 @@ class _AutomationProxyTool(Tool):
                 "message": "FastMCP invocation context is missing",
             })
         try:
-            try:
-                data = await self._upstream.invoke(
-                    self.name,
-                    arguments,
-                    context.origin,
-                    request_id=context.request_id,
-                    parent_request_id=context.parent_request_id,
-                    deadline_at=context.deadline_at,
-                )
-            except TypeError as error:
-                if "unexpected keyword argument" not in str(error):
-                    raise
-                data = await self._upstream.invoke(
-                    self.name, arguments, context.origin, request_id=context.request_id,
-                )
+            data = await self._upstream.invoke(
+                self.name,
+                arguments,
+                context.origin,
+                request_id=context.request_id,
+                parent_request_id=context.parent_request_id,
+                deadline_at=context.deadline_at,
+            )
             return self.convert_result({"ok": True, "data": data})
         except AutomationInvokeError as error:
             return self.convert_result({
@@ -176,13 +165,12 @@ class FastMcpAgentToolAdapter:
     def __init__(self, upstream: AutomationInvoker, timeout_seconds: float = 90) -> None:
         self.upstream = upstream
         self.timeout_seconds = timeout_seconds
-        self.server = FastMCP(
-            "CloudDream Novel Agent Tools",
+        self.server = create_registered_server(
+            "internal_agent",
+            lambda definition: _AutomationProxyTool(AGENT_TOOL_BY_NAME[definition["name"]], upstream),
+            name="CloudDream Novel Agent Tools",
             instructions="Internal Agent tools. Side-effect tools require an approved plan before invocation.",
-            strict_input_validation=True,
         )
-        for definition in AGENT_TOOL_MANIFEST:
-            self.server.add_tool(_AutomationProxyTool(definition, upstream))
         self._allowed_tools = frozenset(definition.name for definition in AGENT_TOOL_MANIFEST)
         self._tool_timeouts = {definition.name: definition.timeout_seconds for definition in AGENT_TOOL_MANIFEST}
 

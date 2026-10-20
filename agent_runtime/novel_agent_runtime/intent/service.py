@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..roles import ALLOWED_ROLES
@@ -254,11 +255,11 @@ class IntentService:
         requested_skills: list[IntentSkillRequest] = []
         disabled_skills_for_turn = False
         if request.entryHint and request.entryHint.kind == "skill.use":
-            requested_skills.append(IntentSkillRequest(
-                skillId=str(request.entryHint.skillId),
-                requestedRevisionId=request.entryHint.requestedRevisionId,
+            requested_skills.extend(IntentSkillRequest(
+                skillId=item.skillId,
+                requestedRevisionId=item.requestedRevisionId,
                 selectionSource="shortcut" if request.source == "shortcut" else "explicit",
-            ))
+            ) for item in request.entryHint.selected_skills())
             reasons.append("EXPLICIT_SKILL_SELECTED")
         elif request.entryHint and request.entryHint.kind == "skill.none":
             disabled_skills_for_turn = True
@@ -271,8 +272,12 @@ class IntentService:
                 requestedEffect="none",
                 needsClarification=False,
                 confidence=0.99,
-                reasonCodes=[*reasons, "RETRY_FAILED_RUN"],
+                reasonCodes=[*reasons, "USE_COMPLETED_RESULTS" if recovery.mode == "use_completed_results" else "RETRY_FAILED_RUN"],
                 responseContent=(
+                    "将仅用原任务已完成且核验通过的分析收尾，跳过剩余分析，继续汇总与交付，并标注实际覆盖范围。"
+                    if recovery.mode == "use_completed_results" and request.locale.startswith("zh") else
+                    "I will finalize the original task using only its completed analyses and report the actual coverage."
+                    if recovery.mode == "use_completed_results" else
                     "将从上次失败的步骤继续，不会重新生成计划。"
                     if request.locale.startswith("zh")
                     else "I will resume from the failed step without creating a new plan."
@@ -280,6 +285,22 @@ class IntentService:
                 explorationPerformed=exploration_performed,
                 recovery=recovery,
             )
+        if self.is_completed_results_request(request.message):
+            blocked = request.approvalMode == "chat_only" or request.conversationState.hasPendingApproval or request.conversationState.pendingClarification is not None
+            return IntentDecision(interaction="conversation", route="respond", requestedEffect="none", needsClarification=False,
+                confidence=0.99, reasonCodes=[*reasons, "COMPLETED_RESULTS_BLOCKED" if blocked else "COMPLETED_RESULTS_UNAVAILABLE"],
+                responseContent=(
+                    "当前为只讨论不执行模式，或还有待处理的审批/澄清。切换执行模式并处理待办后，可在原失败任务使用已完成结果收尾。"
+                    if blocked and request.locale.startswith("zh") else
+                    "Execution is blocked by chat-only mode or a pending approval/clarification. Resolve it before finalizing the original failed task."
+                    if blocked else
+                    "当前没有可用的失败分析任务及已完成结果。请打开对应失败任务；这条指令不会重新生成整本分析计划。"
+                    if request.locale.startswith("zh") else "There is no failed analysis with eligible completed results. Open the original failed task; I will not create a new full analysis plan."))
+        if self.requires_unconfirmed_resume_choice(request):
+            return IntentDecision(interaction="conversation", route="respond", requestedEffect="none", needsClarification=False,
+                confidence=0.99, reasonCodes=[*reasons, "UNCONFIRMED_REQUEST_REQUIRES_EXPLICIT_RETRY"],
+                responseContent=("该任务有无法找回结果的未确认请求。请在原任务选择“重新请求未确认分片”（可能重复计费），或仅用已完成结果收尾；不会自动重发或另建分析计划。"
+                    if request.locale.startswith("zh") else "The request result could not be recovered. Choose Retry unconfirmed units (possible duplicate billing) in the original task, or finalize completed results. I will not automatically resend or replan."))
         operation_ids: list[str] = []
         if request.entryHint:
             operation_ids.extend(request.entryHint.operationIds)
@@ -304,6 +325,12 @@ class IntentService:
                     continue
                 operation_ids.append(operation_id)
 
+        if (request.requestedTarget and request.requestedTarget.selector in {"new_chapter_ordinal", "new_chapter_ordinal_conflict"}
+                and effect_ceiling not in {"read_only", "none"}):
+            operation_ids = [item for item in operation_ids if item not in {"chapter.continuation", "chapter.sequence_continuation"}]
+            if "chapter.create" not in operation_ids:
+                operation_ids.append("chapter.create")
+            reasons.append("NEW_CHAPTER_ORDINAL_RESOLVED")
         operation_ids = self._normalize_operation_ids(request.message, operation_ids, reasons)
 
         definitions: list[IntentOperationDefinition] = []
@@ -391,13 +418,16 @@ class IntentService:
         elif has_unresolved_explicit_chapter_target:
             route = "respond"
             needs_clarification = False
-            response = (
+            target_error = next((operation.target for operation in operations if operation.target.id is None
+                and operation.target.selector in {"novel_chapter_ordinal_not_found", "new_chapter_ordinal_conflict"}), None)
+            response = (target_error.label if request.locale.startswith("zh") else
+                "The chapter catalog is available, but the requested chapter is missing or conflicts with the creation position.") if target_error and target_error.label else (
                 "我识别到了你指定的章节，但当前无法读取完整章节目录来确定唯一目标。请刷新项目后重试。"
                 if request.locale.startswith("zh")
                 else "I recognized the chapter reference, but the complete chapter catalog is currently unavailable. Refresh the project and try again."
             )
             reasons.append("CHAPTER_TARGET_UNRESOLVED")
-            reasons.append("PROJECT_CATALOG_UNAVAILABLE")
+            reasons.append("CHAPTER_TARGET_NOT_FOUND" if target_error else "PROJECT_CATALOG_UNAVAILABLE")
         elif is_light_conversation(request.message) and not operations:
             route = "respond"
             needs_clarification = False
@@ -458,6 +488,10 @@ class IntentService:
             responseContent=response.strip(),
             explorationPerformed=exploration_performed,
             requestedSkills=requested_skills,
+            publicationScope=request.entryHint.publicationScope if request.entryHint else None,
+            requestedSkillPack=({k: v for k, v in request.entryHint.model_dump().items()
+                if k in {'packId', 'requestedPackRevisionId', 'auxiliaryMode', 'auxiliaryMemberKey'}}
+                if request.entryHint and request.entryHint.kind == 'skill.pack.use' else None),
             disabledSkillsForTurn=disabled_skills_for_turn,
         )
 
@@ -552,18 +586,36 @@ class IntentService:
         return None
 
     @staticmethod
+    def is_completed_results_request(message: str) -> bool:
+        text = message.strip().lower()
+        if (re.search(r"(?:不要|不能|别|不想)(?:仅|只|就)(?:用|以|基于)", text)
+                or any(term in text for term in ("don't use only", "do not use only", "do not finalize"))):
+            return False
+        return bool(re.search(r"(?:仅|只|就)(?:用|以|基于)(?:当前|已有|现有|已完成|已经完成)(?:的)?(?:分析)?(?:结果|分析)|仅用已完成结果收尾|finalize (?:with|using) (?:only )?completed results", text))
+
+    @staticmethod
+    def requires_unconfirmed_resume_choice(request: IntentRequest) -> bool:
+        failed = request.conversationState.latestFailedRun
+        return bool(failed and failed.requiresUnconfirmedRetry
+            and request.message.strip().lower().rstrip("。.!！?？").strip() in _RETRY_FAILED_RUN_UTTERANCES)
+
+    @staticmethod
     def retry_failed_run_action(request: IntentRequest) -> RetryFailedRunAction | None:
         state = request.conversationState
         failed = state.latestFailedRun
         if (
             failed is None
-            or not failed.retryable
             or state.hasPendingApproval
             or state.pendingClarification is not None
             or request.approvalMode == "chat_only"
         ):
             return None
         normalized = request.message.strip().lower().rstrip("。.!！?？").strip()
+        if IntentService.is_completed_results_request(request.message):
+            return RetryFailedRunAction(failedRunId=failed.runId, expectedFailureRevision=failed.failureRevision,
+                                       mode="use_completed_results") if failed.canFinalizeCompleted else None
+        if not failed.retryable:
+            return None
         if normalized not in _RETRY_FAILED_RUN_UTTERANCES:
             return None
         return RetryFailedRunAction(
@@ -589,6 +641,7 @@ class IntentService:
                 kind="chapter_scope" if definition.targetKind == "chapter_scope" else "chapter",
                 source="explicit_id",
                 selector=requested.selector,
+                label=requested.label,
             )
         if (
             definition.id == "chapter.create"
